@@ -51,7 +51,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
           cl.exe /nologo /Iinclude examples\c\minimal_tick_loop.c /link /LIBPATH:target\release renhdrum.dll.lib /out:minimal_tick_loop.exe
           copy target\release\renhdrum.dll .
-          minimal_tick_loop.exe
+          .\minimal_tick_loop.exe
