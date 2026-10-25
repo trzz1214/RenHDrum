@@ -1,0 +1,191 @@
+From f6077e33285cc607e34fe99e05027bf30ee1f79c Mon Sep 17 00:00:00 2001
+From: Three-Dola <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 01:20:53 +0700
+Subject: [PATCH 3/7] input: DualSense haptics audio - init SDL audio, require
+ 4 channels, retry, log
+
+---
+ src/input_common/drivers/sdl_driver.cpp | 110 +++++++++++++++++-------
+ 1 file changed, 80 insertions(+), 30 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 4e6932b7fe..24e3862fbe 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -5,7 +5,9 @@
+ 
+ #include <array>
+ #include <chrono>
++#include <cstring>
+ #include <numbers>
++#include <string>
+ #include "common/logging.h"
+ #include "common/math_util.h"
+ #include "common/param_package.h"
+@@ -227,7 +229,7 @@ public:
+     }
+ 
+     bool HasHDRumble() const {
+-        if (renhdrum_engine || dualsense_dsp) {
++        if (renhdrum_engine || (dualsense_dsp && ds_audio_stream)) {
+             return true;
+         }
+ 
+@@ -423,6 +425,15 @@ public:
+         }
+     }
+ 
++    void MaintainDualSenseAudio(int64_t now_us) {
++        if (!dualsense_dsp || ds_audio_stream || ds_audio_attempts >= DS_AUDIO_MAX_ATTEMPTS ||
++            now_us < ds_audio_next_us) {
++            return;
++        }
++        ds_audio_next_us = now_us + 2'000'000;
++        TryOpenDualSenseAudio();
++    }
++
+ private:
+     void InitRenHDrum() {
+         if (!sdl_joystick) {
+@@ -454,49 +465,75 @@ private:
+             dualsense_dsp = renhdrum_dualsense_dsp_create(100, true);
+             if (dualsense_dsp) {
+                 LOG_INFO(Input, "Initialized RenHDrum DualSense DSP for controller {:04X}:{:04X}", vid, pid);
+-                InitDualSenseAudio();
++                TryOpenDualSenseAudio();
+             }
+         }
+     }
+ 
+-    void InitDualSenseAudio() {
+-        if (!dualsense_dsp || !sdl_joystick) {
++    void TryOpenDualSenseAudio() {
++        if (!dualsense_dsp || !sdl_joystick || ds_audio_stream) {
+             return;
+         }
+-        const bool is_wireless =
+-            (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS);
+-        if (is_wireless) {
++        ++ds_audio_attempts;
++        if (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS) {
++            ds_audio_attempts = DS_AUDIO_MAX_ATTEMPTS;
++            LOG_INFO(Input, "DualSense on Bluetooth: haptics audio unavailable, using standard rumble");
+             return;
+         }
++        if (!SDL_WasInit(SDL_INIT_AUDIO)) {
++            if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
++                LOG_WARNING(Input, "DualSense haptics: SDL audio init failed: {}", SDL_GetError());
++                return;
++            }
++            ds_audio_inited = true;
++        }
+ 
+         int dev_count = 0;
+         SDL_AudioDeviceID* devices = SDL_GetAudioPlaybackDevices(&dev_count);
+         SDL_AudioDeviceID matched_dev = 0;
+-        if (devices && dev_count > 0) {
+-            for (int i = 0; i < dev_count; ++i) {
+-                const char* name = SDL_GetAudioDeviceName(devices[i]);
+-                if (name && (std::strstr(name, "Wireless Controller") != nullptr ||
+-                             std::strstr(name, "DualSense") != nullptr)) {
+-                    matched_dev = devices[i];
+-                    break;
+-                }
+-            }
+-            SDL_free(devices);
+-        }
+-
+-        if (matched_dev != 0) {
+-            const SDL_AudioSpec spec{
+-                .format = SDL_AUDIO_F32,
+-                .channels = 4,
+-                .freq = 48000,
+-            };
+-            ds_audio_stream =
+-                SDL_OpenAudioDeviceStream(matched_dev, &spec, &SDLJoystick::DualSenseAudioCallback, this);
+-            if (ds_audio_stream) {
+-                SDL_ResumeAudioStreamDevice(ds_audio_stream);
+-                LOG_INFO(Input, "DualSense 4-channel audio stream opened successfully on device {}", matched_dev);
++        std::string seen;
++        for (int i = 0; devices && i < dev_count; ++i) {
++            const char* name = SDL_GetAudioDeviceName(devices[i]);
++            SDL_AudioSpec dev_spec{};
++            const int channels =
++                SDL_GetAudioDeviceFormat(devices[i], &dev_spec, nullptr) ? dev_spec.channels : 0;
++            seen += std::string("\"") + (name ? name : "?") + "\" (" + std::to_string(channels) + " ch); ";
++            if (name && channels >= 4 &&
++                (std::strstr(name, "DualSense") != nullptr ||
++                 std::strstr(name, "Wireless Controller") != nullptr)) {
++                matched_dev = devices[i];
++                break;
+             }
+         }
++        SDL_free(devices);
++
++        if (matched_dev == 0) {
++            LOG_WARNING(Input, "DualSense haptics: no 4-channel DualSense audio device yet (attempt {}): {}",
++                        ds_audio_attempts, seen);
++            return;
++        }
++
++        const SDL_AudioSpec spec{
++            .format = SDL_AUDIO_F32,
++            .channels = 4,
++            .freq = 48000,
++        };
++        ds_audio_stream =
++            SDL_OpenAudioDeviceStream(matched_dev, &spec, &SDLJoystick::DualSenseAudioCallback, this);
++        if (!ds_audio_stream) {
++            LOG_WARNING(Input, "DualSense haptics: could not open audio device: {}", SDL_GetError());
++            return;
++        }
++        SDL_ResumeAudioStreamDevice(ds_audio_stream);
++
++        // Stop SDL's HID rumble once so the pad plays the audio haptics (Ryuhdr: _hapticsStopSdlRumble).
++        if (sdl_controller) {
++            SDL_RumbleGamepad(sdl_controller.get(), 0, 0, 0);
++        } else {
++            SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
++        }
++        LOG_INFO(Input, "DualSense haptics audio opened on \"{}\" (attempt {})",
++                 SDL_GetAudioDeviceName(matched_dev), ds_audio_attempts);
+     }
+ 
+     static void DualSenseAudioCallback(void* userdata, SDL_AudioStream* stream, int additional_amount,
+@@ -533,6 +570,12 @@ private:
+             SDL_DestroyAudioStream(ds_audio_stream);
+             ds_audio_stream = nullptr;
+         }
++        if (ds_audio_inited) {
++            SDL_QuitSubSystem(SDL_INIT_AUDIO);
++            ds_audio_inited = false;
++        }
++        ds_audio_attempts = 0;
++        ds_audio_next_us = 0;
+         if (renhdrum_engine) {
+             if (sdl_joystick) {
+                 uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
+@@ -556,6 +599,10 @@ private:
+     RenHdcEngine* renhdrum_engine{nullptr};
+     RenHdcDualSenseDsp* dualsense_dsp{nullptr};
+     SDL_AudioStream* ds_audio_stream{nullptr};
++    static constexpr int DS_AUDIO_MAX_ATTEMPTS = 10;
++    int ds_audio_attempts{0};
++    int64_t ds_audio_next_us{0};
++    bool ds_audio_inited{false};
+ 
+     u64 last_motion_update{};
+     std::size_t motion_error_count{};
+@@ -745,6 +792,9 @@ void SDLDriver::PumpEvents() const {
+                 if (joystick && joystick->GetRenHDrumEngine()) {
+                     joystick->TickRenHDrum(now_us);
+                 }
++                if (joystick && joystick->GetDualSenseDsp()) {
++                    joystick->MaintainDualSenseAudio(now_us);
++                }
+             }
+         }
+     }
+-- 
+2.55.0.windows.5
+

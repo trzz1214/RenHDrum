@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, emulator, or application, please cite it as below."
+title: "RenHDrum: Real-Time Nintendo Switch HD Rumble and DualSense Audio Haptics Engine"
+authors:
+  - name: "Three-Dola"
+version: "0.1.0"
+date-released: "2026-10-25"
+license: "MIT OR Apache-2.0"
+repository-code: "https://github.com/trzz1214/RenHDrum"
+url: "https://ryuhdr.threedola.workers.dev"
+keywords:
+  - "hd-rumble"
+  - "dualsense"
+  - "haptics"
+  - "dsp"
+  - "sdl3"
+  - "emulation"

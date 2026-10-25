@@ -1,0 +1,486 @@
+--- a/src/joystick/hidapi/SDL_hidapi_rumble.c
++++ b/src/joystick/hidapi/SDL_hidapi_rumble.c
+@@ -55,6 +55,15 @@ static
+ SDL_Mutex *SDL_HIDAPI_rumble_lock;
+ static SDL_HIDAPI_RumbleContext rumble_context SDL_GUARDED_BY(SDL_HIDAPI_rumble_lock);
+ 
++// HD Rumble (eden-hdr, port of Ryuhdr's SDL2 patch): requests queued or being handled, including the pause after a write.
++// rumble_pending of a device is already 0 during that pause, but a packet queued then still waits for it.
++static SDL_AtomicInt rumble_busy;
++
++bool SDL_HIDAPI_RumbleIsIdle(void)
++{
++    return SDL_GetAtomicInt(&rumble_busy) == 0;
++}
++
+ static int SDLCALL SDL_HIDAPI_RumbleThread(void *data)
+ {
+     SDL_HIDAPI_RumbleContext *ctx = (SDL_HIDAPI_RumbleContext *)data;
+@@ -77,6 +86,9 @@ static int SDLCALL SDL_HIDAPI_RumbleThread(void *data)
+         SDL_UnlockMutex(SDL_HIDAPI_rumble_lock);
+ 
+         if (request) {
++            const int pause_setting = SDL_GetAtomicInt(&request->device->hd_pause_ms);
++            const Uint32 pause_ms = pause_setting > 0 ? (Uint32)pause_setting : 10;
++
+             SDL_LockMutex(request->device->dev_lock);
+             if (request->device->dev) {
+ #ifdef DEBUG_RUMBLE
+@@ -92,7 +104,8 @@ static int SDLCALL SDL_HIDAPI_RumbleThread(void *data)
+             SDL_free(request);
+ 
+             // Make sure we're not starving report reads when there's lots of rumble
+-            SDL_Delay(10);
++            SDL_Delay(pause_ms);
++            (void)SDL_AtomicDecRef(&rumble_busy);
+         }
+     }
+     return 0;
+@@ -124,6 +137,7 @@ static void SDL_HIDAPI_StopRumbleThread(SDL_HIDAPI_RumbleContext *ctx)
+             request->callback(request->userdata);
+         }
+         (void)SDL_AtomicDecRef(&request->device->rumble_pending);
++        (void)SDL_AtomicDecRef(&rumble_busy);
+         SDL_free(request);
+     }
+     SDL_UnlockMutex(SDL_HIDAPI_rumble_lock);
+@@ -226,6 +240,7 @@ int SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(SDL_HIDAPI_Device *device, const
+     request->userdata = userdata;
+ 
+     SDL_AtomicIncRef(&device->rumble_pending);
++    SDL_AtomicIncRef(&rumble_busy);
+ 
+     if (ctx->requests_head) {
+         ctx->requests_head->prev = request;
+--- a/src/joystick/hidapi/SDL_hidapi_rumble.h
++++ b/src/joystick/hidapi/SDL_hidapi_rumble.h
+@@ -39,4 +39,7 @@ void SDL_HIDAPI_UnlockRumble(void) SDL_RELEASE(SDL_HIDAPI_rumble_lock);
+ int SDL_HIDAPI_SendRumble(SDL_HIDAPI_Device *device, const Uint8 *data, int size);
+ void SDL_HIDAPI_QuitRumble(void);
+ 
++// HD Rumble (eden-hdr): no request queued or being handled by the rumble thread (pause after a write included)
++bool SDL_HIDAPI_RumbleIsIdle(void);
++
+ #endif // SDL_JOYSTICK_HIDAPI
+--- a/src/joystick/hidapi/SDL_hidapi_switch.c
++++ b/src/joystick/hidapi/SDL_hidapi_switch.c
+@@ -282,6 +282,19 @@ typedef enum
+     SWITCH_ENHANCED_REPORT_HINT_AUTO
+ } HIDAPI_Switch_EnhancedReportHint;
+ 
++// HD Rumble merge state (eden-hdr, port of Ryuhdr's SDL2 patch), used by no-queue and Bluetooth after input.
++// Only touched with the joysticks locked (SendJoystickEffect, UpdateDevice, the exports).
++typedef struct
++{
++    bool dirty;           // acc holds data that was not written yet
++    Uint8 acc[8];         // peak of everything received since the last real write
++    Uint8 latest[8];      // newest packet from the game
++    Uint8 sent[8];        // last packet written
++    Uint64 last_report_us;
++    Uint64 last_send_us;
++    Uint32 nq_gap_us;     // no-queue: minimum gap between writes
++} HDSyncState;
++
+ typedef struct
+ {
+     SDL_HIDAPI_Device *device;
+@@ -307,6 +320,8 @@ typedef struct
+     bool m_bRumblePending;
+     bool m_bRumbleZeroPending;
+     Uint32 m_unRumblePending;
++    bool m_bHDRumbleMode;
++    HDSyncState m_HDSync;
+     bool m_bSensorsSupported;
+     bool m_bReportSensors;
+     bool m_bHasSensorData;
+@@ -1766,6 +1781,9 @@ static bool HIDAPI_DriverSwitch_RumbleJoystick(SDL_HIDAPI_Device *device, SDL_Jo
+         }
+     }
+ 
++    ctx->m_bHDRumbleMode = false;
++    ctx->m_HDSync.dirty = false;
++
+     if (ctx->m_bRumblePending) {
+         if (!HIDAPI_DriverSwitch_SendPendingRumble(ctx)) {
+             return false;
+@@ -1851,6 +1869,233 @@ static bool HDRumble_IsClickPacket(const Uint8 *packet8)
+     return !((packet8[0] & 0x03) == 0 && (packet8[3] & 0xC0) == 0x40);
+ }
+ 
++/* ---- HD Rumble no-queue and Bluetooth after input (eden-hdr, port of Ryuhdr's SDL2 patch) ----
++   SDL does not read input while a rumble write is queued or running (ReadInput, rumble_pending). Both modes therefore write a
++   packet only while the rumble thread is idle (nothing queued, not in its pause after a write), so it never waits in the queue.
++   Packets that arrive meanwhile are peak-merged, so a short pulse and the stop after it are never lost. */
++
++// Bluetooth after input: never write more often than this (safety floor, the caller paces with its Bluetooth level)
++#define HD_RUMBLE_BT_WRITE_MS 20
++// Bluetooth after input: no input report for this long = the link is in trouble, only a pending stop is written
++#define HD_SYNC_BT_STOP_FALLBACK_US 150000
++
++// Amplitude thresholds (0..65535) of the 101 amplitude codes, same table as the RenHDrum / Ryuhdr encoder (dekuNukem)
++static const Uint16 HDSync_AmpThresholds[101] = {
++    0, 514, 775, 921, 1096, 1303, 1550, 1843, 2192, 2606, 3100, 3686,
++    4383, 5213, 6199, 7372, 7698, 8039, 8395, 8767, 9155, 9560, 9984, 10426,
++    10887, 11369, 11873, 12398, 12947, 13520, 14119, 14744, 15067, 15397, 15734, 16079,
++    16431, 16790, 17158, 17534, 17918, 18310, 18711, 19121, 19540, 19967, 20405, 20851,
++    21308, 21775, 22251, 22739, 23236, 23745, 24265, 24797, 25340, 25894, 26462, 27041,
++    27633, 28238, 28856, 29488, 30134, 30794, 31468, 32157, 32861, 33581, 34316, 35068,
++    35836, 36620, 37422, 38242, 39079, 39935, 40809, 41703, 42616, 43549, 44503, 45477,
++    46473, 47491, 48531, 49593, 50679, 51789, 52923, 54082, 55266, 56476, 57713, 58977,
++    60268, 61588, 62936, 64315, 65535,
++};
++
++static const Uint8 HDSync_Neutral[8] = { 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40 };
++
++static Uint64 HDSync_NowUs(void)
++{
++    return SDL_GetTicksNS() / 1000;
++}
++
++static int HDSync_AmpHigh(const Uint8 *side)
++{
++    const int code = side[1] >> 1;
++    return code > 100 ? 100 : code;
++}
++
++static int HDSync_AmpLow(const Uint8 *side)
++{
++    const int code = side[3] < 0x40 ? 0 : (((side[3] - 0x40) << 1) | (side[2] >> 7));
++    return code > 100 ? 100 : code;
++}
++
++static Uint32 HDSync_SideSum(const Uint8 *side)
++{
++    return (Uint32)HDSync_AmpThresholds[HDSync_AmpHigh(side)] + (Uint32)HDSync_AmpThresholds[HDSync_AmpLow(side)];
++}
++
++static bool HDSync_IsClick8(const Uint8 *rumble8)
++{
++    return HDRumble_IsClickPacket(&rumble8[0]) || HDRumble_IsClickPacket(&rumble8[4]);
++}
++
++static bool HDSync_IsNeutralSide(const Uint8 *side)
++{
++    return (side[1] & 0xFE) == 0 && side[3] == 0x40 && (side[2] & 0x80) == 0;
++}
++
++static bool HDSync_IsNeutral8(const Uint8 *rumble8)
++{
++    return HDSync_IsNeutralSide(&rumble8[0]) && HDSync_IsNeutralSide(&rumble8[4]);
++}
++
++/* Peak of two sides: the stronger amplitude of each band, with the frequency of the sample it came from. If the two peaks
++   together would be stronger than full scale and stronger than both sources, take the stronger source as it was (motor protection). */
++static void HDSync_MergeSide(Uint8 *acc, const Uint8 *in)
++{
++    Uint8 merged[4];
++    Uint32 sum_merged, sum_acc, sum_in;
++
++    SDL_memcpy(merged, acc, 4);
++    if (HDSync_AmpHigh(in) > HDSync_AmpHigh(acc)) {
++        merged[0] = in[0];
++        merged[1] = in[1];
++    }
++    if (HDSync_AmpLow(in) > HDSync_AmpLow(acc)) {
++        merged[2] = in[2];
++        merged[3] = in[3];
++    }
++
++    sum_merged = HDSync_SideSum(merged);
++    sum_acc = HDSync_SideSum(acc);
++    sum_in = HDSync_SideSum(in);
++    if (sum_merged > 65535 && sum_merged > sum_acc && sum_merged > sum_in) {
++        SDL_memcpy(merged, sum_acc >= sum_in ? acc : in, 4);
++    }
++    SDL_memcpy(acc, merged, 4);
++}
++
++static void HDSync_Reset(HDSyncState *sync)
++{
++    SDL_zerop(sync);
++    SDL_memcpy(sync->acc, HDSync_Neutral, 8);
++    SDL_memcpy(sync->latest, HDSync_Neutral, 8);
++    SDL_memcpy(sync->sent, HDSync_Neutral, 8);
++}
++
++// A packet from the game: nothing is written here, it is merged and written when the rumble thread is idle
++static void HDSync_Receive(SDL_DriverSwitch_Context *ctx, const Uint8 *rumble)
++{
++    HDSyncState *sync = &ctx->m_HDSync;
++
++    SDL_memcpy(sync->latest, rumble, 8);
++
++    if (HDSync_IsClick8(rumble)) {
++        // A click packet cannot be peak-merged by bytes: it replaces whatever waits
++        SDL_memcpy(sync->acc, rumble, 8);
++        sync->dirty = true;
++    } else if (sync->dirty) {
++        if (!HDSync_IsClick8(sync->acc)) {
++            HDSync_MergeSide(&sync->acc[0], &rumble[0]);
++            HDSync_MergeSide(&sync->acc[4], &rumble[4]);
++        }
++        // else: a click waits to be written, this packet is only kept in "latest" and goes out at the next chance
++    } else if (SDL_memcmp(rumble, sync->sent, 8) != 0) {
++        SDL_memcpy(sync->acc, rumble, 8);
++        sync->dirty = true;
++    }
++}
++
++// Writes acc (one request to the rumble thread) and moves the window on. The caller checked that the rumble thread is idle.
++static void HDSync_Write(SDL_DriverSwitch_Context *ctx, Uint64 now_us)
++{
++    HDSyncState *sync = &ctx->m_HDSync;
++
++    SDL_memcpy(&ctx->m_RumblePacket.rumbleData[0], sync->acc, 8);
++    WriteRumble(ctx);
++    SDL_memcpy(&ctx->m_RumblePacket.rumbleData[0], sync->latest, 8);
++
++    sync->last_send_us = now_us;
++    SDL_memcpy(sync->sent, sync->acc, 8);
++
++    // The next window has to end on the game's current state; a stop right after a peak goes out at the next chance
++    SDL_memcpy(sync->acc, sync->latest, 8);
++    sync->dirty = SDL_memcmp(sync->sent, sync->latest, 8) != 0;
++}
++
++static bool HDSync_RumbleIdle(SDL_HIDAPI_Device *device)
++{
++    return SDL_GetAtomicInt(&device->rumble_pending) == 0 && SDL_HIDAPI_RumbleIsIdle();
++}
++
++// No-queue (Ryuhdr card 1 on USB, card B3 on Bluetooth): written from the clock as soon as the gap has passed and the rumble thread is idle
++static void HDNoQueue_TryWrite(SDL_DriverSwitch_Context *ctx, SDL_HIDAPI_Device *device, bool allow_refresh, Uint64 now)
++{
++    HDSyncState *sync = &ctx->m_HDSync;
++    const Uint64 now_us = HDSync_NowUs();
++
++    if (allow_refresh && !sync->dirty && ctx->m_bRumbleActive &&
++        now >= ctx->m_ulRumbleSent + (device->is_bluetooth ? HD_RUMBLE_BT_REFRESH_MS : RUMBLE_REFRESH_FREQUENCY_MS)) {
++        // Keep a running vibration alive, like the clock based path
++        SDL_memcpy(sync->acc, sync->latest, 8);
++        sync->dirty = true;
++    }
++
++    if (!sync->dirty || (sync->last_send_us != 0 && now_us - sync->last_send_us < sync->nq_gap_us) || !HDSync_RumbleIdle(device)) {
++        return;
++    }
++    HDSync_Write(ctx, now_us);
++}
++
++// Bluetooth after input (Ryuhdr card B1): written right after this update read at least one input report, only while the rumble thread is idle
++static void HDBtAfterInput_Update(SDL_DriverSwitch_Context *ctx, SDL_HIDAPI_Device *device, bool got_report, Uint64 now)
++{
++    HDSyncState *sync = &ctx->m_HDSync;
++    const Uint64 now_us = HDSync_NowUs();
++
++    if (got_report) {
++        sync->last_report_us = now_us;
++    }
++
++    if (!sync->dirty && ctx->m_bRumbleActive && now >= ctx->m_ulRumbleSent + HD_RUMBLE_BT_REFRESH_MS) {
++        // Keep a running vibration alive, like the clock based Bluetooth path
++        SDL_memcpy(sync->acc, sync->latest, 8);
++        sync->dirty = true;
++    }
++
++    if (!sync->dirty || (sync->last_send_us != 0 && now_us - sync->last_send_us < (Uint64)HD_RUMBLE_BT_WRITE_MS * 1000)) {
++        return;
++    }
++    if (!got_report &&
++        !(HDSync_IsNeutral8(sync->acc) && !HDSync_IsNeutral8(sync->sent) &&
++          (sync->last_report_us == 0 || now_us - sync->last_report_us > HD_SYNC_BT_STOP_FALLBACK_US))) {
++        return; // without a fresh input report only a stop may go out, and only when the reports stopped
++    }
++    if (!HDSync_RumbleIdle(device)) {
++        return;
++    }
++    HDSync_Write(ctx, now_us);
++}
++
++// Returns 1 when active, 0 otherwise (Bluetooth pad without allow_bluetooth, B1 on, input-only pad, enable = false)
++int HIDAPI_DriverSwitch_SetHDNoQueue(SDL_HIDAPI_Device *device, bool enable, int gap_ms, bool allow_bluetooth)
++{
++    SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
++
++    if (!ctx || ctx->m_bInputOnly) {
++        return 0;
++    }
++    if (enable && (device->is_bluetooth != allow_bluetooth || device->hd_bt_after_input)) {
++        return 0;
++    }
++    if (enable != device->hd_rumble_noqueue) {
++        HDSync_Reset(&ctx->m_HDSync);
++    }
++    ctx->m_HDSync.nq_gap_us = (Uint32)(gap_ms < 5 ? 5 : (gap_ms > 100 ? 100 : gap_ms)) * 1000;
++    device->hd_rumble_noqueue = enable;
++    return enable ? 1 : 0;
++}
++
++// Returns 1 when active, 0 otherwise (USB pad, no-queue on, input-only pad, enable = false)
++int HIDAPI_DriverSwitch_SetHDBtAfterInput(SDL_HIDAPI_Device *device, bool enable)
++{
++    SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
++
++    if (!ctx || ctx->m_bInputOnly) {
++        return 0;
++    }
++    if (enable && (!device->is_bluetooth || device->hd_rumble_noqueue)) {
++        return 0;
++    }
++    if (enable != device->hd_bt_after_input) {
++        HDSync_Reset(&ctx->m_HDSync);
++        device->hd_bt_after_input = enable;
++    }
++    return enable ? 1 : 0;
++}
++
+ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
+ {
+     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
+@@ -1866,6 +2111,19 @@ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SD
+         SDL_copyp(&ctx->m_RumblePacket.rumbleData[0], &packet->rumbleData[0]);
+         SDL_copyp(&ctx->m_RumblePacket.rumbleData[1], &packet->rumbleData[1]);
+         ctx->m_bRumbleActive = (!is_click && !(HDRumble_IsNeutral(&packet->rumbleData[0]) && HDRumble_IsNeutral(&packet->rumbleData[1])));
++        ctx->m_bHDRumbleMode = true;
++
++        if (device->hd_rumble_noqueue || device->hd_bt_after_input) {
++            // No-queue: written now if the rumble thread is idle. Bluetooth after input: UpdateDevice writes it after an input report.
++            ctx->m_bRumblePending = false;
++            ctx->m_bRumbleZeroPending = false;
++            HDSync_Receive(ctx, &packet->rumbleData[0].rgucData[0]);
++            if (device->hd_rumble_noqueue) {
++                HDNoQueue_TryWrite(ctx, device, false, SDL_GetTicks());
++            }
++            return true;
++        }
++
+         if (!WriteRumble(ctx)) {
+             return false;
+         }
+@@ -2836,7 +3094,11 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
+             }
+         }
+ 
+-        if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
++        if (device->hd_rumble_noqueue && ctx->m_bHDRumbleMode) {
++            HDNoQueue_TryWrite(ctx, device, true, now);
++        } else if (device->hd_bt_after_input && ctx->m_bHDRumbleMode) {
++            HDBtAfterInput_Update(ctx, device, packet_count > 0, now);
++        } else if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
+             HIDAPI_DriverSwitch_SendPendingRumble(ctx);
+         } else if (ctx->m_bRumbleActive &&
+                    now >= (ctx->m_ulRumbleSent + (device->is_bluetooth ? HD_RUMBLE_BT_REFRESH_MS : RUMBLE_REFRESH_FREQUENCY_MS))) {
+@@ -2865,6 +3127,11 @@ static void HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joy
+ {
+     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
+ 
++    device->hd_rumble_noqueue = false;
++    device->hd_bt_after_input = false;
++    SDL_SetAtomicInt(&device->hd_pause_ms, 0);
++    ctx->m_bHDRumbleMode = false;
++
+     if (!ctx->m_bInputOnly) {
+         // Restore simple input mode for other applications
+         if (!ctx->m_nInitialInputMode ||
+--- a/src/joystick/hidapi/SDL_hidapijoystick.c
++++ b/src/joystick/hidapi/SDL_hidapijoystick.c
+@@ -1754,6 +1754,70 @@ static bool HIDAPI_JoystickGetGamepadMapping(int device_index, SDL_GamepadMappin
+     return false;
+ }
+ 
++// HD Rumble (eden-hdr, port of Ryuhdr's SDL2 patch): the Switch pad behind a joystick handle; the joysticks must be locked
++static SDL_HIDAPI_Device *HDRumble_GetSwitchDevice(SDL_Joystick *joystick)
++{
++    SDL_HIDAPI_Device *device = NULL;
++
++    if (!SDL_IsJoystickValid(joystick) || joystick->driver != &SDL_HIDAPI_JoystickDriver ||
++        !HIDAPI_GetJoystickDevice(joystick, &device) || device->driver != &SDL_HIDAPI_DriverSwitch) {
++        return NULL;
++    }
++    return device;
++}
++
++/* USB no-queue (Ryuhdr card 1). gap_ms = minimum gap between writes (5-100), pause_ms = pause of the rumble thread after a
++   write to this pad (1-10; SDL's default is 10). Returns 1 when active, 0 when not (Bluetooth pad, B1 on, input-only pad,
++   enable = 0), -1 when this is not a HIDAPI Switch pad. */
++int SDLCALL SDL_HDRumbleSetNoQueue(SDL_Joystick *joystick, int enable, int gap_ms, int pause_ms)
++{
++    SDL_HIDAPI_Device *device;
++    int result = -1;
++
++    SDL_LockJoysticks();
++    device = HDRumble_GetSwitchDevice(joystick);
++    if (device) {
++        result = HIDAPI_DriverSwitch_SetHDNoQueue(device, enable != 0, gap_ms, false);
++        SDL_SetAtomicInt(&device->hd_pause_ms, result == 1 ? (pause_ms < 1 ? 1 : (pause_ms > 10 ? 10 : pause_ms)) : 0);
++    }
++    SDL_UnlockJoysticks();
++    return result;
++}
++
++/* Bluetooth fast (Ryuhdr card B3): the no-queue writes for a Bluetooth pad; the rumble thread keeps SDL's 10 ms pause.
++   Returns 1 when active, 0 when not (wired pad, B1 on, input-only pad, enable = 0), -1 when this is not a HIDAPI Switch pad. */
++int SDLCALL SDL_HDRumbleSetNoQueueBluetooth(SDL_Joystick *joystick, int enable, int gap_ms)
++{
++    SDL_HIDAPI_Device *device;
++    int result = -1;
++
++    SDL_LockJoysticks();
++    device = HDRumble_GetSwitchDevice(joystick);
++    if (device) {
++        result = HIDAPI_DriverSwitch_SetHDNoQueue(device, enable != 0, gap_ms, true);
++        SDL_SetAtomicInt(&device->hd_pause_ms, 0);
++    }
++    SDL_UnlockJoysticks();
++    return result;
++}
++
++/* Bluetooth after input (Ryuhdr card B1). SDL_SendJoystickEffect only hands the packet over; it is written right after the next
++   input report while the rumble thread is idle. Returns 1 when active, 0 when not (wired pad, no-queue on, input-only pad,
++   enable = 0), -1 when this is not a HIDAPI Switch pad. */
++int SDLCALL SDL_HDRumbleSetBluetoothAfterInput(SDL_Joystick *joystick, int enable)
++{
++    SDL_HIDAPI_Device *device;
++    int result = -1;
++
++    SDL_LockJoysticks();
++    device = HDRumble_GetSwitchDevice(joystick);
++    if (device) {
++        result = HIDAPI_DriverSwitch_SetHDBtAfterInput(device, enable != 0);
++    }
++    SDL_UnlockJoysticks();
++    return result;
++}
++
+ SDL_JoystickDriver SDL_HIDAPI_JoystickDriver = {
+     HIDAPI_JoystickInit,
+     HIDAPI_JoystickGetCount,
+--- a/src/joystick/hidapi/SDL_hidapijoystick_c.h
++++ b/src/joystick/hidapi/SDL_hidapijoystick_c.h
+@@ -102,6 +102,15 @@ typedef struct SDL_HIDAPI_Device
+     SDL_Mutex *dev_lock;
+     SDL_hid_device *dev;
+     SDL_AtomicInt rumble_pending;
++
++    // HD Rumble (eden-hdr, port of Ryuhdr's SDL2 patch), Switch pads only. No-queue (USB, or Bluetooth = card B3): packets
++    // are merged and written only while the rumble thread is idle, never queued. Bluetooth after input (card B1): merged and
++    // written from UpdateDevice right after an input report, only while the rumble thread is idle. Never both on one pad.
++    bool hd_rumble_noqueue;
++    bool hd_bt_after_input;
++    // Pause of the rumble thread after a write to this device in ms; 0 = SDL's default 10 ms. Only set with USB no-queue.
++    SDL_AtomicInt hd_pause_ms;
++
+     int num_joysticks;
+     SDL_JoystickID *joysticks;
+ 
+@@ -212,6 +221,10 @@ extern void HIDAPI_UpdateDeviceProperties(SDL_HIDAPI_Device *device);
+ 
+ extern void HIDAPI_DumpPacket(const char *prefix, const Uint8 *data, int size);
+ 
++// HD Rumble (eden-hdr), implemented in the Switch driver; the joysticks must be locked
++extern int HIDAPI_DriverSwitch_SetHDNoQueue(SDL_HIDAPI_Device *device, bool enable, int gap_ms, bool allow_bluetooth);
++extern int HIDAPI_DriverSwitch_SetHDBtAfterInput(SDL_HIDAPI_Device *device, bool enable);
++
+ extern bool HIDAPI_SupportsPlaystationDetection(Uint16 vendor, Uint16 product);
+ 
+ extern float HIDAPI_RemapVal(float val, float val_min, float val_max, float output_min, float output_max);

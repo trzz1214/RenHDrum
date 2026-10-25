@@ -1,0 +1,111 @@
+From fc5e5ed9828caa9ebdcb221c6614923e84ceb3d1 Mon Sep 17 00:00:00 2001
+From: Three-Dola <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 14:20:25 +0700
+Subject: [PATCH 5/7] input: lock RenHDrum engine/DSP against controller
+ disconnect
+
+---
+ src/input_common/drivers/sdl_driver.cpp | 58 ++++++++++++++++---------
+ 1 file changed, 37 insertions(+), 21 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 39c6f3caf3..44f6738f84 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -306,6 +306,7 @@ public:
+     }
+ 
+     void SetSDLJoystick(SDL_Joystick* joystick, SDL_Gamepad* controller) {
++        std::scoped_lock lock{renhdrum_mutex};
+         CleanupRenHDrum();
+         sdl_joystick.reset(joystick);
+         sdl_controller.reset(controller);
+@@ -416,16 +417,42 @@ public:
+     }
+ 
+     void TickRenHDrum(int64_t now_us) {
+-        if (!renhdrum_engine || !sdl_joystick) {
+-            return;
+-        }
+         uint8_t packet[10];
+-        if (renhdrum_engine_tick(renhdrum_engine, now_us, packet) == 1) {
+-            SDL_SendJoystickEffect(sdl_joystick.get(), packet, sizeof(packet));
++        SDL_Joystick* joystick = nullptr;
++        {
++            std::scoped_lock lock{renhdrum_mutex};
++            if (!renhdrum_engine || !sdl_joystick ||
++                renhdrum_engine_tick(renhdrum_engine, now_us, packet) != 1) {
++                return;
++            }
++            joystick = sdl_joystick.get();
++        }
++        SDL_SendJoystickEffect(joystick, packet, sizeof(packet));
++    }
++
++    // Called on the HLE thread. Returns true when RenHDrum took the vibration (Switch HD engine, or
++    // DualSense haptics audio running); false = use the standard rumble below.
++    bool RenHDrumVibrate(int64_t now_us, bool is_right, const Common::Input::VibrationStatus& v) {
++        {
++            std::scoped_lock lock{renhdrum_mutex};
++            if (!renhdrum_engine) {
++                if (!dualsense_dsp) {
++                    return false;
++                }
++                renhdrum_dualsense_dsp_set_half_target(dualsense_dsp, is_right, v.low_amplitude,
++                                                       v.low_frequency, v.high_amplitude,
++                                                       v.high_frequency);
++                return ds_audio_stream != nullptr;
++            }
++            renhdrum_engine_push_half_sample(renhdrum_engine, now_us, is_right, v.low_amplitude,
++                                             v.low_frequency, v.high_amplitude, v.high_frequency);
+         }
++        TickRenHDrum(now_us);
++        return true;
+     }
+ 
+     void MaintainDualSenseAudio(int64_t now_us) {
++        std::scoped_lock lock{renhdrum_mutex};
+         if (!dualsense_dsp || ds_audio_stream || ds_audio_attempts >= DS_AUDIO_MAX_ATTEMPTS ||
+             now_us < ds_audio_next_us) {
+             return;
+@@ -603,6 +630,10 @@ private:
+     std::unique_ptr<SDL_Gamepad, decltype(&SDL_CloseGamepad)> sdl_controller;
+     mutable std::mutex mutex;
+ 
++    // Guards renhdrum_engine / dualsense_dsp / ds_audio_stream: SetVibration runs on the HLE thread while
++    // CloseJoystick frees them. Never held while calling SDL_SendJoystickEffect from the HLE thread.
++    std::mutex renhdrum_mutex;
++
+     RenHdcEngine* renhdrum_engine{nullptr};
+     RenHdcDualSenseDsp* dualsense_dsp{nullptr};
+     SDL_AudioStream* ds_audio_stream{nullptr};
+@@ -1011,25 +1042,10 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+     const int64_t now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+     const bool is_right = (identifier.pad == 1);
+ 
+-    if (auto* engine = joystick->GetRenHDrumEngine()) {
+-        renhdrum_engine_push_half_sample(
+-            engine, now_us, is_right,
+-            vibration.low_amplitude, vibration.low_frequency,
+-            vibration.high_amplitude, vibration.high_frequency);
+-        joystick->TickRenHDrum(now_us);
++    if (joystick->RenHDrumVibrate(now_us, is_right, vibration)) {
+         return Common::Input::DriverResult::Success;
+     }
+ 
+-    if (auto* dsp = joystick->GetDualSenseDsp()) {
+-        renhdrum_dualsense_dsp_set_half_target(
+-            dsp, is_right,
+-            vibration.low_amplitude, vibration.low_frequency,
+-            vibration.high_amplitude, vibration.high_frequency);
+-        if (joystick->HasDualSenseAudio()) {
+-            return Common::Input::DriverResult::Success;
+-        }
+-    }
+-
+     const auto process_amplitude_exp = [](f32 amplitude, f32 factor) {
+         return (amplitude + std::pow(amplitude, factor)) * 0.5f * 0xFFFF;
+     };
+-- 
+2.55.0.windows.5
+

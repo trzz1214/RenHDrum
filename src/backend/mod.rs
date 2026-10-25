@@ -1,0 +1,7 @@
+pub mod nintendo_hd;
+
+pub use nintendo_hd::{
+    HdSample, NintendoHdEngine, AM_FM_NO_QUEUE_GAP_MS, BT_SYNC_FEED_MS, BT_SYNC_MAX_GAP_MS,
+    BT_SYNC_MIN_GAP_MS, BT_SYNC_SKIP_AMP, BT_SYNC_SKIP_HIGH_FREQ, BT_SYNC_SKIP_LOW_FREQ,
+    KEEP_ALIVE_TIMEOUT_MS, NO_QUEUE_FEED_MS, SYNC_FEED_MS,
+};

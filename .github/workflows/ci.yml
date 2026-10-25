@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt --all --check
+
+      - name: Run cargo test
+        run: cargo test --locked
+
+      - name: Run clippy linter
+        run: cargo clippy -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Compile and run C example (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          gcc -Iinclude examples/c/minimal_tick_loop.c -Ltarget/release -lrenhdrum -Wl,-rpath,$PWD/target/release -o minimal_tick_loop
+          ./minimal_tick_loop
+
+      - name: Compile and run C example (Windows MSVC)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cl.exe /nologo /Iinclude examples\c\minimal_tick_loop.c /link /LIBPATH:target\release renhdrum.dll.lib /out:minimal_tick_loop.exe
+          copy target\release\renhdrum.dll .
+          minimal_tick_loop.exe

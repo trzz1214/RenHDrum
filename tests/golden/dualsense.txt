@@ -1,0 +1,35 @@
+# Scenario for tests\golden_dualsense.rs (RenHDrum) and tools\ryuhdr-golden (Ryuhdr). Regenerate the .f32 files after editing.
+# case <name> <volume 10-100> <crisp 0|1>
+# target <left ampLow freqLow ampHigh freqHigh> <right ampLow freqLow ampHigh freqHigh>   raw game values, like Ryuhdr SetTarget
+# fill <frames, multiple of 256>
+
+case basic 100 0
+fill 512
+target 0.25 160 0.1 320 0.3 160 0 320
+fill 4096
+target 0 160 0 320 0 160 0 320
+fill 2048
+
+case glide 100 0
+target 0.25 320 0 320 0.25 320 0 320
+fill 2048
+target 0.4 80 0.2 600 0.1 40 0.5 900
+fill 4096
+target 0 160 0 320 0 160 0 320
+fill 2048
+
+case crisp 100 1
+target 0.25 160 0.1 320 0.3 180 0 320
+fill 3072
+target 0 160 0 320 0 160 0 320
+fill 1024
+target 0.5 200 0.3 400 0.2 150 0.2 300
+fill 3072
+target 0 160 0 320 0 160 0 320
+fill 1024
+
+case limits 50 1
+target 0.9 5 0.9 2000 1 0 1 0
+fill 2048
+target -1 160 0.5 320 0.04 160 0.04 320
+fill 2048

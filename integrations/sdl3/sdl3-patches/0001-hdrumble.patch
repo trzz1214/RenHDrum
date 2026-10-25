@@ -1,0 +1,50 @@
+--- a/src/joystick/hidapi/SDL_hidapi_switch.c
++++ b/src/joystick/hidapi/SDL_hidapi_switch.c
+@@ -56,6 +56,7 @@
+ 
+ // How often you have to refresh a long duration rumble to keep the motors running
+ #define RUMBLE_REFRESH_FREQUENCY_MS 50
++#define HD_RUMBLE_BT_REFRESH_MS 150
+ 
+ #define SWITCH_GYRO_SCALE  14.2842f
+ #define SWITCH_ACCEL_SCALE 4096.f
+@@ -1837,6 +1838,19 @@ static bool HIDAPI_DriverSwitch_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_Jo
+     return SetHomeLED(ctx, (Uint8)value);
+ }
+ 
++static bool HDRumble_IsNeutral(const SwitchRumbleData_t *pRumble)
++{
++    return (pRumble->rgucData[0] == 0x00 && pRumble->rgucData[1] == 0x01 &&
++            pRumble->rgucData[2] == 0x40 && pRumble->rgucData[3] == 0x40) ||
++           (pRumble->rgucData[0] == 0x00 && pRumble->rgucData[1] == 0x00 &&
++            pRumble->rgucData[2] == 0x00 && pRumble->rgucData[3] == 0x00);
++}
++
++static bool HDRumble_IsClickPacket(const Uint8 *packet8)
++{
++    return !((packet8[0] & 0x03) == 0 && (packet8[3] & 0xC0) == 0x40);
++}
++
+ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
+ {
+     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
+@@ -1848,8 +1862,10 @@ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SD
+             return SDL_SetError("Unknown Nintendo Switch Pro effect type");
+         }
+ 
++        bool is_click = HDRumble_IsClickPacket(&packet->rumbleData[0].rgucData[0]);
+         SDL_copyp(&ctx->m_RumblePacket.rumbleData[0], &packet->rumbleData[0]);
+         SDL_copyp(&ctx->m_RumblePacket.rumbleData[1], &packet->rumbleData[1]);
++        ctx->m_bRumbleActive = (!is_click && !(HDRumble_IsNeutral(&packet->rumbleData[0]) && HDRumble_IsNeutral(&packet->rumbleData[1])));
+         if (!WriteRumble(ctx)) {
+             return false;
+         }
+@@ -2823,7 +2839,7 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
+         if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
+             HIDAPI_DriverSwitch_SendPendingRumble(ctx);
+         } else if (ctx->m_bRumbleActive &&
+-                   now >= (ctx->m_ulRumbleSent + RUMBLE_REFRESH_FREQUENCY_MS)) {
++                   now >= (ctx->m_ulRumbleSent + (device->is_bluetooth ? HD_RUMBLE_BT_REFRESH_MS : RUMBLE_REFRESH_FREQUENCY_MS))) {
+ #ifdef DEBUG_RUMBLE
+             SDL_Log("Sent continuing rumble, %d ms after previous rumble", now - ctx->m_ulRumbleSent);
+ #endif

@@ -1,0 +1,73 @@
+From 79f05ca4a6ed7eb3d52671a7ad7d3900e6618dd8 Mon Sep 17 00:00:00 2001
+From: Three-Dola <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 21:21:26 +0700
+Subject: [PATCH 7/7] input: Ryuhdr 0.2.6 recommended HD Rumble mode by default
+ (wired cards 1/3/5/7/8, Bluetooth B1/B3/B2)
+
+---
+ src/input_common/drivers/sdl_driver.cpp | 26 ++++++++++++++++++-------
+ 1 file changed, 19 insertions(+), 7 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 3858b8f73e..6fad051b90 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -502,16 +502,23 @@ private:
+         }
+     }
+ 
+-    // Ryuhdr's standard for a configured pad (0.2.5.12): Bluetooth level 3 + card B1, wired 15 ms with auto slow-down.
+-    // Flag files next to eden.exe still win (renhdrum_settings_resolve). Then the SDL modes are switched on; a mode SDL
+-    // refused is cleared, so the engine never paces for writes that SDL does not gate (Ryuhdr: _noQueueActive / _btFastActive).
++    // Ryuhdr's recommended mode for a configured pad (0.2.6): wired 15 ms + cards 1 / 3 / 5 / 7 / 8, Bluetooth level 3 +
++    // B1 / B3 / B2. Flag files next to eden.exe still win (renhdrum_settings_resolve). Then the SDL modes are switched on; a mode
++    // SDL refused is cleared, so the engine never paces for writes that SDL does not gate (Ryuhdr: _noQueueActive / _btFastActive).
+     void ApplyRenHDrumSettings(bool is_bluetooth) {
+         RenHdcConfig config{};
+         config.enable_hd_rumble = true;
+         config.hd_rumble_usb_interval_ms = 15;
+         config.hd_rumble_bluetooth_level = 3;
+         config.hd_rumble_usb_auto_slow = true;
++        config.hd_rumble_experimental_usb_no_queue = true;
++        config.hd_rumble_experimental_envelope_5ms = true;
++        config.hd_rumble_experimental_frequency_in_packet = true;
++        config.hd_rumble_experimental_frequency_both_bands = true;
++        config.hd_rumble_experimental_crisp_notes = true;
+         config.hd_rumble_experimental_bt_after_input = true;
++        config.hd_rumble_experimental_bt_fast = true;
++        config.hd_rumble_experimental_bt_crisp_notes = true;
+ 
+         RenHdcSettings settings{};
+         if (renhdrum_settings_resolve(&config, &settings) != RENHDRUM_OK) {
+@@ -526,10 +533,11 @@ private:
+             settings.bt_after_input = settings.enabled && settings.bt_after_input && !settings.bt_fast &&
+                                       SDL_HDRumbleSetBluetoothAfterInput(joystick, 1) == 1;
+             settings.usb_no_queue = false;
+-            LOG_INFO(Input, "RenHDrum HD Rumble Bluetooth: level {}, {}", settings.bluetooth_level,
++            LOG_INFO(Input, "RenHDrum HD Rumble Bluetooth: level {}, {}{}", settings.bluetooth_level,
+                      settings.bt_fast          ? "card B3 (5 ms envelope, written while SDL is idle)"
+                      : settings.bt_after_input ? "card B1 (written right after an input report)"
+-                                               : "clock based writes");
++                                               : "clock based writes",
++                     settings.enabled && settings.bt_crisp_notes ? ", card B2 crisp notes" : "");
+         } else {
+             // Card 3 sends one packet per 15 ms window itself: a smaller SDL gap (Ryuhdr HdApplyNoQueue)
+             const int gap_ms =
+@@ -538,8 +546,12 @@ private:
+                                     SDL_HDRumbleSetNoQueue(joystick, 1, gap_ms, settings.usb_pause_ms) == 1;
+             settings.bt_after_input = false;
+             settings.bt_fast = false;
+-            LOG_INFO(Input, "RenHDrum HD Rumble wired: {} ms, {}", settings.usb_interval_ms,
+-                     settings.usb_no_queue ? "no-queue (written while SDL is idle)" : "queued writes");
++            const bool envelope = settings.usb_no_queue && settings.envelope_5ms;
++            LOG_INFO(Input, "RenHDrum HD Rumble wired: {} ms, {}{}{}{}", settings.usb_interval_ms,
++                     settings.usb_no_queue ? "no-queue (written while SDL is idle)" : "queued writes",
++                     envelope ? ", card 3 5 ms envelope" : "",
++                     envelope && settings.frequency_in_packet && settings.frequency_both_bands ? ", cards 5 + 7" : "",
++                     envelope && settings.crisp_notes ? ", card 8 crisp notes" : "");
+         }
+         renhdrum_engine_apply_settings(renhdrum_engine, &settings);
+     }
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,44 @@
+From b0537ad266dcf630a2a3cad397ea3b41c4646e16 Mon Sep 17 00:00:00 2001
+From: Three-Dola <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 13:05:25 +0700
+Subject: [PATCH 4/7] input: DualSense haptics - zero buffer on DSP error, log
+ device buffer size
+
+---
+ src/input_common/drivers/sdl_driver.cpp | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 24e3862fbe..39c6f3caf3 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -532,8 +532,12 @@ private:
+         } else {
+             SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
+         }
+-        LOG_INFO(Input, "DualSense haptics audio opened on \"{}\" (attempt {})",
+-                 SDL_GetAudioDeviceName(matched_dev), ds_audio_attempts);
++        int device_frames = 0;
++        SDL_AudioSpec device_spec{};
++        SDL_GetAudioDeviceFormat(matched_dev, &device_spec, &device_frames);
++        LOG_INFO(Input, "DualSense haptics audio opened on \"{}\" (attempt {}, device {} ch {} Hz, {} frames per buffer)",
++                 SDL_GetAudioDeviceName(matched_dev), ds_audio_attempts, device_spec.channels,
++                 device_spec.freq, device_frames);
+     }
+ 
+     static void DualSenseAudioCallback(void* userdata, SDL_AudioStream* stream, int additional_amount,
+@@ -557,7 +561,10 @@ private:
+ 
+         while (frames_needed > 0) {
+             const int cur_frames = (std::min)(frames_needed, CHUNK_FRAMES);
+-            renhdrum_dualsense_dsp_fill_f32(self->dualsense_dsp, chunk, static_cast<size_t>(cur_frames));
++            if (renhdrum_dualsense_dsp_fill_f32(self->dualsense_dsp, chunk,
++                                                static_cast<size_t>(cur_frames)) != RENHDRUM_OK) {
++                std::memset(chunk, 0, sizeof(chunk)); // never send stack garbage to the actuators
++            }
+             SDL_PutAudioStreamData(stream, chunk, cur_frames * bytes_per_frame);
+             frames_needed -= cur_frames;
+         }
+-- 
+2.55.0.windows.5
+

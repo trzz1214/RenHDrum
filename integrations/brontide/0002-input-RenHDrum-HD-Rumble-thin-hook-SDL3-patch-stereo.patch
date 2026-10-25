@@ -1,0 +1,560 @@
+From 8fc4944ff99d3bb6f0dea4220fd10db424b555ed Mon Sep 17 00:00:00 2001
+From: Three-Dola <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 00:08:57 +0700
+Subject: [PATCH 2/7] input: RenHDrum HD Rumble thin hook (SDL3 patch, stereo
+ latch, DualSense DSP)
+
+---
+ .patch/sdl3/0001-hdrumble.patch               |  50 ++++
+ cpmfile.json                                  |   3 +
+ src/hid_core/frontend/emulated_controller.cpp |  12 +-
+ src/input_common/CMakeLists.txt               |   8 +
+ src/input_common/drivers/sdl_driver.cpp       | 220 +++++++++++++++++-
+ src/input_common/drivers/sdl_driver.h         |   3 +-
+ src/yuzu/CMakeLists.txt                       |  11 +
+ src/yuzu/msvc_compat.cpp                      |  69 ++++++
+ 8 files changed, 363 insertions(+), 13 deletions(-)
+ create mode 100644 .patch/sdl3/0001-hdrumble.patch
+ create mode 100644 src/yuzu/msvc_compat.cpp
+
+diff --git a/.patch/sdl3/0001-hdrumble.patch b/.patch/sdl3/0001-hdrumble.patch
+new file mode 100644
+index 0000000000..bea2b5bb90
+--- /dev/null
++++ b/.patch/sdl3/0001-hdrumble.patch
+@@ -0,0 +1,50 @@
++--- a/src/joystick/hidapi/SDL_hidapi_switch.c
+++++ b/src/joystick/hidapi/SDL_hidapi_switch.c
++@@ -56,6 +56,7 @@
++ 
++ // How often you have to refresh a long duration rumble to keep the motors running
++ #define RUMBLE_REFRESH_FREQUENCY_MS 50
+++#define HD_RUMBLE_BT_REFRESH_MS 150
++ 
++ #define SWITCH_GYRO_SCALE  14.2842f
++ #define SWITCH_ACCEL_SCALE 4096.f
++@@ -1837,6 +1838,19 @@ static bool HIDAPI_DriverSwitch_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_Jo
++     return SetHomeLED(ctx, (Uint8)value);
++ }
++ 
+++static bool HDRumble_IsNeutral(const SwitchRumbleData_t *pRumble)
+++{
+++    return (pRumble->rgucData[0] == 0x00 && pRumble->rgucData[1] == 0x01 &&
+++            pRumble->rgucData[2] == 0x40 && pRumble->rgucData[3] == 0x40) ||
+++           (pRumble->rgucData[0] == 0x00 && pRumble->rgucData[1] == 0x00 &&
+++            pRumble->rgucData[2] == 0x00 && pRumble->rgucData[3] == 0x00);
+++}
+++
+++static bool HDRumble_IsClickPacket(const Uint8 *packet8)
+++{
+++    return !((packet8[0] & 0x03) == 0 && (packet8[3] & 0xC0) == 0x40);
+++}
+++
++ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
++ {
++     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
++@@ -1848,8 +1862,10 @@ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SD
++             return SDL_SetError("Unknown Nintendo Switch Pro effect type");
++         }
++ 
+++        bool is_click = HDRumble_IsClickPacket(&packet->rumbleData[0].rgucData[0]);
++         SDL_copyp(&ctx->m_RumblePacket.rumbleData[0], &packet->rumbleData[0]);
++         SDL_copyp(&ctx->m_RumblePacket.rumbleData[1], &packet->rumbleData[1]);
+++        ctx->m_bRumbleActive = (!is_click && !(HDRumble_IsNeutral(&packet->rumbleData[0]) && HDRumble_IsNeutral(&packet->rumbleData[1])));
++         if (!WriteRumble(ctx)) {
++             return false;
++         }
++@@ -2823,7 +2839,7 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
++         if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
++             HIDAPI_DriverSwitch_SendPendingRumble(ctx);
++         } else if (ctx->m_bRumbleActive &&
++-                   now >= (ctx->m_ulRumbleSent + RUMBLE_REFRESH_FREQUENCY_MS)) {
+++                   now >= (ctx->m_ulRumbleSent + (device->is_bluetooth ? HD_RUMBLE_BT_REFRESH_MS : RUMBLE_REFRESH_FREQUENCY_MS))) {
++ #ifdef DEBUG_RUMBLE
++             SDL_Log("Sent continuing rumble, %d ms after previous rumble", now - ctx->m_ulRumbleSent);
++ #endif
+diff --git a/cpmfile.json b/cpmfile.json
+index 9cac812b7a..d6d647fdbd 100644
+--- a/cpmfile.json
++++ b/cpmfile.json
+@@ -247,6 +247,9 @@
+         "hash": "df5a323af7ac366661a3c0e887969c72584d232f3cc211419d59b0487b620b6b2859d4549c9e8df002ee489290062e466fcfddf7edc0872a37b1f2845e81c0f3",
+         "min_version": "3.2.10",
+         "package": "SDL3",
++        "patches": [
++            "0001-hdrumble.patch"
++        ],
+         "repo": "libsdl-org/SDL",
+         "version": "release-3.4.8"
+     },
+diff --git a/src/hid_core/frontend/emulated_controller.cpp b/src/hid_core/frontend/emulated_controller.cpp
+index 7b4af13232..4fcc169de2 100644
+--- a/src/hid_core/frontend/emulated_controller.cpp
++++ b/src/hid_core/frontend/emulated_controller.cpp
+@@ -194,6 +194,8 @@ void EmulatedController::LoadDevices() {
+     output_params[4] = android_params;
+     output_params[LeftIndex].Set("output", true);
+     output_params[RightIndex].Set("output", true);
++    output_params[LeftIndex].Set("pad", 0);
++    output_params[RightIndex].Set("pad", 1);
+     output_params[2].Set("output", true);
+     output_params[3].Set("output", true);
+     output_params[4].Set("output", true);
+@@ -1260,18 +1262,12 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
+     }
+ 
+     if (!Settings::values.enable_accurate_vibrations.GetValue()) {
+-        using std::chrono::duration_cast;
+-        using std::chrono::milliseconds;
+         using std::chrono::steady_clock;
+ 
+         const auto now = steady_clock::now();
+ 
+-        // Filter out non-zero vibrations that are within 15ms of each other.
+-        if ((vibration.low_amplitude != 0.0f || vibration.high_amplitude != 0.0f) &&
+-            duration_cast<milliseconds>(now - last_vibration_timepoint[index]) < milliseconds(15)) {
+-            return false;
+-        }
+-
++        // RenHDrum manages stateful pacing, click pulses, and token bucket.
++        // Do not drop short pulse vibrations (<= 20 ms) here so they reach RenHDrum.
+         last_vibration_timepoint[index] = now;
+     }
+ 
+diff --git a/src/input_common/CMakeLists.txt b/src/input_common/CMakeLists.txt
+index 840602f4ce..cc8cf17fa6 100644
+--- a/src/input_common/CMakeLists.txt
++++ b/src/input_common/CMakeLists.txt
+@@ -94,3 +94,11 @@ endif()
+ 
+ create_target_directory_groups(input_common)
+ target_link_libraries(input_common PUBLIC hid_core PRIVATE common Boost::headers)
++
++# RenHDrum HD Rumble & DualSense engine integration
++set(RENHDRUM_DIR "${CMAKE_SOURCE_DIR}/../RenHDrum" CACHE PATH "RenHDrum checkout (include/ and target/release/)")
++if (NOT EXISTS "${RENHDRUM_DIR}/target/release/renhdrum.dll.lib")
++    message(FATAL_ERROR "RenHDrum is not built: run 'cargo build --release' in ${RENHDRUM_DIR}")
++endif()
++target_include_directories(input_common PUBLIC "${RENHDRUM_DIR}/include")
++target_link_libraries(input_common PRIVATE "${RENHDRUM_DIR}/target/release/renhdrum.dll.lib")
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index c3e9a066b3..4e6932b7fe 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -4,6 +4,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <array>
++#include <chrono>
+ #include <numbers>
+ #include "common/logging.h"
+ #include "common/math_util.h"
+@@ -91,6 +92,13 @@ public:
+                 : guid{guid_}, port{port_}, sdl_joystick{joystick, &SDL_CloseJoystick},
+                     sdl_controller{game_controller, &SDL_CloseGamepad} {
+         EnableMotion();
++        if (sdl_joystick) {
++            InitRenHDrum();
++        }
++    }
++
++    ~SDLJoystick() {
++        CleanupRenHDrum();
+     }
+ 
+     void EnableMotion() {
+@@ -219,6 +227,10 @@ public:
+     }
+ 
+     bool HasHDRumble() const {
++        if (renhdrum_engine || dualsense_dsp) {
++            return true;
++        }
++
+         constexpr Uint16 valve_vendor_id = 0x28DE;
+         const auto is_known_hd_type = [](SDL_GamepadType type) {
+             return type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO ||
+@@ -292,8 +304,12 @@ public:
+     }
+ 
+     void SetSDLJoystick(SDL_Joystick* joystick, SDL_Gamepad* controller) {
++        CleanupRenHDrum();
+         sdl_joystick.reset(joystick);
+         sdl_controller.reset(controller);
++        if (sdl_joystick) {
++            InitRenHDrum();
++        }
+     }
+ 
+     bool IsJoyconLeft() const {
+@@ -385,13 +401,162 @@ public:
+         return "Unknown";
+     }
+ 
++    RenHdcEngine* GetRenHDrumEngine() const {
++        return renhdrum_engine;
++    }
++
++    RenHdcDualSenseDsp* GetDualSenseDsp() const {
++        return dualsense_dsp;
++    }
++
++    bool HasDualSenseAudio() const {
++        return ds_audio_stream != nullptr;
++    }
++
++    void TickRenHDrum(int64_t now_us) {
++        if (!renhdrum_engine || !sdl_joystick) {
++            return;
++        }
++        uint8_t packet[10];
++        if (renhdrum_engine_tick(renhdrum_engine, now_us, packet) == 1) {
++            SDL_SendJoystickEffect(sdl_joystick.get(), packet, sizeof(packet));
++        }
++    }
++
+ private:
++    void InitRenHDrum() {
++        if (!sdl_joystick) {
++            return;
++        }
++
++        const Uint16 vid = SDL_GetJoystickVendor(sdl_joystick.get());
++        const Uint16 pid = SDL_GetJoystickProduct(sdl_joystick.get());
++
++        // Nintendo Switch controllers (VID 0x057E)
++        if (vid == 0x057E) {
++            if (pid == 0x2009 || pid == 0x2006 || pid == 0x2007) {
++                const bool is_bluetooth =
++                    (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS);
++                const bool is_pro = (pid == 0x2009);
++                renhdrum_engine = renhdrum_engine_create(is_bluetooth, is_pro);
++                if (renhdrum_engine) {
++                    RenHdcSettings settings;
++                    if (renhdrum_settings_default(&settings) == RENHDRUM_OK) {
++                        renhdrum_engine_apply_settings(renhdrum_engine, &settings);
++                    }
++                    LOG_INFO(Input, "Initialized RenHDrum engine for Switch controller {:04X}:{:04X} (BT: {})",
++                             vid, pid, is_bluetooth);
++                }
++            }
++        }
++        // Sony DualSense (VID 0x054C, PID 0x0CE6 or 0x0DF2)
++        else if (vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)) {
++            dualsense_dsp = renhdrum_dualsense_dsp_create(100, true);
++            if (dualsense_dsp) {
++                LOG_INFO(Input, "Initialized RenHDrum DualSense DSP for controller {:04X}:{:04X}", vid, pid);
++                InitDualSenseAudio();
++            }
++        }
++    }
++
++    void InitDualSenseAudio() {
++        if (!dualsense_dsp || !sdl_joystick) {
++            return;
++        }
++        const bool is_wireless =
++            (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS);
++        if (is_wireless) {
++            return;
++        }
++
++        int dev_count = 0;
++        SDL_AudioDeviceID* devices = SDL_GetAudioPlaybackDevices(&dev_count);
++        SDL_AudioDeviceID matched_dev = 0;
++        if (devices && dev_count > 0) {
++            for (int i = 0; i < dev_count; ++i) {
++                const char* name = SDL_GetAudioDeviceName(devices[i]);
++                if (name && (std::strstr(name, "Wireless Controller") != nullptr ||
++                             std::strstr(name, "DualSense") != nullptr)) {
++                    matched_dev = devices[i];
++                    break;
++                }
++            }
++            SDL_free(devices);
++        }
++
++        if (matched_dev != 0) {
++            const SDL_AudioSpec spec{
++                .format = SDL_AUDIO_F32,
++                .channels = 4,
++                .freq = 48000,
++            };
++            ds_audio_stream =
++                SDL_OpenAudioDeviceStream(matched_dev, &spec, &SDLJoystick::DualSenseAudioCallback, this);
++            if (ds_audio_stream) {
++                SDL_ResumeAudioStreamDevice(ds_audio_stream);
++                LOG_INFO(Input, "DualSense 4-channel audio stream opened successfully on device {}", matched_dev);
++            }
++        }
++    }
++
++    static void DualSenseAudioCallback(void* userdata, SDL_AudioStream* stream, int additional_amount,
++                                       int total_amount) {
++        if (additional_amount <= 0 || !userdata) {
++            return;
++        }
++        auto* self = static_cast<SDLJoystick*>(userdata);
++        if (!self->dualsense_dsp) {
++            return;
++        }
++
++        constexpr int bytes_per_frame = 4 * static_cast<int>(sizeof(float));
++        int frames_needed = additional_amount / bytes_per_frame;
++        if (frames_needed <= 0) {
++            return;
++        }
++
++        constexpr int CHUNK_FRAMES = 256;
++        float chunk[CHUNK_FRAMES * 4];
++
++        while (frames_needed > 0) {
++            const int cur_frames = (std::min)(frames_needed, CHUNK_FRAMES);
++            renhdrum_dualsense_dsp_fill_f32(self->dualsense_dsp, chunk, static_cast<size_t>(cur_frames));
++            SDL_PutAudioStreamData(stream, chunk, cur_frames * bytes_per_frame);
++            frames_needed -= cur_frames;
++        }
++    }
++
++    void CleanupRenHDrum() {
++        if (ds_audio_stream) {
++            SDL_PauseAudioStreamDevice(ds_audio_stream);
++            SDL_ClearAudioStream(ds_audio_stream);
++            SDL_DestroyAudioStream(ds_audio_stream);
++            ds_audio_stream = nullptr;
++        }
++        if (renhdrum_engine) {
++            if (sdl_joystick) {
++                uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
++                SDL_SendJoystickEffect(sdl_joystick.get(), stop_pkt, sizeof(stop_pkt));
++            }
++            renhdrum_engine_destroy(renhdrum_engine);
++            renhdrum_engine = nullptr;
++        }
++        if (dualsense_dsp) {
++            renhdrum_dualsense_dsp_destroy(dualsense_dsp);
++            dualsense_dsp = nullptr;
++        }
++    }
++
+     Common::UUID guid;
+     int port;
+     std::unique_ptr<SDL_Joystick, decltype(&SDL_CloseJoystick)> sdl_joystick;
+     std::unique_ptr<SDL_Gamepad, decltype(&SDL_CloseGamepad)> sdl_controller;
+     mutable std::mutex mutex;
+ 
++    RenHdcEngine* renhdrum_engine{nullptr};
++    RenHdcDualSenseDsp* dualsense_dsp{nullptr};
++    SDL_AudioStream* ds_audio_stream{nullptr};
++
+     u64 last_motion_update{};
+     std::size_t motion_error_count{};
+     bool has_gyro{false};
+@@ -570,6 +735,18 @@ void SDLDriver::CloseJoystick(SDL_Joystick* sdl_joystick) {
+ void SDLDriver::PumpEvents() const {
+     if (initialized) {
+         SDL_PumpEvents();
++
++        using namespace std::chrono;
++        const int64_t now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
++
++        std::scoped_lock lock{joystick_map_mutex};
++        for (const auto& [guid, joystick_list] : joystick_map) {
++            for (const auto& joystick : joystick_list) {
++                if (joystick && joystick->GetRenHDrumEngine()) {
++                    joystick->TickRenHDrum(now_us);
++                }
++            }
++        }
+     }
+ }
+ 
+@@ -769,6 +946,33 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+     const PadIdentifier& identifier, const Common::Input::VibrationStatus& vibration) {
+     const auto joystick =
+         GetSDLJoystickByGUID(identifier.guid.RawString(), static_cast<int>(identifier.port));
++    if (!joystick) {
++        return Common::Input::DriverResult::InvalidHandle;
++    }
++
++    using namespace std::chrono;
++    const int64_t now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
++    const bool is_right = (identifier.pad == 1);
++
++    if (auto* engine = joystick->GetRenHDrumEngine()) {
++        renhdrum_engine_push_half_sample(
++            engine, now_us, is_right,
++            vibration.low_amplitude, vibration.low_frequency,
++            vibration.high_amplitude, vibration.high_frequency);
++        joystick->TickRenHDrum(now_us);
++        return Common::Input::DriverResult::Success;
++    }
++
++    if (auto* dsp = joystick->GetDualSenseDsp()) {
++        renhdrum_dualsense_dsp_set_half_target(
++            dsp, is_right,
++            vibration.low_amplitude, vibration.low_frequency,
++            vibration.high_amplitude, vibration.high_frequency);
++        if (joystick->HasDualSenseAudio()) {
++            return Common::Input::DriverResult::Success;
++        }
++    }
++
+     const auto process_amplitude_exp = [](f32 amplitude, f32 factor) {
+         return (amplitude + std::pow(amplitude, factor)) * 0.5f * 0xFFFF;
+     };
+@@ -802,6 +1006,18 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+ bool SDLDriver::IsVibrationEnabled(const PadIdentifier& identifier) {
+     const auto joystick =
+         GetSDLJoystickByGUID(identifier.guid.RawString(), static_cast<int>(identifier.port));
++    if (!joystick) {
++        return false;
++    }
++
++    if (joystick->IsVibrationTested()) {
++        return joystick->HasVibration();
++    }
++
++    if (joystick->GetRenHDrumEngine() || joystick->GetDualSenseDsp()) {
++        joystick->EnableVibration(true);
++        return true;
++    }
+ 
+     static constexpr Common::Input::VibrationStatus test_vibration{
+         .low_amplitude = 1,
+@@ -819,10 +1035,6 @@ bool SDLDriver::IsVibrationEnabled(const PadIdentifier& identifier) {
+         .type = Common::Input::VibrationAmplificationType::Exponential,
+     };
+ 
+-    if (joystick->IsVibrationTested()) {
+-        return joystick->HasVibration();
+-    }
+-
+     // First vibration might fail
+     joystick->RumblePlay(test_vibration);
+ 
+diff --git a/src/input_common/drivers/sdl_driver.h b/src/input_common/drivers/sdl_driver.h
+index e6751b6688..f253991f06 100644
+--- a/src/input_common/drivers/sdl_driver.h
++++ b/src/input_common/drivers/sdl_driver.h
+@@ -12,6 +12,7 @@
+ #include "common/container/unordered_map.h"
+ 
+ #include <SDL3/SDL.h>
++#include <renhdrum.h>
+ 
+ #include "common/common_types.h"
+ #include "common/threadsafe_queue.h"
+@@ -115,7 +116,7 @@ private:
+ 
+     /// Map of GUID of a list of corresponding virtual Joysticks
+     ::Common::unordered_map<Common::UUID, std::vector<std::shared_ptr<SDLJoystick>>> joystick_map;
+-    std::mutex joystick_map_mutex;
++    mutable std::mutex joystick_map_mutex;
+ 
+     std::atomic<bool> initialized = false;
+     bool start_thread;
+diff --git a/src/yuzu/CMakeLists.txt b/src/yuzu/CMakeLists.txt
+index b93080f2a1..a9d4136138 100644
+--- a/src/yuzu/CMakeLists.txt
++++ b/src/yuzu/CMakeLists.txt
+@@ -15,6 +15,7 @@ endif()
+ find_package(Qt6 REQUIRED COMPONENTS Widgets)
+ 
+ add_executable(yuzu
++    msvc_compat.cpp
+     Info.plist
+     about_dialog.cpp
+     about_dialog.h
+@@ -457,3 +458,13 @@ endif()
+ target_link_libraries(yuzu PRIVATE OpenSSL::SSL OpenSSL::Crypto SDL3::SDL3)
+ 
+ create_target_directory_groups(yuzu)
++
++# Copy renhdrum.dll alongside the emulator executable
++if (EXISTS "${RENHDRUM_DIR}/target/release/renhdrum.dll")
++    add_custom_command(TARGET yuzu POST_BUILD
++        COMMAND ${CMAKE_COMMAND} -E copy_if_different
++        "${RENHDRUM_DIR}/target/release/renhdrum.dll"
++        "$<TARGET_FILE_DIR:yuzu>/renhdrum.dll"
++        VERBATIM
++    )
++endif()
+diff --git a/src/yuzu/msvc_compat.cpp b/src/yuzu/msvc_compat.cpp
+new file mode 100644
+index 0000000000..e8354a8a1d
+--- /dev/null
++++ b/src/yuzu/msvc_compat.cpp
+@@ -0,0 +1,69 @@
++// Compatibility definitions for MSVC STL vectorized algorithms
++// Required when static Qt6 prebuilts reference vector algorithm symbols introduced in newer toolsets.
++
++#ifdef _MSC_VER
++
++#include <__msvc_minmax.hpp>
++#include <algorithm>
++#include <cstdint>
++#include <utility>
++
++extern "C" {
++
++__declspec(noalias) void __stdcall __std_rotate(void* _First, void* _Mid, void* _Last) noexcept {
++    if (_First == _Mid || _Mid == _Last) {
++        return;
++    }
++    char* first = static_cast<char*>(_First);
++    char* mid = static_cast<char*>(_Mid);
++    char* last = static_cast<char*>(_Last);
++    std::rotate(first, mid, last);
++}
++
++void* __stdcall __std_unique_8(void* _First, void* _Last) noexcept {
++    if (_First == _Last) {
++        return _First;
++    }
++    uint64_t* first = static_cast<uint64_t*>(_First);
++    uint64_t* last = static_cast<uint64_t*>(_Last);
++    return std::unique(first, last);
++}
++
++void* __stdcall __std_unique_4(void* _First, void* _Last) noexcept {
++    if (_First == _Last) {
++        return _First;
++    }
++    uint32_t* first = static_cast<uint32_t*>(_First);
++    uint32_t* last = static_cast<uint32_t*>(_Last);
++    return std::unique(first, last);
++}
++
++__declspec(noalias) void __stdcall __std_replace_copy_1(
++    const void* _First, const void* _Last, void* _Dest, uint8_t _Old_val, uint8_t _New_val) noexcept {
++    const uint8_t* first = static_cast<const uint8_t*>(_First);
++    const uint8_t* last = static_cast<const uint8_t*>(_Last);
++    uint8_t* dest = static_cast<uint8_t*>(_Dest);
++    std::replace_copy(first, last, dest, _Old_val, _New_val);
++}
++
++__declspec(noalias) void __stdcall __std_replace_copy_2(
++    const void* _First, const void* _Last, void* _Dest, uint16_t _Old_val, uint16_t _New_val) noexcept {
++    const uint16_t* first = static_cast<const uint16_t*>(_First);
++    const uint16_t* last = static_cast<const uint16_t*>(_Last);
++    uint16_t* dest = static_cast<uint16_t*>(_Dest);
++    std::replace_copy(first, last, dest, _Old_val, _New_val);
++}
++
++_Min_max_element_t __stdcall __std_minmax_element_2u(const void* _First, const void* _Last) noexcept {
++    if (_First == _Last) {
++        return {_First, _First};
++    }
++    const uint16_t* first = static_cast<const uint16_t*>(_First);
++    const uint16_t* last = static_cast<const uint16_t*>(_Last);
++    const auto p = std::minmax_element(first, last);
++    return {p.first, p.second};
++}
++
++} // extern "C"
++
++#endif // _MSC_VER
+-- 
+2.55.0.windows.5
+

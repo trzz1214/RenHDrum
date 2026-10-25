@@ -1,0 +1,39 @@
+RenHDrum
+Copyright (c) 2026 Three-Dola
+
+This product includes software developed by Three-Dola (https://github.com/trzz1214/RenHDrum).
+
+The RenHDrum core library (src/, include/, tests/, examples/, and docs/) is dual-licensed
+under either:
+  * MIT License (LICENSE-MIT or http://opensource.org/licenses/MIT)
+  * Apache License, Version 2.0 (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
+at your option.
+
+--------------------------------------------------------------------------------
+Attributions & Third-Party Credits
+--------------------------------------------------------------------------------
+
+1. Ryujinx
+   Parts of the HD Rumble DSP logic, packet structures, and state transitions
+   originated from Ryujinx and the Ryuhdr project.
+   Copyright (c) Ryujinx Team and Contributors
+   Licensed under the MIT License.
+
+2. dekuNukem (Nintendo_Switch_Reverse_Engineering)
+   HD Rumble frequency encoding formulas and 101-entry amplitude lookup table.
+   https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering
+
+3. Switchbrew
+   Reverse engineering documentation of Nintendo Switch HID reports and subcommand 0x10.
+   https://switchbrew.org/wiki/Joy-Con
+
+4. Simple DirectMedia Layer (SDL)
+   Patches in integrations/sdl3/sdl3-patches/ are derived from SDL (libsdl-org/SDL).
+   Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
+   Licensed under the zlib License (see integrations/sdl3/sdl3-patches/LICENSE).
+
+5. Brontide Reference Integration Patches
+   Patches in integrations/brontide/ apply to Eden / Yuzu emulation codebases.
+   Copyright (c) 2026 Three-Dola and the Eden / Yuzu Contributors.
+   Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later)
+   (see integrations/brontide/LICENSE).

@@ -1,0 +1,5 @@
+/target/
+*.xml
+repomix.config.json
+[Bb]in/
+[Oo]bj/

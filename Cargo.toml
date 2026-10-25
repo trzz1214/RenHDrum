@@ -1,0 +1,25 @@
+[package]
+name = "renhdrum"
+version = "0.1.0"
+edition = "2021"
+authors = ["Three-Dola"]
+description = "Real-time Nintendo Switch HD Rumble & Sony DualSense audio haptics engine in Rust with a zero-allocation C ABI"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/trzz1214/RenHDrum"
+homepage = "https://ryuhdr.threedola.workers.dev"
+readme = "README.md"
+keywords = ["hd-rumble", "dualsense", "haptics", "sdl3", "emulation"]
+categories = ["game-development", "hardware-support", "multimedia::audio"]
+
+[lib]
+name = "renhdrum"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
