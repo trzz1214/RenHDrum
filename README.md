@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/trzz1214/RenHDrum/actions/workflows/ci.yml/badge.svg)](https://github.com/trzz1214/RenHDrum/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](NOTICE)
-[![Website](https://img.shields.io/badge/Website-ryuhdr.threedola.workers.dev-success)](https://ryuhdr.threedola.workers.dev)
+[![Website](https://img.shields.io/badge/Official_website-Three--Dola-success)](https://ryuhdr.threedola.workers.dev)
 
 RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving three core challenges of modern gaming haptics:
 
@@ -29,13 +29,24 @@ RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust.
 
 The table below lists emulator projects utilizing RenHDrum:
 
-| Emulator | Base & Integration Architecture | Status | Website & Downloads |
+| Emulator | Base & Integration Architecture | Status | Page |
 |---|---|---|---|
-| **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | **Available** (`v0.4.0.1`) | [ryuhdr.threedola.workers.dev](https://ryuhdr.threedola.workers.dev) |
-| **Brontide** | Eden (C++ / Patched SDL3, `renhdrum.dll` thin hook + `Brontide-App`) | **Coming soon** | [ryuhdr.threedola.workers.dev](https://ryuhdr.threedola.workers.dev) |
-| **Ryu-HDRum** | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | **Coming soon** | [ryuhdr.threedola.workers.dev](https://ryuhdr.threedola.workers.dev) |
+| **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | **Available** (`v0.4.0.1`) | [**Download →**](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
+| **Brontide** | Eden (C++ / Patched SDL3, `renhdrum.dll` thin hook + `Brontide-App`) | **Coming soon** | [Preview →](https://ryuhdr.threedola.workers.dev/#brontide) |
+| **Ryu-HDRum** | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | **Coming soon** | [Preview →](https://ryuhdr.threedola.workers.dev/#ryu-hdrum) |
 
-*Visit the official website [ryuhdr.threedola.workers.dev](https://ryuhdr.threedola.workers.dev) for compiled emulator releases, setup guides, and changelogs.*
+*Emulator releases, setup guides and changelogs live on the [official website](https://ryuhdr.threedola.workers.dev).*
+
+### About the website
+
+The [official website](https://ryuhdr.threedola.workers.dev) is both a showcase and an open development journal for RenHDrum and the emulators built on it. Each project has its own page section covering:
+
+- **The story**: why it was started, what went wrong along the way, and what was learned (Ryuhdr began as a small prototype to fix coarse rumble and swallowed button presses, then became the reference every RenHDrum algorithm is checked against).
+- **How it's built**: the integration approach (embedded engine, SDL3 thin hook, companion app) and the trade-offs behind it.
+- **Where it stands**: what is done, what is in progress, and what comes next.
+- **Downloads**: builds that are ready to try, with SHA-256 checksums.
+
+It is a plain static page run by the author: no sign-up, no ads, no prod.keys, firmware or games. Donations are optional and never unlock features. If you are integrating RenHDrum into your own project, the site shows how it played out in three real emulators.
 
 ---
 
