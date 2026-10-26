@@ -8,7 +8,7 @@ RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust.
 
 1. **5 ms AM/FM Multi-Sample Envelope & Crisp Notes**: Synthesizes micro-timed 5 ms amplitude and frequency sub-packets (`3x5-bit`, `3x7-bit`, `2x14-bit`) within 15 ms transmission frames, combined with dynamic attack pre-emphasis (+3 dB onset boost and -3 dB sustain decay) for Nintendo Switch Pro Controllers and Joy-Cons.
 2. **Zero-Lag Bluetooth Pacing & Idle-Gating**: Eliminates wireless packet saturation and input report drops via 150 ms idle refresh, Write-After-Input gating, and a 3-tier Token Bucket scheduler (`HD_BT_LEVELS`).
-3. **Sony PlayStation 5 DualSense Audio Haptics DSP**: Generates real-time 4-channel 48 kHz float32 audio haptics for DualSense voice coil motors (VCM) over USB, with non-linear $x^{0.5}$ perceptual scaling and a calibrated 0.70 power ceiling.
+3. **Sony PlayStation 5 DualSense Audio Haptics Synthesizer**: Generates real-time 4-channel 48 kHz float32 audio haptics for DualSense voice coil motors (VCM) over USB, with non-linear x^0.5 perceptual scaling and a calibrated 0.8 output ceiling.
 
 ---
 
@@ -46,7 +46,7 @@ The [official website](https://ryuhdr.threedola.workers.dev) is both a showcase 
 - **Where it stands**: what is done, what is in progress, and what comes next.
 - **Downloads**: builds that are ready to try, with SHA-256 checksums.
 
-It is a plain static page run by the author: no sign-up, no ads, no prod.keys, firmware or games. Donations are optional and never unlock features. If you are integrating RenHDrum into your own project, the site shows how it played out in three real emulators.
+It is a plain static page run by the author: no sign-up, no ads, no decryption keys, system software or games. Donations are optional and never unlock features. If you are integrating RenHDrum into your own project, the site shows how it played out in three real emulators.
 
 ---
 
@@ -132,12 +132,46 @@ If RenHDrum improves your emulation or gaming experience, you can support ongoin
 
 ---
 
+## Research Credits & Acknowledgments
+
+RenHDrum stands on the shoulders of open-source reverse-engineering and emulation pioneers. The fidelity, low latency, and physical nuance achieved in this engine are directly built upon the empirical measurements, protocol analyses, and public documentation contributed by the community:
+
+1. **dekuNukem ([`Nintendo_Switch_Reverse_Engineering`](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering))**
+   - **Foundation**: Decoded the standard 1-sample 7-bit dual-wave packet structure (`FormatOne28bit`), logarithmic frequency formula `round(log2(f / 10) * 32)`, 101-entry non-linear amplitude lookup table (`0x00`..`0x1FC0`), neutral stop packet (`00 01 40 40`), and Subcommand `0x10` protocol.
+   - **RenHDrum Refinement**: Standardized into a zero-allocation 28-bit streaming encoder (`src/encoding/standard.rs`) with stop priority (`stop_priority`) handling on Linear Resonant Actuators (LRAs).
+
+2. **Switchbrew Wiki Contributors ([`Joy-Con`](https://switchbrew.org/wiki/Joy-Con))**
+   - **Foundation**: Documented `HidMotorData` bit-packing layouts (`VibrationAmFmPackTag`) across 8 four-byte frame configurations (`FormatZero`..`FormatThree7bit`), high-bit framing flags (`0x8080`, `0x8000`, `0x80`), and `AmFmCodes` unpacking tables identifying code `24` (`0x18`) as a hold-state command.
+   - **RenHDrum Refinement**: Developed real-time reverse packaging (5 ms Multi-Sample Planner in `src/encoding/amfm.rs` and `src/planner/amfm_planner.rs`) that dynamically selects optimal 1/2/3-sample frames per 15 ms window, with automatic sub-5-bit fallback (falling back to 1-sample 7-bit mode when amplitude drops below `SILENT_BELOW = 0.04`) to maintain silky smooth micro-vibrations.
+
+3. **felipearmat ([`OGX-Mini-2026` PR #116](https://github.com/MegaCadeDev/OGX-Mini-2026/pull/116), fork of `wiredopposite/OGX-Mini`)**
+   - **Foundation**: In PR #116 (`HdRumble.cpp` & `HdRumble.h`), uncovered the 5-bit logarithmic amplitude scale (`-0.5 * (code - 1)` with a `-0.84375` offset relative to the 7-bit peak index 100) and documented Steam UI haptic tick packets (`00 00 05 C0`). Referenced only; no code copied.
+   - **RenHDrum Refinement**: Derived the exact energy compensation constant `Code5GameScale = 1.7947091` (2^0.84375) to strictly equalize perceived energy between 7-bit and 5-bit sample streams; conducted physical acoustic spectrogram measurements using close-proximity smartphone microphone analysis to experimentally decode frequency preset codes (`12..16` with steps -12..+12) and frequency jump step codes (`STEP_UP = 23`, `STEP_DOWN = 25` in `src/encoding/amfm.rs`).
+
+4. **rei-github, ClearlyClaire ([Issue #11](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering/issues/11)) & CTCaer ([`jc_toolkit`](https://github.com/CTCaer/jc_toolkit))**
+   - **Foundation**: 2018 oscilloscope measurements by `rei-github` confirming exponential amplitude decay `2^(-0.5 * (c - 1))` and alternative bit-layouts; real hardware packet captures by `CTCaer` validating `FormatThree7bit` framing.
+   - **RenHDrum Refinement**: Engineered a 15 ms transient pulse synthesizer (`src/encoding/click.rs`) and the Crisp Notes algorithm (+3 dB attack / -3 dB sustain in `src/encoding/crisp_notes.rs`) providing snappy, instantaneous transient punch without muddying actuator response.
+
+5. **Nielk1 ([DualSense Trigger Effect Gist](https://gist.github.com/Nielk1/6d54cc2c00d2201ccb8c2720ad7538db)) & DualSense Reverse-Engineering Community**
+   - **Foundation**: Identified DualSense 4-channel 48 kHz USB Audio Class architecture (Channels 3–4 directly driving stereo Voice Coil Motors) alongside the standard HID rumble cancellation flag; decoded 10-zone bitpacking for Adaptive Triggers (`0x02`).
+   - **RenHDrum Refinement**: Built a real-time 48 kHz haptics synthesizer (`src/dualsense/haptics.rs`) mapping low/high rumble bands to dual sine waves on Channels 3–4 with perceived intensity curve `x^0.5`, 0.8 output ceiling, 1-pole 4 ms smoothing (`DUALSENSE_SMOOTHING_MS`) to preserve crisp 5 ms transient edges, and automatic legacy HID rumble silencing.
+
+6. **Sam Lantinga, Valve Corporation & SDL Contributors ([`libsdl-org/SDL`](https://github.com/libsdl-org/SDL))**
+   - **Foundation**: Multi-platform HIDAPI architecture (`SDL_hidapi_switch.c`, `SDL_hidapi_rumble.c`, `SDL_hidapi_ps5.c`), full report 0x30 handshake, USB/Bluetooth routing, and low-latency audio output.
+   - **RenHDrum Refinement**: Patched SDL2 input-dropping bug during rumble backlog, and created SDL3 patches (`integrations/sdl3/sdl3-patches/`) implementing Idle-Gated No-Queue, Write-After-Input (B1) for CYW20734 half-duplex bus collision avoidance, and 3-level Token Bucket rate limiting (B3) to prevent Bluetooth input lag spikes.
+
+7. **Ryujinx Team (`gdkchan`), Ryubing (`GreemDev`), and Eden / Yuzu Contributors**
+   - **Foundation**: HLE `Npad` / `hid` emulation service decoding in-game vibration telemetry into 5 ms `(FrequencyLow, AmplitudeLow, FrequencyHigh, AmplitudeHigh)` pairs, and foundational C# / C++ emulator runtime platforms.
+   - **RenHDrum Refinement**: Seamless drop-in integration via clean C ABI (`renhdrum.dll`).
+
+---
+
 ## License & Attribution
 
 - **Core Library**: Dual-licensed under either **MIT License** ([LICENSE-MIT](LICENSE-MIT)) or **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE)) at your option.
 - **SDL3 Patches**: Licensed under the **zlib License** ([`integrations/sdl3/sdl3-patches/LICENSE`](integrations/sdl3/sdl3-patches/LICENSE)).
 - **Brontide Patches**: Licensed under the **GNU General Public License v3.0 or later** ([`integrations/brontide/LICENSE`](integrations/brontide/LICENSE)).
-- See [`NOTICE`](NOTICE) for complete third-party attributions (Ryujinx, dekuNukem, Switchbrew, SDL).
+- See [`NOTICE`](NOTICE) for complete third-party attributions (Ryujinx, Ryubing, dekuNukem, Switchbrew, felipearmat, rei-github, CTCaer, Nielk1, SDL, Eden).
 
 ### Trademark Disclaimer
 

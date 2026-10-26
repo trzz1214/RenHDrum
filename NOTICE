@@ -13,26 +13,48 @@ at your option.
 Attributions & Third-Party Credits
 --------------------------------------------------------------------------------
 
-1. Ryujinx
+1. Ryujinx & Ryubing
    Parts of the HD Rumble DSP logic, packet structures, and state transitions
-   originated from Ryujinx and the Ryuhdr project.
-   Copyright (c) Ryujinx Team and Contributors
+   originated from Ryujinx and the Ryuhdr project (with contributions from GreemDev).
+   Copyright (c) Ryujinx Team and Contributors.
    Licensed under the MIT License.
 
 2. dekuNukem (Nintendo_Switch_Reverse_Engineering)
-   HD Rumble frequency encoding formulas and 101-entry amplitude lookup table.
+   HD Rumble frequency encoding formulas, 101-entry non-linear amplitude lookup
+   table, neutral stop packet, and Subcommand 0x10 protocol documentation
+   (rumble_data_table.md and bluetooth_hid_notes.md).
    https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering
 
-3. Switchbrew
-   Reverse engineering documentation of Nintendo Switch HID reports and subcommand 0x10.
+3. Switchbrew Wiki Contributors
+   Reverse engineering documentation of Nintendo Switch HidMotorData,
+   VibrationAmFmPackTag 4-byte bit-packing layouts, and AmFmCodes unpacking tables.
    https://switchbrew.org/wiki/Joy-Con
 
-4. Simple DirectMedia Layer (SDL)
-   Patches in integrations/sdl3/sdl3-patches/ are derived from SDL (libsdl-org/SDL).
-   Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
+4. felipearmat (OGX-Mini-2026 PR #116)
+   5-bit logarithmic amplitude decoder scale -0.5 * (code - 1) with -0.84375 offset
+   relative to 7-bit peak in HdRumble.cpp and HdRumble.h, and Steam UI tick packet analysis
+   (repo MegaCadeDev/OGX-Mini-2026, fork of wiredopposite/OGX-Mini).
+   Referenced only; no code copied.
+   https://github.com/MegaCadeDev/OGX-Mini-2026/pull/116
+
+5. rei-github, ClearlyClaire (dekuNukem Issue #11) & CTCaer (jc_toolkit)
+   Oscilloscope exponential amplitude decay measurements, alternative bit-layouts,
+   and hardware packet captures.
+   https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering/issues/11
+   https://github.com/CTCaer/jc_toolkit
+
+6. Nielk1 & DualSense Reverse-Engineering Community
+   DualSense 10-zone Adaptive Trigger bit-packing, Linux hid-playstation, and
+   4-channel 48 kHz USB Audio Class VCM routing.
+   https://gist.github.com/Nielk1/6d54cc2c00d2201ccb8c2720ad7538db
+
+7. Simple DirectMedia Layer (SDL)
+   Patches in integrations/sdl3/sdl3-patches/ are derived from SDL (libsdl-org/SDL,
+   with contributions from Valve Corporation and SDL Contributors).
+   Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>.
    Licensed under the zlib License (see integrations/sdl3/sdl3-patches/LICENSE).
 
-5. Brontide Reference Integration Patches
+8. Brontide Reference Integration Patches
    Patches in integrations/brontide/ apply to Eden / Yuzu emulation codebases.
    Copyright (c) 2026 Three-Dola and the Eden / Yuzu Contributors.
    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later)
