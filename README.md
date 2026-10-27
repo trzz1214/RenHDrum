@@ -4,6 +4,8 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](NOTICE)
 [![Website](https://img.shields.io/badge/Official_website-Three--Dola-success)](https://ryuhdr.threedola.workers.dev)
 
+**▶ Want to play? [Download an emulator with RenHDrum built in →](https://ryuhdr.threedola.workers.dev/#download)**
+
 RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving three core challenges of modern gaming haptics:
 
 1. **5 ms AM/FM Multi-Sample Envelope & Crisp Notes**: Synthesizes micro-timed 5 ms amplitude and frequency sub-packets (`3x5-bit`, `3x7-bit`, `2x14-bit`) within 15 ms transmission frames, combined with dynamic attack pre-emphasis (+3 dB onset boost and -3 dB sustain decay) for Nintendo Switch Pro Controllers and Joy-Cons.
@@ -32,8 +34,10 @@ The table below lists emulator projects utilizing RenHDrum:
 | Emulator | Base & Integration Architecture | Status | Page |
 |---|---|---|---|
 | **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | **Available** (`v0.4.0.1`) | [**Download →**](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
-| **Brontide** | Eden (C++ / Patched SDL3, `renhdrum.dll` thin hook + `Brontide-App`) | **Coming soon** | [Preview →](https://ryuhdr.threedola.workers.dev/#brontide) |
+| **Brontide** | Eden (C++ / Patched SDL3, renhdrum.dll thin hook, built-in HD Rumble Studio) | **Available** (`v1.0.0`) | [**Download →**](https://ryuhdr.threedola.workers.dev/brontide.html) |
 | **Ryu-HDRum** | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | **Coming soon** | [Preview →](https://ryuhdr.threedola.workers.dev/#ryu-hdrum) |
+
+New to HD Rumble? [See how this differs from other emulators →](https://ryuhdr.threedola.workers.dev/compare.html)
 
 *Emulator releases, setup guides and changelogs live on the [official website](https://ryuhdr.threedola.workers.dev).*
 
