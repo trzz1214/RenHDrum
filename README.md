@@ -8,9 +8,21 @@
 
 RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving three core challenges of modern gaming haptics:
 
-1. **5 ms AM/FM Multi-Sample Envelope & Crisp Notes**: Synthesizes micro-timed 5 ms amplitude and frequency sub-packets (`3x5-bit`, `3x7-bit`, `2x14-bit`) within 15 ms transmission frames, combined with dynamic attack pre-emphasis (+3 dB onset boost and -3 dB sustain decay) for Nintendo Switch Pro Controllers and Joy-Cons.
+1. **5 ms AM/FM Multi-Sample Envelope & Crisp Notes**: Synthesizes micro-timed 5 ms amplitude and frequency sub-packets (`3x5-bit`, `3x7-bit`, `2x14-bit`) within 15 ms transmission frames, combined with dynamic attack pre-emphasis (+3 dB onset boost and -3 dB sustain decay) for the Nintendo Switch Pro Controller.
 2. **Zero-Lag Bluetooth Pacing & Idle-Gating**: Eliminates wireless packet saturation and input report drops via 150 ms idle refresh, Write-After-Input gating, and a 3-tier Token Bucket scheduler (`HD_BT_LEVELS`).
 3. **Sony PlayStation 5 DualSense Audio Haptics Synthesizer**: Generates real-time 4-channel 48 kHz float32 audio haptics for DualSense voice coil motors (VCM) over USB, with non-linear x^0.5 perceptual scaling and a calibrated 0.8 output ceiling.
+
+---
+
+## Supported Controllers
+
+| Controller | Status | Connection |
+|---|---|---|
+| Nintendo Switch Pro Controller | ✅ Supported | USB or Bluetooth |
+| Sony DualSense (PS5) | ✅ Supported | USB only (no voice-coil haptics over Bluetooth) |
+| Switch 2 Pro Controller, Steam Controller, Xbox controllers (HD Rumble emulation) | 🔬 Research — not playable yet | — |
+
+Only the two supported controllers get HD Rumble today. Please don't open issues for research controllers yet.
 
 ---
 
