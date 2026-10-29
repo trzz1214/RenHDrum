@@ -65,6 +65,7 @@ pub struct RumbleConfigController {
     pub enable_dualsense_haptics: bool,
     pub dualsense_haptics_volume: i32,
     pub dualsense_crisp_notes: bool,
+    pub dualsense_bt_crisp_notes: bool,
 }
 
 impl RumbleConfigController {
@@ -102,6 +103,8 @@ impl Default for RumbleConfigController {
             enable_dualsense_haptics: true,
             dualsense_haptics_volume: Self::DEFAULT_DUALSENSE_HAPTICS_VOLUME,
             dualsense_crisp_notes: true,
+            // Over Bluetooth the 3 kHz s8 stream over-drives the accent (owner test 29/10): off by default
+            dualsense_bt_crisp_notes: false,
         }
     }
 }

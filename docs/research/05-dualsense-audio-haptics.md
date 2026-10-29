@@ -68,3 +68,25 @@ To verify bit-exact DSP behavior across toolchain updates and platform architect
 - **Precision Guarantee**: Evaluates maximum absolute deviation against reference recording benchmarks:
   $$\max |s_{\text{renhdrum}}(t) - s_{\text{benchmark}}(t)| \le 2.4 \times 10^{-6}$$
 - **Verification Threshold**: Guaranteed pass at `TOLERANCE = 1e-5`, ensuring negligible drift from hardware-verified benchmarks.
+
+---
+
+## 6. Bluetooth Transport (Report 0x32)
+
+Over Bluetooth, DualSense voice-coil haptics are driven by HID output report `0x32` rather than USB Audio Class streaming. The report carries 32 stereo frames of signed 8-bit PCM at 3000 Hz, delivered every 10.667 ms (~93.75 reports/s). RenHDrum converts internal 48 kHz DSP frames via 16:1 block averaging into 3 kHz s8 samples:
+
+| Bytes | Value | Description |
+|---|---|---|
+| `0` | `0x32` | HID Bluetooth output report ID |
+| `1` | `seq << 4` | 4-bit sequence counter (0..15), incremented per report |
+| `2..3` | `0x91, 7` | Packet 0x11 with size header (7 bytes) |
+| `4` | `0xFE` | Microphone state (0xFE = session closed) |
+| `5..8` | `0` | Reserved / padding |
+| `9` | buffer length | Target buffer length (`0xFF` default) |
+| `10` | counter | 8-bit wrapping packet counter |
+| `11..12` | `0x92, 64` | Packet 0x12 with size header (64 PCM bytes) |
+| `13..76` | PCM `[s8; 64]` | 32 interleaved stereo pairs (Left, Right) at 3000 Hz |
+| `77..137` | `0` | Trailing padding |
+| `138..141` | CRC32 (LE) | Standard CRC32 (`0xEDB88320`) over `0xA2` + bytes 0..137 |
+
+Report structure and framing layout reverse-engineered by egormanga ([SAxense](https://github.com/egormanga/SAxense), MPL-2.0). Reimplemented cleanly in `src/dualsense/bt_haptics.rs` with zero heap allocation. Shipped in Brontide 1.1.0.

@@ -59,3 +59,11 @@ Attributions & Third-Party Credits
    Copyright (c) 2026 Three-Dola and the Eden / Yuzu Contributors.
    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later)
    (see integrations/brontide/LICENSE).
+
+9. egormanga (SAxense)
+   DualSense Bluetooth haptics report 0x32 layout documentation (packet 0x11 + 0x12,
+   s8 3 kHz PCM, CRC seed 0xA2).
+   Format reference only; no code copied.
+   Licensed under Mozilla Public License 2.0 (MPL-2.0).
+   https://github.com/egormanga/SAxense
+   https://apps.sdore.me/SAxense

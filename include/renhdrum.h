@@ -58,6 +58,7 @@ typedef struct RenHdcConfig {
     bool enable_dualsense_haptics;
     int32_t dualsense_haptics_volume;
     bool dualsense_crisp_notes;
+    bool dualsense_bt_crisp_notes;
 } RenHdcConfig;
 
 typedef struct RenHdSideSample {
@@ -249,6 +250,16 @@ int32_t renhdrum_dualsense_dsp_fill_f32(
     RenHdcDualSenseDsp *dsp,
     float *out_interleaved_4ch,
     size_t frame_count
+);
+/* DualSense over Bluetooth: one HID output report 0x32 every RENHDRUM_DS5_BT_PERIOD_NS.
+   Report layout from SAxense by egormanga (https://apps.sdore.me/SAxense). */
+#define RENHDRUM_DS5_BT_REPORT_SIZE 142
+#define RENHDRUM_DS5_BT_PERIOD_NS 10666666ULL
+#define RENHDRUM_DS5_BT_BUFFER_LENGTH_DEFAULT 0xFF
+int32_t renhdrum_dualsense_dsp_build_bt_report(
+    RenHdcDualSenseDsp *dsp,
+    uint8_t buffer_length,
+    uint8_t *out_report142
 );
 int32_t renhdrum_dualsense_evaluate_triggers(
     uint64_t title_id,

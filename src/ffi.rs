@@ -4,8 +4,8 @@ use std::slice;
 
 use crate::backend::NintendoHdEngine;
 use crate::dualsense::{
-    pack_ds5_effects_state, DualSenseHapticsDsp, DualSenseTriggerInput, DualSenseTriggerProfile,
-    DualSenseTriggerProfileConfig,
+    pack_ds5_effects_state, DualSenseBtPacker, DualSenseHapticsDsp, DualSenseTriggerInput,
+    DualSenseTriggerProfile, DualSenseTriggerProfileConfig, DS5_BT_HAPTICS_REPORT_SIZE,
 };
 use crate::encoding::amfm::HdAmFmEncoding;
 use crate::encoding::click::{HdClickEncoding, HdClickKind, HdClickSide};
@@ -68,6 +68,7 @@ pub struct RenHdcConfig {
     pub enable_dualsense_haptics: bool,
     pub dualsense_haptics_volume: i32,
     pub dualsense_crisp_notes: bool,
+    pub dualsense_bt_crisp_notes: bool,
 }
 
 impl From<&HdRumbleSettings> for RenHdcSettings {
@@ -159,6 +160,7 @@ impl From<&RenHdcConfig> for RumbleConfigController {
             enable_dualsense_haptics: c.enable_dualsense_haptics,
             dualsense_haptics_volume: c.dualsense_haptics_volume,
             dualsense_crisp_notes: c.dualsense_crisp_notes,
+            dualsense_bt_crisp_notes: c.dualsense_bt_crisp_notes,
         }
     }
 }
@@ -191,6 +193,7 @@ impl From<&RumbleConfigController> for RenHdcConfig {
             enable_dualsense_haptics: c.enable_dualsense_haptics,
             dualsense_haptics_volume: c.dualsense_haptics_volume,
             dualsense_crisp_notes: c.dualsense_crisp_notes,
+            dualsense_bt_crisp_notes: c.dualsense_bt_crisp_notes,
         }
     }
 }
@@ -680,6 +683,9 @@ pub struct RenHdcEngine {
 
 pub struct RenHdcDualSenseDsp {
     pub(crate) inner: std::sync::Mutex<DualSenseHapticsDsp>,
+    pub(crate) bt_packer: std::sync::Mutex<DualSenseBtPacker>,
+    /// Crisp notes on the Bluetooth path (report 0x32), a setting apart from the wired one
+    pub(crate) bt_crisp_notes: bool,
 }
 
 #[no_mangle]
@@ -793,13 +799,23 @@ pub extern "C" fn renhdrum_dualsense_dsp_create(
     volume_percent: i32,
     crisp_notes: bool,
 ) -> *mut RenHdcDualSenseDsp {
-    let (vol, crisp) = if let Some(app) = crate::ipc::app_config() {
-        (app.dualsense_haptics_volume, app.dualsense_crisp_notes)
+    let (vol, crisp, bt_crisp) = if let Some(app) = crate::ipc::app_config() {
+        (
+            app.dualsense_haptics_volume,
+            app.dualsense_crisp_notes,
+            app.dualsense_bt_crisp_notes,
+        )
     } else {
-        (volume_percent, crisp_notes)
+        (
+            volume_percent,
+            crisp_notes,
+            RumbleConfigController::default().dualsense_bt_crisp_notes,
+        )
     };
     Box::into_raw(Box::new(RenHdcDualSenseDsp {
         inner: std::sync::Mutex::new(DualSenseHapticsDsp::new(vol, crisp)),
+        bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
+        bt_crisp_notes: bt_crisp,
     }))
 }
 
@@ -877,6 +893,27 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_fill_f32(
     } else {
         RENHDRUM_ERR_INVALID_ARG
     }
+}
+
+/// Builds one DualSense Bluetooth haptics report 0x32 (142 bytes) from the next 10.667 ms of the DSP.
+/// Returns 1 when the block carries vibration, 0 when silent, < 0 on error.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt_report(
+    dsp: *mut RenHdcDualSenseDsp,
+    buffer_length: u8,
+    out_report142: *mut u8,
+) -> i32 {
+    if dsp.is_null() || out_report142.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
+        return RENHDRUM_ERR_INVALID_ARG;
+    };
+    if inner.crisp_notes != (*dsp).bt_crisp_notes {
+        inner.set_crisp_notes((*dsp).bt_crisp_notes);
+    }
+    let out = &mut *(out_report142 as *mut [u8; DS5_BT_HAPTICS_REPORT_SIZE]);
+    i32::from(packer.build(&mut inner, buffer_length, out))
 }
 
 #[no_mangle]
@@ -1090,6 +1127,51 @@ mod tests {
                 RENHDRUM_OK
             );
             assert_eq!(effects[0], 0x0C);
+        }
+    }
+
+    #[test]
+    fn test_dualsense_dsp_build_bt_report_ffi() {
+        unsafe {
+            let mut report = [0u8; DS5_BT_HAPTICS_REPORT_SIZE];
+            assert_eq!(
+                renhdrum_dualsense_dsp_build_bt_report(
+                    std::ptr::null_mut(),
+                    0xFF,
+                    report.as_mut_ptr()
+                ),
+                RENHDRUM_ERR_NULL_PTR
+            );
+
+            let dsp = renhdrum_dualsense_dsp_create(100, true);
+            assert!(!dsp.is_null());
+
+            assert_eq!(
+                renhdrum_dualsense_dsp_build_bt_report(dsp, 0xFF, std::ptr::null_mut()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+
+            let r0 = renhdrum_dualsense_dsp_build_bt_report(dsp, 0xFF, report.as_mut_ptr());
+            assert_eq!(r0, 0);
+            assert_eq!(report[0], 0x32);
+
+            assert_eq!(
+                renhdrum_dualsense_dsp_set_target(
+                    dsp, 1.0, 160.0, 1.0, 320.0, 1.0, 160.0, 1.0, 320.0
+                ),
+                RENHDRUM_OK
+            );
+
+            let mut got_signal = false;
+            for _ in 0..5 {
+                let r = renhdrum_dualsense_dsp_build_bt_report(dsp, 0xFF, report.as_mut_ptr());
+                if r == 1 {
+                    got_signal = true;
+                }
+            }
+            assert!(got_signal, "expected at least one report to have signal");
+
+            renhdrum_dualsense_dsp_destroy(dsp);
         }
     }
 

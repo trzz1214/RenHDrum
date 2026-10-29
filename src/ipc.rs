@@ -407,7 +407,7 @@ pub fn settings_file_path() -> Option<PathBuf> {
     Some(p)
 }
 
-/// Serializes all 23 fields of `RenHdcConfig` to simple `key=value` text format.
+/// Serializes all 24 fields of `RenHdcConfig` to simple `key=value` text format.
 pub fn write_settings_text(c: &RenHdcConfig) -> String {
     let mut s = String::new();
     s.push_str("# Brontide-App settings, read by renhdrum.dll when the App is closed\n");
@@ -490,6 +490,10 @@ pub fn write_settings_text(c: &RenHdcConfig) -> String {
     s.push_str(&format!(
         "dualsense_crisp_notes={}\n",
         c.dualsense_crisp_notes
+    ));
+    s.push_str(&format!(
+        "dualsense_bt_crisp_notes={}\n",
+        c.dualsense_bt_crisp_notes
     ));
     s
 }
@@ -594,6 +598,10 @@ pub fn parse_settings_text(text: &str) -> Option<RenHdcConfig> {
             "dualsense_crisp_notes" => val
                 .parse::<bool>()
                 .map(|v| cfg.dualsense_crisp_notes = v)
+                .is_ok(),
+            "dualsense_bt_crisp_notes" => val
+                .parse::<bool>()
+                .map(|v| cfg.dualsense_bt_crisp_notes = v)
                 .is_ok(),
             _ => false,
         };
@@ -745,6 +753,7 @@ mod tests {
         cfg.hd_rumble_bluetooth_level = 1;
         cfg.hd_rumble_experimental_bt_crisp_notes = false;
         cfg.dualsense_haptics_volume = 70;
+        cfg.dualsense_bt_crisp_notes = true;
 
         let text = write_settings_text(&cfg);
         let parsed = parse_settings_text(&text).expect("roundtrip parse failed");

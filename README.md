@@ -5,6 +5,10 @@
 [![Website](https://img.shields.io/badge/Official_website-Three--Dola-success)](https://ryuhdr.threedola.workers.dev)
 
 **▶ Want to play? [Download an emulator with RenHDrum built in →](https://ryuhdr.threedola.workers.dev/#download)**
+- **Brontide 1.1.0**: DualSense USB + Bluetooth haptics, Switch Pro Controller, built-in HD Rumble Studio.
+- **Ryuhdr 0.5.0**: Switch Pro Controller, DualSense USB haptics (Bluetooth coming in 0.5.1).
+
+Found a problem? Use *Report a controller problem* in the emulator's Help menu, or open a [controller problem report](https://github.com/trzz1214/RenHDrum/issues/new?template=controller_problem.md).
 
 RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving three core challenges of modern gaming haptics:
 
@@ -19,7 +23,7 @@ RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust.
 | Controller | Status | Connection |
 |---|---|---|
 | Nintendo Switch Pro Controller | ✅ Supported | USB or Bluetooth |
-| Sony DualSense (PS5) | ✅ Supported | USB only (no voice-coil haptics over Bluetooth) |
+| Sony DualSense (PS5) | ✅ Supported | USB + Bluetooth (Brontide 1.1.0; Ryuhdr 0.5.1 coming) |
 | Switch 2 Pro Controller, Steam Controller, Xbox controllers (HD Rumble emulation) | 🔬 Research — not playable yet | — |
 
 Only the two supported controllers get HD Rumble today. Please don't open issues for research controllers yet.
@@ -45,8 +49,8 @@ The table below lists emulator projects utilizing RenHDrum:
 
 | Emulator | Base & Integration Architecture | Status | Page |
 |---|---|---|---|
-| **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | **Available** (`v0.4.0.1`) | [**Download →**](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
-| **Brontide** | Eden (C++ / Patched SDL3, renhdrum.dll thin hook, built-in HD Rumble Studio) | **Available** (`v1.0.0`) | [**Download →**](https://ryuhdr.threedola.workers.dev/brontide.html) |
+| **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | **Available** (`v0.5.0`) | [**Download →**](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
+| **Brontide** | Eden (C++ / Patched SDL3, renhdrum.dll thin hook, built-in HD Rumble Studio) | **Available** (`v1.1.0`) | [**Download →**](https://ryuhdr.threedola.workers.dev/brontide.html) |
 | **Ryu-HDRum** | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | **Coming soon** | [Preview →](https://ryuhdr.threedola.workers.dev/#ryu-hdrum) |
 
 New to HD Rumble? [See how this differs from other emulators →](https://ryuhdr.threedola.workers.dev/compare.html)
@@ -180,6 +184,10 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
    - **Foundation**: HLE `Npad` / `hid` emulation service decoding in-game vibration telemetry into 5 ms `(FrequencyLow, AmplitudeLow, FrequencyHigh, AmplitudeHigh)` pairs, and foundational C# / C++ emulator runtime platforms.
    - **RenHDrum Refinement**: Seamless drop-in integration via clean C ABI (`renhdrum.dll`).
 
+8. **egormanga ([SAxense](https://github.com/egormanga/SAxense), https://apps.sdore.me/SAxense)**
+   - **Foundation**: DualSense Bluetooth haptics report 0x32 layout (packet 0x11 + 0x12, s8 3 kHz PCM, CRC seed 0xA2).
+   - **RenHDrum Refinement**: Engineered zero-allocation report packaging module (`src/dualsense/bt_haptics.rs`) and C ABI export (`renhdrum_dualsense_dsp_build_bt_report`) converting internal 48 kHz DSP output to 3 kHz s8 with 16:1 block averaging and Sony CRC32 checksum.
+
 ---
 
 ## License & Attribution
@@ -187,7 +195,7 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
 - **Core Library**: Dual-licensed under either **MIT License** ([LICENSE-MIT](LICENSE-MIT)) or **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE)) at your option.
 - **SDL3 Patches**: Licensed under the **zlib License** ([`integrations/sdl3/sdl3-patches/LICENSE`](integrations/sdl3/sdl3-patches/LICENSE)).
 - **Brontide Patches**: Licensed under the **GNU General Public License v3.0 or later** ([`integrations/brontide/LICENSE`](integrations/brontide/LICENSE)).
-- See [`NOTICE`](NOTICE) for complete third-party attributions (Ryujinx, Ryubing, dekuNukem, Switchbrew, felipearmat, rei-github, CTCaer, Nielk1, SDL, Eden).
+- See [`NOTICE`](NOTICE) for complete third-party attributions (Ryujinx, Ryubing, dekuNukem, Switchbrew, felipearmat, rei-github, CTCaer, Nielk1, SDL, Eden, egormanga).
 
 ### Trademark Disclaimer
 
