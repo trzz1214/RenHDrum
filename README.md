@@ -4,6 +4,10 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](NOTICE)
 [![Website](https://img.shields.io/badge/Official_website-Three--Dola-success)](https://ryuhdr.threedola.workers.dev)
 
+> **📓 This repo is the engine. The story is on the website.**
+> [ryuhdr.threedola.workers.dev](https://ryuhdr.threedola.workers.dev) is my online lab notebook about HD Rumble in Switch emulators: how RenHDrum grew from a rumble patch for one emulator into a shared haptics core, what I measured along the way (holding a phone mic to a vibrating controller, Bluetooth packet pacing, DualSense voice coils), the surprises, and the documents worth reading.
+> Start here: [the journey](https://ryuhdr.threedola.workers.dev/#ryuhdr) · [how emulators handle HD Rumble](https://ryuhdr.threedola.workers.dev/compare) · [DualSense haptics](https://ryuhdr.threedola.workers.dev/dualsense) · [Two Ancestors: yuzu & Ryujinx](https://ryuhdr.threedola.workers.dev/lineage)
+
 **▶ Want to play? [Download an emulator with RenHDrum built in →](https://ryuhdr.threedola.workers.dev/#download)**
 - **Brontide 1.1.0**: DualSense USB + Bluetooth haptics, Switch Pro Controller, built-in HD Rumble Studio.
 - **Ryuhdr 0.5.0**: Switch Pro Controller, DualSense USB haptics (Bluetooth coming in 0.5.1).
@@ -23,7 +27,7 @@ RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust.
 | Controller | Status | Connection |
 |---|---|---|
 | Nintendo Switch Pro Controller | ✅ Supported | USB or Bluetooth |
-| Sony DualSense (PS5) | ✅ Supported | USB + Bluetooth (Brontide 1.1.0; Ryuhdr 0.5.1 coming) |
+| Sony DualSense (PS5) | ✅ Supported | **USB:** Brontide 1.1.0, Ryuhdr 0.5.0<br>**Bluetooth:** Brontide 1.1.0 · Ryuhdr 0.5.1 (coming soon) |
 | Switch 2 Pro Controller, Steam Controller, Xbox controllers (HD Rumble emulation) | 🔬 Research — not playable yet | — |
 
 Only the two supported controllers get HD Rumble today. Please don't open issues for research controllers yet.
