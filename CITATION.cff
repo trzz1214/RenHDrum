@@ -3,8 +3,8 @@ message: "If you use this software in your research, emulator, or application, p
 title: "RenHDrum: Real-Time Nintendo Switch HD Rumble and DualSense Audio Haptics Engine"
 authors:
   - name: "Three-Dola"
-version: "0.1.0"
-date-released: "2026-10-25"
+version: "0.1.1"
+date-released: "2026-10-30"
 license: "MIT OR Apache-2.0"
 repository-code: "https://github.com/trzz1214/RenHDrum"
 url: "https://ryuhdr.threedola.workers.dev"

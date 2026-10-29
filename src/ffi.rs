@@ -14,7 +14,7 @@ use crate::encoding::standard::{hd_encode_packet, hd_encode_side};
 use crate::preset::{HdRumblePreset, HdRumblePresetKind};
 use crate::settings::{HdRumbleSettings, RumbleConfigController};
 
-pub const RENHDRUM_VERSION: u32 = 0x000100; // 0.1.0
+pub const RENHDRUM_VERSION: u32 = 0x000101; // 0.1.1
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
@@ -966,7 +966,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000100);
+        assert_eq!(renhdrum_version(), 0x000101);
     }
 
     #[test]

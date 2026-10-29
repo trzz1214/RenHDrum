@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-10-30
+
+### Added
+- **DualSense Bluetooth haptics (HID output report `0x32`)**: `renhdrum_dualsense_dsp_build_bt_report` packs the 48 kHz DSP output into 32 stereo frames of signed 8-bit PCM at 3 kHz, with sequence counter and CRC32 (seed `0xA2`), for one report every 10.667 ms. Zero heap allocation (`src/dualsense/bt_haptics.rs`). Report layout learned from [SAxense](https://github.com/egormanga/SAxense) by egormanga (MPL-2.0); implementation written from scratch. First shipped in Brontide 1.1.0.
+- **`dualsense_bt_crisp_notes`** in `RenHdcConfig`: crisp notes over Bluetooth, separate from USB and off by default (the 3 kHz stream is coarser than 48 kHz). Appended at the end of the struct; `sizeof(RenHdcConfig)` is unchanged (48 bytes), so hosts built against 0.1.0 keep working.
+
+### Changed
+- `RENHDRUM_VERSION` is now `0x000101`.
+
 ## [0.1.0] - 2026-10-25
 
 ### Added

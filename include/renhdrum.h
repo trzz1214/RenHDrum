@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RENHDRUM_VERSION 0x000100
+#define RENHDRUM_VERSION 0x000101
 
 #define RENHDRUM_OK 0
 #define RENHDRUM_ERR_NULL_PTR -1

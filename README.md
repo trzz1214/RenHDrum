@@ -27,7 +27,7 @@ RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust.
 | Controller | Status | Connection |
 |---|---|---|
 | Nintendo Switch Pro Controller | ✅ Supported | USB or Bluetooth |
-| Sony DualSense (PS5) | ✅ Supported | **USB:** Brontide 1.1.0, Ryuhdr 0.5.0<br>**Bluetooth:** Brontide 1.1.0 · Ryuhdr 0.5.1 (coming soon) |
+| Sony DualSense (PS5) | ✅ Supported | USB or Bluetooth |
 | Switch 2 Pro Controller, Steam Controller, Xbox controllers (HD Rumble emulation) | 🔬 Research — not playable yet | — |
 
 Only the two supported controllers get HD Rumble today. Please don't open issues for research controllers yet.
