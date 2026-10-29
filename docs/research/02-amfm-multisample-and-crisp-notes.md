@@ -89,3 +89,29 @@ Amplitude
 ```
 
 This transient shaping restores sharp tactile clicks and crisp musical note separation on Nintendo Switch Pro Controllers and Joy-Cons over both USB and low-latency Bluetooth links.
+
+---
+
+## 5. Measuring Pitch with a Phone Microphone
+
+Two questions blocked pitch changes inside a packet: what the 19 five-bit codes `12..31` (except `24`) do to frequency, and whether the high band of the 14-bit format reads its 7-bit frequency field on the same scale as the low band. A controller sounds at the frequency it vibrates, so a phone recording can answer both without trusting hand feel.
+
+**Method.** The controller (a wired Pro Controller) was held against the phone's microphone while a fixed test sequence played: a three-beep sync marker (two 320 Hz high-band waves, 105 ms each), then 30 segments of three phases, 67 slots of 15 ms per phase, with a 1.5 s pause between segments. The recording (149 s, 31 of 31 segments captured; SDL logged 198-202 packets per segment) was analyzed offline by spectrum, one peak frequency per phase. Each segment changes only one thing (a packet format, a band, or one code) so any change in pitch is caused by that one thing.
+
+**Calibration.** Every measured pitch was about 1.3 % below its target in every packet format (631.5 Hz for 640, 315.7 for 320, 157.9 for 160): a constant offset of the controller and microphone, ignored when comparing segments.
+
+| Segment | Measured | Conclusion |
+|---|---|---|
+| Two-wave reference vs 14-bit format, high band (316 / 631 / 995 Hz) | Same pitches and loudness | The high band of the 14-bit format is correct |
+| 7-bit `IsFm` format on the high band | 632 -> 316 -> 995 Hz | This format can change the high-band frequency |
+| Low band, two-wave and 14-bit (79 / 158 / 316 Hz) | Identical | Low band behaves as already known |
+| Code `24` only, 2 s | Pitch and loudness unchanged | Code `24` = hold (third confirmation) |
+| Codes `12..16`, high band | 243 / 276 / 316 / 359 / 409 Hz; one application = ten applications | Preset pitches around the band default (320 Hz): -12 / -6 / 0 / +6 / +12 steps, strength kept (code `13` on the high band was about 20 dB quieter, cause unknown, not used) |
+| Codes `12..16`, low band | 121 / 138 / 158 / 180 / 204 Hz | Same presets around 160 Hz |
+| Codes `17..31` except `24` | Three groups: first code +1 step, middle code hold, last code -1 step, accumulating (ten applications = +-10 steps for codes 17 / 19 / 23 / 29); `23` / `25` are pure +1 / -1 step | Relative frequency steps of +-1 (a step is 1/32 octave) with an amplitude step per the 5-bit scale |
+
+A step is 1/32 octave, the unit of the frequency formula in monograph 01. A weak earlier result for the high band of the 14-bit format came from 640 Hz vibrating very faintly in the hand (the reference segment was also weak), not from an encoding error.
+
+**Open issue.** 6 of 10 step-code segments reached only 6-9 steps instead of 10, and two single applications (codes `22`, `25`) had no effect, so some samples are lost on the way (SDL logged 1-3 packets fewer in a few segments, or the controller dropped them). A relative step that is lost makes pitch drift, so the planner re-sends an absolute frequency for any band that last moved by a relative step, at the next packet where that band sounds. Preset codes and code `0` are absolute and need no such repair.
+
+**Use in code.** Counting a 7-minute session of a music-heavy game before these findings, 9,253 of 20,038 packet sides (46 %) fell back to a single two-wave peak; 68 % of those fallbacks needed a new frequency only in the high band and 32 % in both bands. Using the preset codes and the +-1 step codes lets the planner change frequency every 5 ms for either band. In a later 10-minute session, the logged fallback rate was about 62 % with the change off and about 12 % with it on (a different session and count from the 46 % above).
