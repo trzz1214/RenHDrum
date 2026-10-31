@@ -2,19 +2,14 @@
 
 [![CI](https://github.com/trzz1214/RenHDrum/actions/workflows/ci.yml/badge.svg)](https://github.com/trzz1214/RenHDrum/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](NOTICE)
-[![Website](https://img.shields.io/badge/Official_website-Three--Dola-success)](https://ryuhdr.threedola.workers.dev)
+[![Website](https://img.shields.io/badge/Research_Notebook-Three--Dola-success)](https://ryuhdr.threedola.workers.dev)
 
-> **📓 This repo is the engine. The story is on the website.**
-> [ryuhdr.threedola.workers.dev](https://ryuhdr.threedola.workers.dev) is my online lab notebook about HD Rumble in Switch emulators: how RenHDrum grew from a rumble patch for one emulator into a shared haptics core, what I measured along the way (holding a phone mic to a vibrating controller, Bluetooth packet pacing, DualSense voice coils), the surprises, and the documents worth reading.
-> Start here: [the journey](https://ryuhdr.threedola.workers.dev/#ryuhdr) · [how emulators handle HD Rumble](https://ryuhdr.threedola.workers.dev/compare) · [DualSense haptics](https://ryuhdr.threedola.workers.dev/dualsense) · [Two Ancestors: yuzu & Ryujinx](https://ryuhdr.threedola.workers.dev/lineage)
+> **📓 Lab Notebook & Technical Journey**
+> [ryuhdr.threedola.workers.dev](https://ryuhdr.threedola.workers.dev) is an open research notebook and dev log: documenting the journey of bringing authentic hardware HD Rumble and DualSense haptics into Switch emulation, demystifying low-level haptic challenges (5 ms AM/FM micro-timing, Bluetooth packet pacing, DualSense 48 kHz voice-coil DSP), and sharing physical measurements.
+>
+> Explore the notes: [The Journey](https://ryuhdr.threedola.workers.dev/#ryuhdr) · [How Emulators Handle HD Rumble](https://ryuhdr.threedola.workers.dev/compare) · [DualSense Haptics](https://ryuhdr.threedola.workers.dev/dualsense) · [Two Ancestors: yuzu & Ryujinx](https://ryuhdr.threedola.workers.dev/lineage)
 
-**▶ Want to play? [Download an emulator with RenHDrum built in →](https://ryuhdr.threedola.workers.dev/#download)**
-- **Brontide 1.1.0**: DualSense USB + Bluetooth haptics, Switch Pro Controller, built-in HD Rumble Studio.
-- **Ryuhdr 0.5.0**: Switch Pro Controller, DualSense USB haptics (Bluetooth coming in 0.5.1).
-
-Found a problem? Use *Report a controller problem* in the emulator's Help menu, or open a [controller problem report](https://github.com/trzz1214/RenHDrum/issues/new?template=controller_problem.md).
-
-RenHDrum is an ultra-low-latency, real-time haptics engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving three core challenges of modern gaming haptics:
+RenHDrum is an ultra-low-latency, real-time haptics research and synthesis engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving three core challenges of modern gaming haptics:
 
 1. **5 ms AM/FM Multi-Sample Envelope & Crisp Notes**: Synthesizes micro-timed 5 ms amplitude and frequency sub-packets (`3x5-bit`, `3x7-bit`, `2x14-bit`) within 15 ms transmission frames, combined with dynamic attack pre-emphasis (+3 dB onset boost and -3 dB sustain decay) for the Nintendo Switch Pro Controller.
 2. **Zero-Lag Bluetooth Pacing & Idle-Gating**: Eliminates wireless packet saturation and input report drops via 150 ms idle refresh, Write-After-Input gating, and a 3-tier Token Bucket scheduler (`HD_BT_LEVELS`).
@@ -47,30 +42,27 @@ Only the two supported controllers get HD Rumble today. Please don't open issues
 
 ---
 
-## Emulators using RenHDrum
+## Reference Testbeds & Implementations
 
-The table below lists emulator projects utilizing RenHDrum:
+These emulator forks are personal experimental testbeds used to validate RenHDrum in actual games and verify physical haptic fidelity. They serve as reference examples of how authentic HD Rumble can be hooked into existing architectures:
 
-| Emulator | Base & Integration Architecture | Status | Page |
+| Project | Base & Integration Architecture | Testbed Role | Research Notes |
 |---|---|---|---|
-| **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | **Available** (`v0.5.0`) | [**Download →**](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
-| **Brontide** | Eden (C++ / Patched SDL3, renhdrum.dll thin hook, built-in HD Rumble Studio) | **Available** (`v1.1.0`) | [**Download →**](https://ryuhdr.threedola.workers.dev/brontide.html) |
-| **Ryu-HDRum** | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | **Coming soon** | [Preview →](https://ryuhdr.threedola.workers.dev/#ryu-hdrum) |
+| **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | Reference baseline & golden waveform source | [Lab Notes →](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
+| **Brontide** | Eden (C++ / Patched SDL3, `renhdrum.dll` thin hook, built-in HD Rumble Studio) | Pure C ABI validation & DualSense BT testbed | [Lab Notes →](https://ryuhdr.threedola.workers.dev/brontide.html) |
+| **Ryu-HDRum** | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | SDL3 C# interop & modern runtime testbed | [Lab Notes →](https://ryuhdr.threedola.workers.dev/#ryu-hdrum) |
 
 New to HD Rumble? [See how this differs from other emulators →](https://ryuhdr.threedola.workers.dev/compare.html)
 
-*Emulator releases, setup guides and changelogs live on the [official website](https://ryuhdr.threedola.workers.dev).*
+### About the Website & Online Notebook
 
-### About the website
+The website at [ryuhdr.threedola.workers.dev](https://ryuhdr.threedola.workers.dev) serves as an online research notebook and dev journal rather than a distribution hub. It documents the personal engineering journey and explains complex technical hurdles in an accessible way:
 
-The [official website](https://ryuhdr.threedola.workers.dev) is both a showcase and an open development journal for RenHDrum and the emulators built on it. Each project has its own page section covering:
+- **The Journey & Measurements**: Why this research started, what went wrong along the way, and physical empirical data (smartphone microphone acoustic recordings, oscilloscope traces, Bluetooth packet pacing).
+- **Technical Demystification**: Intuitive explanations of how HD Rumble actually functions (5 ms AM/FM micro-timing sub-packets, attack pre-emphasis, and DualSense 48 kHz voice-coil audio DSP).
+- **Integration Lessons**: Detailed architectural breakdowns of hooking HD Rumble into different runtime stacks (SDL2 vs SDL3, embedded engine vs thin dynamic C ABI hook).
 
-- **The story**: why it was started, what went wrong along the way, and what was learned (Ryuhdr began as a small prototype to fix coarse rumble and swallowed button presses, then became the reference every RenHDrum algorithm is checked against).
-- **How it's built**: the integration approach (embedded engine, SDL3 thin hook, companion app) and the trade-offs behind it.
-- **Where it stands**: what is done, what is in progress, and what comes next.
-- **Downloads**: builds that are ready to try, with SHA-256 checksums.
-
-It is a plain static page run by the author: no sign-up, no ads, no decryption keys, system software or games. Donations are optional and never unlock features. If you are integrating RenHDrum into your own project, the site shows how it played out in three real emulators.
+It is a non-commercial, personal research journal: no ads, no sign-ups, and strictly no game files or system keys.
 
 ---
 
