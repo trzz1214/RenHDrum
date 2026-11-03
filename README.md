@@ -27,6 +27,12 @@ RenHDrum is an ultra-low-latency, real-time haptics research and synthesis engin
 
 Only the two supported controllers get HD Rumble today. Please don't open issues for research controllers yet.
 
+### Xbox One S (in testing, not released)
+
+Brontide has an experimental mapper that turns HD Rumble into the Xbox One S's four motors (two grips, two triggers). It is still being tuned and is not in a public build yet.
+
+**Side find: a Metroid Prime 4 stutter.** With an Xbox One S pad, Metroid Prime 4 stuttered and its audio crackled in Brontide, even with plain rumble. The emulator sent every rumble call (about 120 a second in that game) straight from the game's emulation thread, and an Xbox pad (WGI / XInput) can hold that call for a few milliseconds. The next Brontide keeps only the newest rumble sample and sends it from the input polling loop, so the game never waits for the controller.
+
 ---
 
 ## Comparison Table
