@@ -13,6 +13,7 @@ pub mod preset;
 pub mod settings;
 pub mod status;
 pub mod test_pattern;
+pub mod xbox;
 
 pub use backend::{HdSample, NintendoHdEngine};
 pub use dualsense::{
@@ -42,3 +43,4 @@ pub use status::{
     DualSenseHapticsStatus, Entry, LinkCounters, PlayerIndex, RumbleBackendKind, RumbleStatus,
     RumbleTransport, SyncCounters,
 };
+pub use xbox::{XboxRumbleMapper, XboxRumbleTuning};

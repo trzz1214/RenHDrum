@@ -9,11 +9,12 @@
 >
 > Explore the notes: [The Journey](https://ryuhdr.threedola.workers.dev/#ryuhdr) · [How Emulators Handle HD Rumble](https://ryuhdr.threedola.workers.dev/compare) · [DualSense Haptics](https://ryuhdr.threedola.workers.dev/dualsense) · [Two Ancestors: yuzu & Ryujinx](https://ryuhdr.threedola.workers.dev/lineage)
 
-RenHDrum is an ultra-low-latency, real-time haptics research and synthesis engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving three core challenges of modern gaming haptics:
+RenHDrum is an ultra-low-latency, real-time haptics research and synthesis engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving four core challenges of modern gaming haptics:
 
 1. **5 ms AM/FM Multi-Sample Envelope & Crisp Notes**: Synthesizes micro-timed 5 ms amplitude and frequency sub-packets (`3x5-bit`, `3x7-bit`, `2x14-bit`) within 15 ms transmission frames, combined with dynamic attack pre-emphasis (+3 dB onset boost and -3 dB sustain decay) for the Nintendo Switch Pro Controller.
 2. **Zero-Lag Bluetooth Pacing & Idle-Gating**: Eliminates wireless packet saturation and input report drops via 150 ms idle refresh, Write-After-Input gating, and a 3-tier Token Bucket scheduler (`HD_BT_LEVELS`).
 3. **Sony PlayStation 5 DualSense Audio Haptics Synthesizer**: Generates real-time 4-channel 48 kHz float32 audio haptics for DualSense voice coil motors (VCM) over USB, with non-linear x^0.5 perceptual scaling and a calibrated 0.8 output ceiling.
+4. **Xbox One Rumble**: Translates Switch HD Rumble into the four motors of a Microsoft Xbox One controller (two grips, two triggers), with a rotor model and overdrive for the old-style motors. See [research/10](docs/research/10-xbox-one-rumble.md) and the [integration guide](docs/integration/xbox.md).
 
 ---
 
@@ -23,15 +24,12 @@ RenHDrum is an ultra-low-latency, real-time haptics research and synthesis engin
 |---|---|---|
 | Nintendo Switch Pro Controller | ✅ Supported | USB or Bluetooth |
 | Sony DualSense (PS5) | ✅ Supported | USB or Bluetooth |
-| Switch 2 Pro Controller, Steam Controller, Xbox controllers (HD Rumble emulation) | 🔬 Research — not playable yet | — |
+| Microsoft Xbox One S | ✅ Xbox One Rumble (translated, 4 motors) | USB or Bluetooth |
+| Switch 2 Pro Controller, Steam Controller | 🔬 Research — not playable yet | — |
 
-Only the two supported controllers get HD Rumble today. Please don't open issues for research controllers yet.
+Built and tested on the Xbox One S controller. Other Microsoft Xbox One and Series X|S controllers share the same four-motor design and should work too, but we have not tested them yet: tell us how yours feels.
 
-### Xbox One S (in testing, not released)
-
-Brontide has an experimental mapper that turns HD Rumble into the Xbox One S's four motors (two grips, two triggers). It is still being tuned and is not in a public build yet.
-
-**Side find: a Metroid Prime 4 stutter.** With an Xbox One S pad, Metroid Prime 4 stuttered and its audio crackled in Brontide, even with plain rumble. The emulator sent every rumble call (about 120 a second in that game) straight from the game's emulation thread, and an Xbox pad (WGI / XInput) can hold that call for a few milliseconds. The next Brontide keeps only the newest rumble sample and sends it from the input polling loop, so the game never waits for the controller.
+Please don't open issues for research controllers yet.
 
 ---
 
@@ -101,6 +99,7 @@ Integrating `renhdrum.dll` with an SDL3-based C/C++ or C# host requires 5 straig
   - [05: DualSense 48 kHz Audio Haptics DSP](docs/research/05-dualsense-audio-haptics.md)
   - [06: SDL3 vs SDL2 HIDAPI Rumble Architecture](docs/research/06-sdl3-vs-sdl2-rumble-thread.md)
   - [07: Practical Integration Lessons](docs/research/07-integration-lessons.md)
+  - [10: Xbox One Rumble](docs/research/10-xbox-one-rumble.md)
 - **Code Examples**:
   - [Minimal C Example](examples/c/)
   - [Minimal C# Example](examples/csharp/)

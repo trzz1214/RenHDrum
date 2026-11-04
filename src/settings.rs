@@ -402,7 +402,7 @@ impl HdRumbleSettings {
             .collect()
     }
 
-    fn flag_path(name: &str, base_dir: Option<&Path>) -> PathBuf {
+    pub(crate) fn flag_path(name: &str, base_dir: Option<&Path>) -> PathBuf {
         match base_dir {
             Some(dir) => dir.join(name),
             None => {
@@ -420,7 +420,7 @@ impl HdRumbleSettings {
         Self::flag_path(name, base_dir).is_file()
     }
 
-    fn try_read_flag_int_in(name: &str, base_dir: Option<&Path>) -> Option<i32> {
+    pub(crate) fn try_read_flag_int_in(name: &str, base_dir: Option<&Path>) -> Option<i32> {
         let path = Self::flag_path(name, base_dir);
         if path.is_file() {
             if let Ok(content) = fs::read_to_string(path) {

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RENHDRUM_VERSION 0x000101
+#define RENHDRUM_VERSION 0x000200
 
 #define RENHDRUM_OK 0
 #define RENHDRUM_ERR_NULL_PTR -1
@@ -198,6 +198,7 @@ int32_t renhdrum_crisp_shape_slot(
 /* Opaque pointer types for stateful engines */
 typedef struct RenHdcEngine RenHdcEngine;
 typedef struct RenHdcDualSenseDsp RenHdcDualSenseDsp;
+typedef struct RenHdcXboxRumble RenHdcXboxRumble;
 
 RenHdcEngine *renhdrum_engine_create(bool is_bluetooth, bool is_pro_controller);
 void renhdrum_engine_destroy(RenHdcEngine *engine);
@@ -270,6 +271,21 @@ int32_t renhdrum_dualsense_evaluate_triggers(
     int64_t pulse_age_ms,
     uint8_t *out_ds5_effects47
 );
+
+RenHdcXboxRumble *renhdrum_xbox_rumble_create(bool is_bluetooth);
+void renhdrum_xbox_rumble_destroy(RenHdcXboxRumble *rumble);
+int32_t renhdrum_xbox_rumble_push_half_sample(
+    RenHdcXboxRumble *rumble,
+    int64_t now_us,
+    bool is_right,
+    float low_amp,
+    float low_freq,
+    float high_amp,
+    float high_freq
+);
+/* out_motors4: left grip, right grip, left trigger, right trigger. Returns 1 when they must be sent now. */
+int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
+int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
 
 #ifdef __cplusplus
 }

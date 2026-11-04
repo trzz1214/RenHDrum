@@ -13,8 +13,9 @@ use crate::encoding::crisp_notes::{HdCrispNotes, HdSideSample};
 use crate::encoding::standard::{hd_encode_packet, hd_encode_side};
 use crate::preset::{HdRumblePreset, HdRumblePresetKind};
 use crate::settings::{HdRumbleSettings, RumbleConfigController};
+use crate::xbox::{XboxRumbleMapper, XboxRumbleTuning};
 
-pub const RENHDRUM_VERSION: u32 = 0x000101; // 0.1.1
+pub const RENHDRUM_VERSION: u32 = 0x000200; // 0.2.0
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
@@ -871,6 +872,81 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_half_target(
     }
 }
 
+pub struct RenHdcXboxRumble {
+    pub(crate) inner: std::sync::Mutex<XboxRumbleMapper>,
+}
+
+#[no_mangle]
+pub extern "C" fn renhdrum_xbox_rumble_create(is_bluetooth: bool) -> *mut RenHdcXboxRumble {
+    let mapper = XboxRumbleMapper::new(is_bluetooth, XboxRumbleTuning::load_in(None));
+    Box::into_raw(Box::new(RenHdcXboxRumble {
+        inner: std::sync::Mutex::new(mapper),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_xbox_rumble_destroy(rumble: *mut RenHdcXboxRumble) {
+    if !rumble.is_null() {
+        drop(Box::from_raw(rumble));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_xbox_rumble_push_half_sample(
+    rumble: *mut RenHdcXboxRumble,
+    now_us: i64,
+    is_right: bool,
+    low_amp: f32,
+    low_freq: f32,
+    high_amp: f32,
+    high_freq: f32,
+) -> i32 {
+    if rumble.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    if let Ok(mut guard) = (*rumble).inner.lock() {
+        guard.push_half_sample(now_us, is_right, low_amp, low_freq, high_amp, high_freq);
+        RENHDRUM_OK
+    } else {
+        RENHDRUM_ERR_INVALID_ARG
+    }
+}
+
+/// Returns 1 and fills `out_motors4` when the motors must be sent now, 0 when not.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_xbox_rumble_tick(
+    rumble: *mut RenHdcXboxRumble,
+    now_us: i64,
+    out_motors4: *mut u16,
+) -> i32 {
+    if rumble.is_null() || out_motors4.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    let Ok(mut guard) = (*rumble).inner.lock() else {
+        return RENHDRUM_ERR_INVALID_ARG;
+    };
+    match guard.tick(now_us) {
+        Some(motors) => {
+            slice::from_raw_parts_mut(out_motors4, 4).copy_from_slice(&motors);
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_xbox_rumble_resend(rumble: *mut RenHdcXboxRumble) -> i32 {
+    if rumble.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    if let Ok(mut guard) = (*rumble).inner.lock() {
+        guard.resend();
+        RENHDRUM_OK
+    } else {
+        RENHDRUM_ERR_INVALID_ARG
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_dualsense_dsp_fill_f32(
     dsp: *mut RenHdcDualSenseDsp,
@@ -966,7 +1042,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000101);
+        assert_eq!(renhdrum_version(), 0x000200);
     }
 
     #[test]
@@ -1237,6 +1313,28 @@ mod tests {
                 RENHDRUM_OK
             );
             renhdrum_dualsense_dsp_destroy(dsp);
+        }
+    }
+
+    #[test]
+    fn xbox_rumble_c_api_round_trip() {
+        unsafe {
+            let rumble = renhdrum_xbox_rumble_create(false);
+            assert!(!rumble.is_null());
+            assert_eq!(
+                renhdrum_xbox_rumble_push_half_sample(rumble, 0, false, 0.5, 160.0, 0.0, 320.0),
+                RENHDRUM_OK
+            );
+            let mut motors = [0u16; 4];
+            assert_eq!(renhdrum_xbox_rumble_tick(rumble, 0, motors.as_mut_ptr()), 1);
+            assert!(motors[0] > 0);
+            assert_eq!(renhdrum_xbox_rumble_tick(rumble, 1, motors.as_mut_ptr()), 0);
+            assert_eq!(renhdrum_xbox_rumble_resend(rumble), RENHDRUM_OK);
+            renhdrum_xbox_rumble_destroy(rumble);
+            assert_eq!(
+                renhdrum_xbox_rumble_resend(std::ptr::null_mut()),
+                RENHDRUM_ERR_NULL_PTR
+            );
         }
     }
 }

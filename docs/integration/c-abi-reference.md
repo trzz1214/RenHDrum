@@ -197,6 +197,49 @@ Fills `out_buffer` with interleaved 4-channel 48 kHz float samples (Channels 0 &
 
 ---
 
+## 5b. Xbox One Rumble (`RenHdcXboxRumble`)
+
+Converts Switch HD Rumble to the four motors of a Microsoft Xbox One controller. See [xbox.md](xbox.md).
+
+### `renhdrum_xbox_rumble_create`
+```c
+RenHdcXboxRumble *renhdrum_xbox_rumble_create(bool is_bluetooth);
+```
+Creates a converter. `is_bluetooth` selects the tick period (20 ms) instead of USB (10 ms).
+
+### `renhdrum_xbox_rumble_destroy`
+```c
+void renhdrum_xbox_rumble_destroy(RenHdcXboxRumble *rumble);
+```
+Frees the converter.
+
+### `renhdrum_xbox_rumble_push_half_sample`
+```c
+int32_t renhdrum_xbox_rumble_push_half_sample(
+    RenHdcXboxRumble *rumble,
+    int64_t now_us,
+    bool is_right,
+    float low_amp, float low_freq, float high_amp, float high_freq
+);
+```
+Pushes one hand's HD Rumble value. `now_us` is a monotonic microsecond clock.
+
+### `renhdrum_xbox_rumble_tick`
+```c
+int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
+```
+- Returns `1`: `out_motors4` holds left grip, right grip, left trigger, right trigger; send them now.
+- Returns `0`: nothing to send.
+- Returns `< 0`: error.
+
+### `renhdrum_xbox_rumble_resend`
+```c
+int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
+```
+Marks the last values as unsent, so the next `tick` returns `1` again. Use it when the send failed.
+
+---
+
 ## 6. Real-Time Memory Guarantees
 
 The following functions are strictly guaranteed to perform **zero heap allocations**:

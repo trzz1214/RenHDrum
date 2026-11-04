@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-04
+
+### Added
+- **Xbox One Rumble**: translates Switch HD Rumble into the four motors of a Microsoft Xbox One controller (left grip, right grip, left trigger, right trigger). Eight kinds of rumble, a rotor model with overdrive, a trigger gate, and a melody that travels left to right. New C ABI: `renhdrum_xbox_rumble_create`, `_destroy`, `_push_half_sample`, `_tick`, `_resend` (`src/xbox/`). Report: `docs/research/10-xbox-one-rumble.md`; guide: `docs/integration/xbox.md`. First shipped in Brontide 1.2.0.
+
+### Changed
+- `RENHDRUM_VERSION` is now `0x000200`.
+
 ## [0.1.1] - 2026-10-30
 
 ### Added

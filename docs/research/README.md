@@ -41,3 +41,5 @@ During early experimental development, several features were assigned internal w
    *Research only (not yet implemented, beta planned)*: SDL 3.4.8 HIDAPI transport audit for 2015 (`0x8F`) and 2026 "Triton" (`0x83`) controllers, practical roadblocks, and the planned 3rd output backend.
 9. [**09: Two Ancestors — yuzu, Ryujinx and Their Forks**](09-yuzu-and-ryujinx-lineage.md)  
    Source-checked survey: philosophies and timeline, dynarmic vs ARMeilleure, what PGO does (and does not) optimize in an emulator, PPTC vs AOT vs the 2026 recompilation wave, and how both projects ended.
+10. [**10: Xbox One Rumble — Translating HD Rumble to Four Motors**](10-xbox-one-rumble.md)  
+   ERM vs LRA, which Windows APIs reach the trigger motors, force thresholds, motor roles, rotor model with overdrive, trigger gating, and replayable traces.
