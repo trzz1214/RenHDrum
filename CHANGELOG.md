@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Switch 2 HD Rumble Research & Integration Docs**: Monograph 11 (`docs/research/11-switch2-hd-rumble.md`) analyzing Switch 2 guest IPC vibration commands (`nn::hid::IHidServer` 213, 214, 220), signal routing across DualSense, Switch Pro Controller 1, and Xbox One, root cause of the 2000 ms hanging rumble defect, and early hardware limits.
+- **Switch 2 Games Integration Guide**: Integration manual (`docs/integration/switch2-games.md`) detailing command 214 dispatching (credited to neo Luigi / Eglantine PR #155) and routing through RenHDrum's public `_half_` C ABI endpoints.
+- **Brontide-NS2 Reference Testbed**: Documented reference test build (0.1.0 beta) based on PokeDinner 2.5.0 by Franseven, validating HD Rumble playback in retail Switch 2 titles.
+
 ## [0.2.0] - 2026-11-04
 
 ### Added

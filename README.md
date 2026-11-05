@@ -42,6 +42,7 @@ Please don't open issues for research controllers yet.
 | **Bluetooth Packet Management** | Floods half-duplex radio every 50 ms, causing severe gyro/button lag | **Write-After-Input** + 150 ms refresh + Token Bucket rate limiter |
 | **USB Packet Congestion** | Unbounded FIFO queue blocks thread or drops stale bursts | **Idle-Gated No-Queue** non-blocking writes with peak energy merging |
 | **PS5 DualSense Actuation** | Basic low-frequency motor rumble emulation | **4-channel 48 kHz PCM DSP** driving stereo VCM voice coils directly |
+| **Switch 2 Games** | Dropped commands (command 214 stub) or hanging 2-second rumble loops | Authentic command 214 routing with silence watchdog across DualSense, Pro Controller 1, and Xbox One S |
 | **C ABI & Memory Model** | Complex managed dependencies or heap allocations in inner loops | **Zero-allocation** C ABI (`renhdrum.h`), zero external crate dependencies |
 
 ---
@@ -50,8 +51,12 @@ Please don't open issues for research controllers yet.
 
 These emulator forks are personal experimental testbeds used to validate RenHDrum in actual games and verify physical haptic fidelity. They serve as reference examples of how authentic HD Rumble can be hooked into existing architectures:
 
+> [!NOTE]
+> **Brontide-NS2 (beta test build, Switch 2 games)**: Experimental test build for trying HD Rumble in Switch 2 games, based on PokeDinner 2.5.0 by Franseven. We don't encourage downloading it; it is here so people can feel the result. Bring your own legally dumped games and keys. Read the [technical research](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) and [test build notes](https://ryuhdr.threedola.workers.dev/brontide-ns2.html).
+
 | Project | Base & Integration Architecture | Testbed Role | Research Notes |
 |---|---|---|---|
+| **Brontide-NS2** *(0.1.0 beta test build)* | PokeDinner 2.5.0 by Franseven (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation (DK Bananza, MKW) | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-ns2.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
 | **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | Reference baseline & golden waveform source | [Lab Notes →](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
 | **Brontide** | Eden (C++ / Patched SDL3, `renhdrum.dll` thin hook, built-in HD Rumble Studio) | Pure C ABI validation & DualSense BT testbed | [Lab Notes →](https://ryuhdr.threedola.workers.dev/brontide.html) |
 | **Ryu-HDRum** | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | SDL3 C# interop & modern runtime testbed | [Lab Notes →](https://ryuhdr.threedola.workers.dev/#ryu-hdrum) |
@@ -90,6 +95,7 @@ Integrating `renhdrum.dll` with an SDL3-based C/C++ or C# host requires 5 straig
   - [C++ / SDL3 Host Guide](docs/integration/sdl3-host.md)
   - [C# / .NET Host Guide](docs/integration/csharp-host.md)
   - [DualSense 48 kHz Audio Haptics Guide](docs/integration/dualsense.md)
+  - [Switch 2 Games Integration Guide](docs/integration/switch2-games.md)
   - [Architecture & Module Overview](docs/integration/architecture.md)
 - **Technical Research Monographs**:
   - [01: Packet Format & Calibration](docs/research/01-hd-rumble-packet-format.md)
@@ -99,7 +105,10 @@ Integrating `renhdrum.dll` with an SDL3-based C/C++ or C# host requires 5 straig
   - [05: DualSense 48 kHz Audio Haptics DSP](docs/research/05-dualsense-audio-haptics.md)
   - [06: SDL3 vs SDL2 HIDAPI Rumble Architecture](docs/research/06-sdl3-vs-sdl2-rumble-thread.md)
   - [07: Practical Integration Lessons](docs/research/07-integration-lessons.md)
+  - [08: Steam Controller Haptics](docs/research/08-steam-controller-haptics.md)
+  - [09: Two Ancestors: yuzu & Ryujinx Lineage](docs/research/09-yuzu-and-ryujinx-lineage.md)
   - [10: Xbox One Rumble](docs/research/10-xbox-one-rumble.md)
+  - [11: Switch 2 HD Rumble](docs/research/11-switch2-hd-rumble.md)
 - **Code Examples**:
   - [Minimal C Example](examples/c/)
   - [Minimal C# Example](examples/csharp/)
@@ -162,7 +171,7 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
    - **RenHDrum Refinement**: Standardized into a zero-allocation 28-bit streaming encoder (`src/encoding/standard.rs`) with stop priority (`stop_priority`) handling on Linear Resonant Actuators (LRAs).
 
 2. **Switchbrew Wiki Contributors ([`Joy-Con`](https://switchbrew.org/wiki/Joy-Con))**
-   - **Foundation**: Documented `HidMotorData` bit-packing layouts (`VibrationAmFmPackTag`) across 8 four-byte frame configurations (`FormatZero`..`FormatThree7bit`), high-bit framing flags (`0x8080`, `0x8000`, `0x80`), and `AmFmCodes` unpacking tables identifying code `24` (`0x18`) as a hold-state command.
+   - **Foundation**: Documented `HidMotorData` bit-packing layouts (`VibrationAmFmPackTag`) across 8 four-byte frame configurations (`FormatZero`..`FormatThree7bit`), high-bit framing flags (`0x8080`, `0x8000`, `0x80`), `AmFmCodes` unpacking tables identifying code `24` (`0x18`) as a hold-state command, and `nn::hid::IHidServer` IPC vibration command structures (213, 214, 220).
    - **RenHDrum Refinement**: Developed real-time reverse packaging (5 ms Multi-Sample Planner in `src/encoding/amfm.rs` and `src/planner/amfm_planner.rs`) that dynamically selects optimal 1/2/3-sample frames per 15 ms window, with automatic sub-5-bit fallback (falling back to 1-sample 7-bit mode when amplitude drops below `SILENT_BELOW = 0.04`) so faint micro-vibrations stay audible.
 
 3. **felipearmat ([`OGX-Mini-2026` PR #116](https://github.com/MegaCadeDev/OGX-Mini-2026/pull/116), fork of `wiredopposite/OGX-Mini`)**
@@ -189,6 +198,14 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
    - **Foundation**: DualSense Bluetooth haptics report 0x32 layout (packet 0x11 + 0x12, s8 3 kHz PCM, CRC seed 0xA2).
    - **RenHDrum Refinement**: Engineered zero-allocation report packaging module (`src/dualsense/bt_haptics.rs`) and C ABI export (`renhdrum_dualsense_dsp_build_bt_report`) converting internal 48 kHz DSP output to 3 kHz s8 with 16:1 block averaging and Sony CRC32 checksum.
 
+9. **Franseven ([`PokeDinner`](https://github.com/Franseven/PokeDinner))**
+   - **Foundation**: Created PokeDinner 2.5.0 (`216b5034c6`), the baseline Switch 2 emulator testbed used for Brontide-NS2.
+   - **RenHDrum Refinement**: Serves as the host emulator base for validating RenHDrum multi-controller HD Rumble on retail Switch 2 games.
+
+10. **neo Luigi ([Eglantine PR #155](https://github.com/eglantine-emu/eglantine/pull/155))**
+    - **Foundation**: Implemented genuine `nn::hid::IHidServer` command 214 (`SendVibrationValuesInMode`) dispatching (`2b413a46a2`, `465aa33077`), capturing guest Switch 2 vibration handles and values and forwarding them into the emulator core.
+    - **RenHDrum Refinement**: Integrated command 214 routing into the Brontide-NS2 input layer, channeling vibration parameters directly into RenHDrum's `_half_` C ABI functions to eliminate hanging rumble loops and preserve parametric frequency response.
+
 ### What we copied, what we referenced, what we built
 
 | Part | Copied (code or data) | Referenced (ideas, specs, measurements) | Our own work | Evidence |
@@ -201,6 +218,9 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
 | Bluetooth pacing (3 levels), idle-gated writes, write-after-input | - | Behaviour of the SDL HIDAPI Switch driver | Token-bucket pacing levels, idle-gated no-queue writes, write-after-input | `tests/guardrails.rs`, `docs/research/03`, `docs/research/04` |
 | DualSense USB audio haptics DSP | - | Nielk1 and the DualSense reverse-engineering community: 4-channel 48 kHz USB audio layout | The synthesizer itself (the DSP shared with Ryuhdr is also our own code) | `src/dualsense/haptics.rs`, `tests/golden_dualsense.rs`, `NOTICE` item 6 |
 | DualSense Bluetooth haptics, report `0x32` | - | egormanga, SAxense: report layout only | Reimplementation in Rust, 48 kHz to 3 kHz conversion, CRC | `src/dualsense/bt_haptics.rs` (header comment: no SAxense code copied), `docs/research/05` |
+| Switch 2 command 214 IPC dispatching | - | neo Luigi (Eglantine PR #155): command 214 routing pattern | Adapted into Brontide-NS2 input driver to feed RenHDrum `_half_` C ABI | `docs/research/11`, `docs/integration/switch2-games.md` |
+| Switch 2 testbed emulator | - | Franseven (PokeDinner 2.5.0): emulator core | Base emulator for Brontide-NS2 reference testbed | `docs/research/11`, `docs/integration/switch2-games.md` |
+| Switch 2 IPC command names (213/214/220) | - | Switchbrew Wiki: command identifiers | Verified against Switchbrew documentation | `docs/research/11` |
 | SDL3 patches | Modifies SDL source (zlib) | - | The HD Rumble patches | `integrations/sdl3/sdl3-patches/` |
 | Brontide hook patches | Modifies Eden source (GPL-3.0-or-later) | - | The RenHDrum hook patches | `integrations/brontide/` |
 | Rumble data from games and DSP origins | Parts of the DSP logic, packet structures and state transitions (MIT, from Ryujinx via Ryuhdr; `NOTICE` item 1) | Ryujinx / Ryubing / Eden HID vibration services | Experimental runtime hook (reference only) | `reference/ryubing-hook/`, `NOTICE` item 1 |

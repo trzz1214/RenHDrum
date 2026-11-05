@@ -43,3 +43,5 @@ During early experimental development, several features were assigned internal w
    Source-checked survey: philosophies and timeline, dynarmic vs ARMeilleure, what PGO does (and does not) optimize in an emulator, PPTC vs AOT vs the 2026 recompilation wave, and how both projects ended.
 10. [**10: Xbox One Rumble — Translating HD Rumble to Four Motors**](10-xbox-one-rumble.md)  
    ERM vs LRA, which Windows APIs reach the trigger motors, force thresholds, motor roles, rotor model with overdrive, trigger gating, and replayable traces.
+11. [**11: Switch 2 HD Rumble — Signal Path, Commands, and Emulation Realities**](11-switch2-hd-rumble.md)  
+   IPC commands 213/214/220, the `Mode` flag, why retail games still send 2-band parametric vibration, signal routing from game to three controller families, the 2000 ms hanging rumble defect in generic SDL fallbacks, and next research steps.

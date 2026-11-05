@@ -67,3 +67,13 @@ Attributions & Third-Party Credits
    Licensed under Mozilla Public License 2.0 (MPL-2.0).
    https://github.com/egormanga/SAxense
    https://apps.sdore.me/SAxense
+
+10. Franseven (PokeDinner)
+    Author of PokeDinner 2.5.0 (commit 216b5034c6, tag 2.5.0), the baseline
+    Switch 2 emulator testbed used for Brontide-NS2.
+    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
+
+11. neo Luigi (Eglantine PR #155)
+    Original implementation of nn::hid::IHidServer command 214
+    (SendVibrationValuesInMode) dispatching (commits 2b413a46a2 and 465aa33077).
+    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
