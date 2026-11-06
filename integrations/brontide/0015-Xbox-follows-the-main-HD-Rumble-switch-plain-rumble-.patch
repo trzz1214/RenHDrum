@@ -1,0 +1,96 @@
+From 80d0563e2f8975a1dd988108a0d4739e7d995b84 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 22:56:18 +0700
+Subject: [PATCH 08/11] Xbox follows the main HD Rumble switch; plain rumble
+ leaves the HLE thread
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/sdl_driver.cpp | 35 ++++++++++++++++++++++++-
+ 1 file changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 90589a5cf5..93f2db62e4 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -7,7 +7,9 @@
+ #include <chrono>
+ #include <cstring>
+ #include <map>
++#include <mutex>
+ #include <numbers>
++#include <optional>
+ #include <string>
+ #include <thread>
+ #include <SDL3/SDL_hidapi.h>
+@@ -276,6 +278,24 @@ public:
+         return false;
+     }
+ 
++    // HLE thread: only store the newest sample (SDL rumble can block for ms on WGI/XInput)
++    void QueueVibration(const Common::Input::VibrationStatus& vibration) {
++        std::scoped_lock lock{pending_vibration_mutex};
++        pending_vibration = vibration;
++    }
++
++    // PumpEvents thread: send the stored sample, outside the lock
++    void FlushPendingVibration() {
++        std::optional<Common::Input::VibrationStatus> vibration;
++        {
++            std::scoped_lock lock{pending_vibration_mutex};
++            vibration.swap(pending_vibration);
++        }
++        if (vibration) {
++            RumblePlay(*vibration);
++        }
++    }
++
+     bool HasHDRumble() const {
+         if (renhdrum_engine || (dualsense_dsp && ds_audio_stream) ||
+             (dualsense_dsp && ds_bt_running.load(std::memory_order_relaxed))) {
+@@ -601,6 +621,14 @@ private:
+         // Xbox One S family. Only the wired PIDs get 10 ms, anything else takes the safer 20 ms
+         else if (vid == 0x045E && sdl_controller &&
+                  SDL_GetGamepadType(sdl_controller.get()) == SDL_GAMEPAD_TYPE_XBOXONE) {
++            // The main HD Rumble switch also covers Xbox: off means SDL's plain 2-motor rumble
++            RenHdcConfig config{};
++            config.enable_hd_rumble = true;
++            RenHdcSettings settings{};
++            if (renhdrum_settings_resolve(&config, &settings) == RENHDRUM_OK && !settings.enabled) {
++                LOG_INFO(Input, "HD Rumble off: Xbox controller {:04X}:{:04X} uses plain rumble", vid, pid);
++                return;
++            }
+             const bool is_bluetooth = pid != 0x02EA && pid != 0x02FF;
+             xbox_rumble = renhdrum_xbox_rumble_create(is_bluetooth);
+             if (xbox_rumble) {
+@@ -933,6 +961,8 @@ private:
+     std::string pad_name;
+     RenHdcDualSenseDsp* dualsense_dsp{nullptr};
+     RenHdcXboxRumble* xbox_rumble{nullptr};
++    std::mutex pending_vibration_mutex;
++    std::optional<Common::Input::VibrationStatus> pending_vibration;
+     SDL_AudioStream* ds_audio_stream{nullptr};
+     static constexpr int DS_AUDIO_MAX_ATTEMPTS = 10;
+     // SDL no-queue gap while the 5 ms envelope runs (Ryuhdr AmFmNoQueueGapMs)
+@@ -1138,6 +1168,9 @@ void SDLDriver::PumpEvents() const {
+             }
+         }
+         for (const auto& joystick : joysticks) {
++            if (joystick) {
++                joystick->FlushPendingVibration();
++            }
+             if (joystick && joystick->GetRenHDrumEngine()) {
+                 joystick->TickRenHDrum(now_us);
+             }
+@@ -1384,7 +1417,7 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+         .type = Common::Input::VibrationAmplificationType::Exponential,
+     };
+ 
+-    joystick->RumblePlay(new_vibration);
++    joystick->QueueVibration(new_vibration);
+ 
+     return Common::Input::DriverResult::Success;
+ }
+-- 
+2.55.0.windows.5
+

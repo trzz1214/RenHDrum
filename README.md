@@ -86,7 +86,7 @@ Integrating `renhdrum.dll` with an SDL3-based C/C++ or C# host requires 5 straig
 5. **Teardown**: Send the canonical neutral stop packet (`0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40`) and call `renhdrum_engine_destroy`.
 
 > [!NOTE]
-> **Known Limitation in v0.1.0**: `renhdrum_settings_resolve` currently queries local override files and IPC shared memory managed by `Brontide-App`. A pure in-memory C ABI configuration resolver will be provided in `v0.2.0`.
+> **Known limitation**: `renhdrum_settings_resolve` still queries local override files and IPC shared memory managed by `Brontide-App`. There is no pure in-memory resolver yet; hosts that want one can fill `RenHdcSettings` themselves and call `renhdrum_engine_apply_settings`.
 
 ### Documentation Links
 

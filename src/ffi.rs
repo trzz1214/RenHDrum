@@ -15,7 +15,7 @@ use crate::preset::{HdRumblePreset, HdRumblePresetKind};
 use crate::settings::{HdRumbleSettings, RumbleConfigController};
 use crate::xbox::{XboxRumbleMapper, XboxRumbleTuning};
 
-pub const RENHDRUM_VERSION: u32 = 0x000200; // 0.2.0
+pub const RENHDRUM_VERSION: u32 = 0x000201; // 0.2.1
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000200);
+        assert_eq!(renhdrum_version(), 0x000201);
     }
 
     #[test]

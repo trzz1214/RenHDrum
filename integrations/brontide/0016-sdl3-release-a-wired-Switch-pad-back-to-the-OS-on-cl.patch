@@ -1,0 +1,80 @@
+From 0a49c2fb78e7b90974ef6b9206b46ce5fce77a70 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 15:46:19 +0700
+Subject: [PATCH 09/11] sdl3: release a wired Switch pad back to the OS on
+ close (ClearUSB)
+
+---
+ .patch/sdl3/0002-hdrumble-idle-write.patch | 24 +++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/.patch/sdl3/0002-hdrumble-idle-write.patch b/.patch/sdl3/0002-hdrumble-idle-write.patch
+index f3d39118a5..2a4207726b 100644
+--- a/.patch/sdl3/0002-hdrumble-idle-write.patch
++++ b/.patch/sdl3/0002-hdrumble-idle-write.patch
+@@ -1,3 +1,5 @@
++diff --git a/src/joystick/hidapi/SDL_hidapi_rumble.c b/src/joystick/hidapi/SDL_hidapi_rumble.c
++index ef3fede..eb08821 100644
+ --- a/src/joystick/hidapi/SDL_hidapi_rumble.c
+ +++ b/src/joystick/hidapi/SDL_hidapi_rumble.c
+ @@ -55,6 +55,15 @@ static
+@@ -52,6 +54,8 @@
+  
+      if (ctx->requests_head) {
+          ctx->requests_head->prev = request;
++diff --git a/src/joystick/hidapi/SDL_hidapi_rumble.h b/src/joystick/hidapi/SDL_hidapi_rumble.h
++index bcd4a79..226eaa9 100644
+ --- a/src/joystick/hidapi/SDL_hidapi_rumble.h
+ +++ b/src/joystick/hidapi/SDL_hidapi_rumble.h
+ @@ -39,4 +39,7 @@ void SDL_HIDAPI_UnlockRumble(void) SDL_RELEASE(SDL_HIDAPI_rumble_lock);
+@@ -62,6 +66,8 @@
+ +bool SDL_HIDAPI_RumbleIsIdle(void);
+ +
+  #endif // SDL_JOYSTICK_HIDAPI
++diff --git a/src/joystick/hidapi/SDL_hidapi_switch.c b/src/joystick/hidapi/SDL_hidapi_switch.c
++index 944eaed..237f598 100644
+ --- a/src/joystick/hidapi/SDL_hidapi_switch.c
+ +++ b/src/joystick/hidapi/SDL_hidapi_switch.c
+ @@ -282,6 +282,19 @@ typedef enum
+@@ -370,7 +376,7 @@
+              HIDAPI_DriverSwitch_SendPendingRumble(ctx);
+          } else if (ctx->m_bRumbleActive &&
+                     now >= (ctx->m_ulRumbleSent + (device->is_bluetooth ? HD_RUMBLE_BT_REFRESH_MS : RUMBLE_REFRESH_FREQUENCY_MS))) {
+-@@ -2865,6 +3127,11 @@ static void HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joy
++@@ -2865,12 +3127,23 @@ static void HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joy
+  {
+      SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
+  
+@@ -382,6 +388,20 @@
+      if (!ctx->m_bInputOnly) {
+          // Restore simple input mode for other applications
+          if (!ctx->m_nInitialInputMode ||
++             ctx->m_nInitialInputMode == k_eSwitchInputReportIDs_SimpleControllerState) {
++             SetInputMode(ctx, k_eSwitchInputReportIDs_SimpleControllerState);
++         }
+++        // HD Rumble (Brontide): hand a wired pad back to the OS. Without this it stays in USB
+++        // HID-only full-report mode after we close, and other apps read its stick as held.
+++        if (!device->is_bluetooth) {
+++            ctx->m_bSyncWrite = true;
+++            WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ClearUSB, NULL, 0, false);
+++        }
++     }
++ 
++     SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_ENHANCED_REPORTS,
++diff --git a/src/joystick/hidapi/SDL_hidapijoystick.c b/src/joystick/hidapi/SDL_hidapijoystick.c
++index 7629b1a..e4be4d0 100644
+ --- a/src/joystick/hidapi/SDL_hidapijoystick.c
+ +++ b/src/joystick/hidapi/SDL_hidapijoystick.c
+ @@ -1754,6 +1754,70 @@ static bool HIDAPI_JoystickGetGamepadMapping(int device_index, SDL_GamepadMappin
+@@ -455,6 +475,8 @@
+  SDL_JoystickDriver SDL_HIDAPI_JoystickDriver = {
+      HIDAPI_JoystickInit,
+      HIDAPI_JoystickGetCount,
++diff --git a/src/joystick/hidapi/SDL_hidapijoystick_c.h b/src/joystick/hidapi/SDL_hidapijoystick_c.h
++index 6129441..4236427 100644
+ --- a/src/joystick/hidapi/SDL_hidapijoystick_c.h
+ +++ b/src/joystick/hidapi/SDL_hidapijoystick_c.h
+ @@ -102,6 +102,15 @@ typedef struct SDL_HIDAPI_Device
+-- 
+2.55.0.windows.5
+

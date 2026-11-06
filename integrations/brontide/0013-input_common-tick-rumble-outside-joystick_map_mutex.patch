@@ -1,0 +1,58 @@
+From beb5df80e68f148b61087c23dd0c474ba5456994 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 01:10:02 +0700
+Subject: [PATCH 06/11] input_common: tick rumble outside joystick_map_mutex
+
+PumpEvents held the map mutex while calling into SDL. SDL's rawinput thread
+holds the SDL lock while SDLEventWatcher waits for that mutex, so the two
+deadlocked and froze the game (Xbox rumble).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/sdl_driver.cpp | 30 +++++++++++++++----------
+ 1 file changed, 18 insertions(+), 12 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 43b1ba6bbc..1080ea04a0 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -1127,18 +1127,24 @@ void SDLDriver::PumpEvents() const {
+         using namespace std::chrono;
+         const int64_t now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+ 
+-        std::scoped_lock lock{joystick_map_mutex};
+-        for (const auto& [guid, joystick_list] : joystick_map) {
+-            for (const auto& joystick : joystick_list) {
+-                if (joystick && joystick->GetRenHDrumEngine()) {
+-                    joystick->TickRenHDrum(now_us);
+-                }
+-                if (joystick && joystick->GetDualSenseDsp()) {
+-                    joystick->MaintainDualSenseAudio(now_us);
+-                }
+-                if (joystick && joystick->GetXboxRumble()) {
+-                    joystick->TickXboxRumble(now_us);
+-                }
++        // Tick outside joystick_map_mutex: these call into SDL, and SDL's rawinput thread holds the
++        // SDL lock while SDLEventWatcher waits for that mutex, so holding it here deadlocks
++        std::vector<std::shared_ptr<SDLJoystick>> joysticks;
++        {
++            std::scoped_lock lock{joystick_map_mutex};
++            for (const auto& [guid, joystick_list] : joystick_map) {
++                joysticks.insert(joysticks.end(), joystick_list.begin(), joystick_list.end());
++            }
++        }
++        for (const auto& joystick : joysticks) {
++            if (joystick && joystick->GetRenHDrumEngine()) {
++                joystick->TickRenHDrum(now_us);
++            }
++            if (joystick && joystick->GetDualSenseDsp()) {
++                joystick->MaintainDualSenseAudio(now_us);
++            }
++            if (joystick && joystick->GetXboxRumble()) {
++                joystick->TickXboxRumble(now_us);
+             }
+         }
+     }
+-- 
+2.55.0.windows.5
+

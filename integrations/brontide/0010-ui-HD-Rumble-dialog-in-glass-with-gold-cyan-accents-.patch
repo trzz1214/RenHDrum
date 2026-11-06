@@ -1,0 +1,79 @@
+From 06d579462da437ad883390e560f8ca6225e74393 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 03:28:37 +0700
+Subject: [PATCH 03/11] ui: HD Rumble dialog in glass with gold-cyan accents,
+ glowing in-use controller cards, rain and stronger storm
+
+- Controllers on the Overview page are cards; the one mapped to a player wears the running
+  ring of the HD Rumble pill (PaintGlowRing, shared with the pill) and an "In use" line
+- Pad info carries guid / port so the dialog can match controller mappings
+- Plain-language mode text, rounded row hover that no longer pokes out of the card corners
+- Library sky: rain in the free area, the sky darkens before a strike, two-flash bolt that
+  lights its surroundings
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/renhdrum_pads.h |  2 ++
+ src/input_common/drivers/sdl_driver.cpp  | 19 +++++++++++++------
+ 2 files changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/src/input_common/drivers/renhdrum_pads.h b/src/input_common/drivers/renhdrum_pads.h
+index 1636695348..1e598bf01b 100644
+--- a/src/input_common/drivers/renhdrum_pads.h
++++ b/src/input_common/drivers/renhdrum_pads.h
+@@ -15,6 +15,8 @@ struct RenHDrumPadInfo {
+     bool is_bluetooth;
+     std::string mode;
+     bool is_vibrating{false};
++    std::string guid;
++    int port{0};
+ };
+ 
+ /// Controllers RenHDrum is driving right now (a copy, safe from any thread).
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 7691586607..a393678fcf 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -540,10 +540,10 @@ private:
+             if (dualsense_dsp) {
+                 LOG_INFO(Input, "Initialized RenHDrum DualSense DSP for controller {:04X}:{:04X}", vid, pid);
+                 pad_name = pid == 0x0DF2 ? "DualSense Edge" : "DualSense";
+-                SetPadInfo(this, {pad_name, true,
+-                                  SDL_GetJoystickConnectionState(sdl_joystick.get()) ==
+-                                      SDL_JOYSTICK_CONNECTION_WIRELESS,
+-                                  "DualSense standard rumble", false}, &last_vibrate_us);
++                PublishPad({pad_name, true,
++                            SDL_GetJoystickConnectionState(sdl_joystick.get()) ==
++                                SDL_JOYSTICK_CONNECTION_WIRELESS,
++                            "DualSense standard rumble", false});
+                 TryOpenDualSenseAudio();
+             }
+         }
+@@ -624,7 +624,14 @@ private:
+             }
+             mode = "wired " + std::to_string(settings.usb_interval_ms) + " ms · cards" + cards;
+         }
+-        SetPadInfo(this, {pad_name, false, is_bluetooth, std::move(mode), false}, &last_vibrate_us);
++        PublishPad({pad_name, false, is_bluetooth, std::move(mode), false});
++    }
++
++    // The guid and port tell the HD Rumble dialog which pads are mapped to a player
++    void PublishPad(RenHDrumPadInfo info) {
++        info.guid = guid.RawString();
++        info.port = port;
++        SetPadInfo(this, std::move(info), &last_vibrate_us);
+     }
+ 
+     void TryOpenDualSenseAudio() {
+@@ -682,7 +689,7 @@ private:
+             return;
+         }
+         SDL_ResumeAudioStreamDevice(ds_audio_stream);
+-        SetPadInfo(this, {pad_name, true, false, "DualSense haptics", false}, &last_vibrate_us);
++        PublishPad({pad_name, true, false, "DualSense haptics", false});
+ 
+         // Stop SDL's HID rumble once so the pad plays the audio haptics (Ryuhdr: _hapticsStopSdlRumble).
+         if (sdl_controller) {
+-- 
+2.55.0.windows.5
+

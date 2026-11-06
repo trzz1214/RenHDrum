@@ -178,8 +178,8 @@ Retain standard rumble mechanisms (e.g. `SDL_RumbleJoystick`) for non-Switch har
 
 ---
 
-## 4. Known Limitation in v0.1.0
+## 4. Known Limitation
 
-In `v0.1.0`, `renhdrum_settings_resolve` reads local flag files adjacent to the host binary and queries IPC shared memory (`Local\RenHDrum_SharedState_v1` / `%APPDATA%\RenHDrum\renhdrum-settings.txt`) managed by `Brontide-App`. 
+`renhdrum_settings_resolve` still reads local flag files adjacent to the host binary and queries IPC shared memory (`Local\RenHDrum_SharedState_v1` / `%APPDATA%\RenHDrum\renhdrum-settings.txt`) managed by `Brontide-App`. 
 
-Hosts wishing to supply custom settings purely in-process without reading IPC or disk flags should directly populate `RenHdcSettings` and invoke `renhdrum_engine_apply_settings`. A pure C ABI configuration resolver that bypasses disk and IPC will be introduced in `v0.2.0`.
+Hosts wishing to supply custom settings purely in-process without reading IPC or disk flags should directly populate `RenHdcSettings` and invoke `renhdrum_engine_apply_settings`. There is no pure C ABI configuration resolver that bypasses disk and IPC yet.

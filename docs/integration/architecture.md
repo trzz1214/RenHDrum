@@ -83,4 +83,4 @@ RenHDrum enforces a comprehensive 3-tier testing regimen across all commits:
 ## 4. Known Technical Limitations
 
 - **DualSense Wireless Limitation**: Windows and macOS generic Bluetooth stacks do not expose the 4-channel USB Audio Class endpoint for DualSense controllers; audio haptics are strictly supported over wired USB.
-- **`v0.1.0` Settings Resolution**: In `v0.1.0`, `renhdrum_settings_resolve` queries local override files and shared memory. A standalone in-memory configuration resolution path will be delivered in `v0.2.0`.
+- **Settings resolution**: `renhdrum_settings_resolve` still queries local override files and shared memory. There is no standalone in-memory resolver yet; hosts can fill `RenHdcSettings` directly instead.

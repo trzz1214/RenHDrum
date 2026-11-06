@@ -1,0 +1,56 @@
+From 85bafa8a4e3606f01afe3da44495fe3dd8d86b5e Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 19:17:57 +0700
+Subject: [PATCH 4/4] input: HD Rumble main switch hook
+
+Also merge the missing driver bits from Brontide 1f3919bc55: clear pending
+vibration and zero SDL rumble before re-applying, plus the two re-apply logs.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/sdl_driver.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index ef0b5738c5..e042273e47 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -142,6 +142,7 @@ std::vector<RenHDrumPadInfo> GetRenHDrumPads() {
+ }
+ 
+ void ReapplyRenHDrumSettings() {
++    LOG_INFO(Input, "HD Rumble settings saved: re-applying to connected controllers");
+     settings_generation.fetch_add(1, std::memory_order_relaxed);
+ }
+ 
+@@ -392,7 +393,19 @@ public:
+ 
+     // HD Rumble dialog closed after a change: same teardown and setup as a reconnect
+     void ReapplyRenHDrum() {
++        {
++            // A sample queued for the standard path must not land on the new mode
++            std::scoped_lock lock{pending_vibration_mutex};
++            pending_vibration.reset();
++        }
+         std::scoped_lock lock{renhdrum_mutex};
++        // SDL remembers the last standard rumble and re-sends it for up to 2 s; each re-send drops the
++        // Switch driver out of HD mode. Zero it so the pad starts the new mode clean
++        if (sdl_controller) {
++            SDL_RumbleGamepad(sdl_controller.get(), 0, 0, 0);
++        } else if (sdl_joystick) {
++            SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
++        }
+         CleanupRenHDrum();
+         if (sdl_joystick) {
+             InitRenHDrum();
+@@ -1217,6 +1230,7 @@ void SDLDriver::PumpEvents() const {
+         }
+         const uint32_t generation = settings_generation.load(std::memory_order_relaxed);
+         if (applied_settings_generation.exchange(generation, std::memory_order_relaxed) != generation) {
++            LOG_INFO(Input, "Re-applying HD Rumble settings to {} controller(s)", joysticks.size());
+             for (const auto& joystick : joysticks) {
+                 if (joystick) {
+                     joystick->ReapplyRenHDrum();
+-- 
+2.55.0.windows.5
+

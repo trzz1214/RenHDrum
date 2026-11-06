@@ -1,0 +1,116 @@
+From 677960ec7a92ee1f1d21bfd33916a3ca336bd63a Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 23:59:07 +0700
+Subject: [PATCH 02/11] ui: Ryuhdr-style performance overlay and overlay pill
+
+---
+ src/input_common/drivers/renhdrum_pads.h |  1 +
+ src/input_common/drivers/sdl_driver.cpp  | 33 ++++++++++++++++++------
+ 2 files changed, 26 insertions(+), 8 deletions(-)
+
+diff --git a/src/input_common/drivers/renhdrum_pads.h b/src/input_common/drivers/renhdrum_pads.h
+index 4e0e879ea0..1636695348 100644
+--- a/src/input_common/drivers/renhdrum_pads.h
++++ b/src/input_common/drivers/renhdrum_pads.h
+@@ -14,6 +14,7 @@ struct RenHDrumPadInfo {
+     bool is_dualsense;
+     bool is_bluetooth;
+     std::string mode;
++    bool is_vibrating{false};
+ };
+ 
+ /// Controllers RenHDrum is driving right now (a copy, safe from any thread).
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 3eac543597..7691586607 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -75,12 +75,16 @@ SDL_GamepadBinding FindBinding(const GamepadBindings& bindings, Predicate matche
+ }
+ 
+ // Pads shown in Brontide's HD Rumble dialog, keyed by SDLJoystick. Never held while calling SDL.
++struct PadEntry {
++    RenHDrumPadInfo info;
++    const std::atomic<int64_t>* last_vibrate_us{nullptr};
++};
+ std::mutex pads_mutex;
+-std::map<const void*, RenHDrumPadInfo> pads;
++std::map<const void*, PadEntry> pads;
+ 
+-void SetPadInfo(const void* key, RenHDrumPadInfo info) {
++void SetPadInfo(const void* key, RenHDrumPadInfo info, const std::atomic<int64_t>* last_vibrate_us = nullptr) {
+     std::scoped_lock lock{pads_mutex};
+-    pads[key] = std::move(info);
++    pads[key] = {std::move(info), last_vibrate_us};
+ }
+ 
+ void ErasePadInfo(const void* key) {
+@@ -104,10 +108,19 @@ SDL_GamepadBinding GetBindingForAxis(const GamepadBindings& bindings, SDL_Gamepa
+ } // Anonymous namespace
+ 
+ std::vector<RenHDrumPadInfo> GetRenHDrumPads() {
++    using namespace std::chrono;
++    const int64_t now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+     std::scoped_lock lock{pads_mutex};
+     std::vector<RenHDrumPadInfo> result;
+-    for (const auto& [key, info] : pads) {
+-        result.push_back(info);
++    for (const auto& [key, entry] : pads) {
++        RenHDrumPadInfo info = entry.info;
++        if (entry.last_vibrate_us) {
++            const int64_t last_vibrate = entry.last_vibrate_us->load(std::memory_order_relaxed);
++            info.is_vibrating = (last_vibrate > 0 && (now_us - last_vibrate) < 300'000);
++        } else {
++            info.is_vibrating = false;
++        }
++        result.push_back(std::move(info));
+     }
+     return result;
+ }
+@@ -466,6 +479,9 @@ public:
+     // Called on the HLE thread. Returns true when RenHDrum took the vibration (Switch HD engine, or
+     // DualSense haptics audio running); false = use the standard rumble below.
+     bool RenHDrumVibrate(int64_t now_us, bool is_right, const Common::Input::VibrationStatus& v) {
++        if (v.low_amplitude > 0.01f || v.high_amplitude > 0.01f) {
++            last_vibrate_us.store(now_us, std::memory_order_relaxed);
++        }
+         {
+             std::scoped_lock lock{renhdrum_mutex};
+             if (!renhdrum_engine) {
+@@ -527,7 +543,7 @@ private:
+                 SetPadInfo(this, {pad_name, true,
+                                   SDL_GetJoystickConnectionState(sdl_joystick.get()) ==
+                                       SDL_JOYSTICK_CONNECTION_WIRELESS,
+-                                  "DualSense standard rumble"});
++                                  "DualSense standard rumble", false}, &last_vibrate_us);
+                 TryOpenDualSenseAudio();
+             }
+         }
+@@ -608,7 +624,7 @@ private:
+             }
+             mode = "wired " + std::to_string(settings.usb_interval_ms) + " ms · cards" + cards;
+         }
+-        SetPadInfo(this, {pad_name, false, is_bluetooth, std::move(mode)});
++        SetPadInfo(this, {pad_name, false, is_bluetooth, std::move(mode), false}, &last_vibrate_us);
+     }
+ 
+     void TryOpenDualSenseAudio() {
+@@ -666,7 +682,7 @@ private:
+             return;
+         }
+         SDL_ResumeAudioStreamDevice(ds_audio_stream);
+-        SetPadInfo(this, {pad_name, true, false, "DualSense haptics"});
++        SetPadInfo(this, {pad_name, true, false, "DualSense haptics", false}, &last_vibrate_us);
+ 
+         // Stop SDL's HID rumble once so the pad plays the audio haptics (Ryuhdr: _hapticsStopSdlRumble).
+         if (sdl_controller) {
+@@ -760,6 +776,7 @@ private:
+     int ds_audio_attempts{0};
+     int64_t ds_audio_next_us{0};
+     bool ds_audio_inited{false};
++    std::atomic<int64_t> last_vibrate_us{0};
+ 
+     u64 last_motion_update{};
+     std::size_t motion_error_count{};
+-- 
+2.55.0.windows.5
+

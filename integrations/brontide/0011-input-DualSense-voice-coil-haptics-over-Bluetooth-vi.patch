@@ -1,0 +1,164 @@
+From 2ce25fc8504ee27f7d28facf627371216dfc88a6 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 09:38:57 +0700
+Subject: [PATCH 04/11] input: DualSense voice-coil haptics over Bluetooth via
+ HID report 0x32
+
+---
+ src/input_common/drivers/sdl_driver.cpp | 98 ++++++++++++++++++++++++-
+ 1 file changed, 95 insertions(+), 3 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index a393678fcf..cf8806911c 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -9,6 +9,8 @@
+ #include <map>
+ #include <numbers>
+ #include <string>
++#include <thread>
++#include <SDL3/SDL_hidapi.h>
+ #include "common/logging.h"
+ #include "common/math_util.h"
+ #include "common/param_package.h"
+@@ -275,7 +277,8 @@ public:
+     }
+ 
+     bool HasHDRumble() const {
+-        if (renhdrum_engine || (dualsense_dsp && ds_audio_stream)) {
++        if (renhdrum_engine || (dualsense_dsp && ds_audio_stream) ||
++            (dualsense_dsp && ds_bt_running.load(std::memory_order_relaxed))) {
+             return true;
+         }
+ 
+@@ -491,7 +494,7 @@ public:
+                 renhdrum_dualsense_dsp_set_half_target(dualsense_dsp, is_right, v.low_amplitude,
+                                                        v.low_frequency, v.high_amplitude,
+                                                        v.high_frequency);
+-                return ds_audio_stream != nullptr;
++                return ds_audio_stream != nullptr || ds_bt_running.load(std::memory_order_relaxed);
+             }
+             renhdrum_engine_push_half_sample(renhdrum_engine, now_us, is_right, v.low_amplitude,
+                                              v.low_frequency, v.high_amplitude, v.high_frequency);
+@@ -641,7 +644,7 @@ private:
+         ++ds_audio_attempts;
+         if (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS) {
+             ds_audio_attempts = DS_AUDIO_MAX_ATTEMPTS;
+-            LOG_INFO(Input, "DualSense on Bluetooth: haptics audio unavailable, using standard rumble");
++            StartDualSenseBluetooth();
+             return;
+         }
+         if (!SDL_WasInit(SDL_INIT_AUDIO)) {
+@@ -705,6 +708,82 @@ private:
+                  device_spec.freq, device_frames);
+     }
+ 
++    // DualSense on Bluetooth has no audio endpoint: open a second HID handle on the pad and send voice-coil
++    // haptics as output report 0x32 (s8 3 kHz PCM built by RenHDrum) every 10.667 ms on a thread of its own.
++    void StartDualSenseBluetooth() {
++        if (!dualsense_dsp || !sdl_joystick || ds_bt_hid) {
++            return;
++        }
++        const char* path = SDL_GetJoystickPath(sdl_joystick.get());
++        if (!path || !*path) {
++            LOG_INFO(Input, "DualSense BT haptics: no HID path, using standard rumble");
++            return;
++        }
++        ds_bt_hid = SDL_hid_open_path(path);
++        if (!ds_bt_hid) {
++            LOG_WARNING(Input, "DualSense BT haptics: could not open HID path {}: {}, using standard rumble",
++                        path, SDL_GetError());
++            return;
++        }
++        ds_bt_running.store(true, std::memory_order_relaxed);
++        ds_bt_thread = std::thread([this] { DualSenseBtLoop(); });
++
++        // Stop SDL's HID rumble once so the pad plays the voice-coil haptics (same as the USB audio path).
++        if (sdl_controller) {
++            SDL_RumbleGamepad(sdl_controller.get(), 0, 0, 0);
++        } else {
++            SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
++        }
++        PublishPad({pad_name, true, true, "DualSense haptics · Bluetooth", false});
++        LOG_INFO(Input, "DualSense haptics over Bluetooth started (report 0x32, path {})", path);
++    }
++
++    // Runs on ds_bt_thread. Never takes renhdrum_mutex: the DSP has its own lock, and CleanupRenHDrum joins this
++    // thread (while holding renhdrum_mutex) before the DSP and the HID handle are freed.
++    void DualSenseBtLoop() {
++        Common::SetCurrentThreadName("DualSenseBT");
++        std::array<uint8_t, RENHDRUM_DS5_BT_REPORT_SIZE> report{};
++        Uint64 next = SDL_GetTicksNS();
++        Uint64 last_signal = 0, stats_at = next;
++        int sent = 0, failed = 0, fails_in_row = 0;
++        while (ds_bt_running.load(std::memory_order_relaxed)) {
++            next += RENHDRUM_DS5_BT_PERIOD_NS;
++            const int r = renhdrum_dualsense_dsp_build_bt_report(
++                dualsense_dsp, RENHDRUM_DS5_BT_BUFFER_LENGTH_DEFAULT, report.data());
++            const Uint64 now = SDL_GetTicksNS();
++            if (r == 1) {
++                last_signal = now;
++            }
++            // Silence gate: keep sending 2 s after the last vibration, then stay quiet on the radio.
++            if (r >= 0 && last_signal != 0 && now - last_signal < 2'000'000'000ULL) {
++                if (SDL_hid_write(ds_bt_hid, report.data(), report.size()) < 0) {
++                    ++failed;
++                    ++fails_in_row;
++                } else {
++                    ++sent;
++                    fails_in_row = 0;
++                }
++            }
++            if (fails_in_row >= 50) { // ~0.5 s of failed writes: pad gone, fall back to standard rumble
++                LOG_WARNING(Input, "DualSense BT haptics: writes failing ({}), stopping", SDL_GetError());
++                break;
++            }
++            if (now - stats_at >= 5'000'000'000ULL) {
++                if (sent > 0 || failed > 0) {
++                    LOG_INFO(Input, "DualSense BT haptics: {} reports/s, {} failed", sent / 5, failed);
++                }
++                sent = failed = 0;
++                stats_at = now;
++            }
++            if (next > now) {
++                SDL_DelayPrecise(next - now);
++            } else if (now - next > 100'000'000ULL) {
++                next = now; // stalled > 100 ms: resync instead of bursting
++            }
++        }
++        ds_bt_running.store(false, std::memory_order_relaxed);
++    }
++
+     static void DualSenseAudioCallback(void* userdata, SDL_AudioStream* stream, int additional_amount,
+                                        int total_amount) {
+         if (additional_amount <= 0 || !userdata) {
+@@ -749,6 +828,15 @@ private:
+         }
+         ds_audio_attempts = 0;
+         ds_audio_next_us = 0;
++        // Stop the Bluetooth sender before the DSP and the HID handle it uses are freed
++        ds_bt_running.store(false, std::memory_order_relaxed);
++        if (ds_bt_thread.joinable()) {
++            ds_bt_thread.join();
++        }
++        if (ds_bt_hid) {
++            SDL_hid_close(ds_bt_hid);
++            ds_bt_hid = nullptr;
++        }
+         if (renhdrum_engine) {
+             if (sdl_joystick) {
+                 uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
+@@ -783,6 +871,10 @@ private:
+     int ds_audio_attempts{0};
+     int64_t ds_audio_next_us{0};
+     bool ds_audio_inited{false};
++    // DualSense on Bluetooth: second HID handle + sender thread for report 0x32
++    SDL_hid_device* ds_bt_hid{nullptr};
++    std::thread ds_bt_thread;
++    std::atomic<bool> ds_bt_running{false};
+     std::atomic<int64_t> last_vibrate_us{0};
+ 
+     u64 last_motion_update{};
+-- 
+2.55.0.windows.5
+

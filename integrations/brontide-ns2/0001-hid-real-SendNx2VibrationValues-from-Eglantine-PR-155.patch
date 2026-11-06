@@ -1,0 +1,77 @@
+From 147929c25a0d7ff06be1865ad43e19092d14decf Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 14:46:09 +0700
+Subject: [PATCH 1/4] hid: real SendNx2VibrationValues from Eglantine PR #155
+
+
+Cherry-picked 2b413a46a2 + 465aa33077; conflicts resolved to the final form in d6efc8ef08 (Build 212).
+---
+ src/core/hle/service/hid/hid_server.cpp | 21 +++++++++++++++++++--
+ src/core/hle/service/hid/hid_server.h   | 11 +++++++----
+ 2 files changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/src/core/hle/service/hid/hid_server.cpp b/src/core/hle/service/hid/hid_server.cpp
+index 20118345a9..f2a7b7d04a 100644
+--- a/src/core/hle/service/hid/hid_server.cpp
++++ b/src/core/hle/service/hid/hid_server.cpp
+@@ -4,6 +4,7 @@
+ // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
++#include <algorithm>
+ #include <array>
+ 
+ #include "common/common_types.h"
+@@ -1112,8 +1113,24 @@ Result IHidServer::IsVibrationDeviceMounted(
+     R_SUCCEED();
+ }
+ 
+-Result IHidServer::SendNx2VibrationValues() {
+-    LOG_DEBUG(Service_HID, "(STUBBED) called");
++Result IHidServer::SendNx2VibrationValues(
++    u64 unknown, AppletResourceUserId aruid,
++    InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
++    InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values) {
++    LOG_DEBUG(Service_HID, "called, unknown={}, applet_resource_user_id={}", unknown, aruid.pid);
++
++    // Unlike 206 this never fails: rumble is best effort and the command is only known from
++    // captures, so an unexpected handle or layout shouldn't return an error a game may treat as
++    // fatal.
++    const auto count = (std::min)(vibration_handles.size(), vibration_values.size());
++    for (std::size_t i = 0; i < count; i++) {
++        const auto result = GetResourceManager()->SendVibrationValue(
++            aruid.pid, vibration_handles[i], vibration_values[i]);
++        if (result.IsError()) {
++            LOG_DEBUG(Service_HID, "failed to send vibration {}, result={:#x}", i, result.raw);
++        }
++    }
++
+     R_SUCCEED();
+ }
+ 
+diff --git a/src/core/hle/service/hid/hid_server.h b/src/core/hle/service/hid/hid_server.h
+index 0767bb91b7..9bb62fabc4 100644
+--- a/src/core/hle/service/hid/hid_server.h
++++ b/src/core/hle/service/hid/hid_server.h
+@@ -189,11 +189,14 @@ private:
+     Result SendVibrationValueInBool(bool is_vibrating,
+                                     Core::HID::VibrationDeviceHandle vibration_device_handle,
+                                     ClientAppletResourceUserId aruid);
+-    // Switch 2 sends vibration every frame with 214 (pointer buffers of device handles and
+-    // values, like 206); Eden doesn't emulate vibration, so accept and drop it.
+-    Result SendNx2VibrationValues();
++    // Switch 2 sends vibration every frame with 214: pointer buffers of device handles and values
++    // like 206, but the aruid is raw data after an unknown u64 instead of a sent process id.
++    Result SendNx2VibrationValues(
++        u64 unknown, AppletResourceUserId aruid,
++        InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
++        InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values);
+     // 213 (32 bytes, aruid): sent per controller every frame by Kirby Air Riders (tens of
+-    // thousands of auto stub log lines a run); no reply data. Accepted and dropped like 214.
++    // thousands of auto stub log lines a run); no reply data. Accepted and dropped.
+     Result Unknown213();
+     // 220 (16 bytes, aruid): replies one byte (meaning unknown); answer 0 instead of leaving it to
+     // the message buffer's leftovers.
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,179 @@
+From ce06907cde43d86afec97e1d7638366be99a4f21 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 19:42:01 +0700
+Subject: [PATCH 01/11] ui: detailed HD Rumble dialog, per-controller
+ connection mode, DualSense section
+
+Settings go through renhdrum-settings.txt (all 23 keys, shared with Brontide-App) instead of flag files.
+SDL driver exposes the connected RenHDrum pads through renhdrum_pads.h.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/renhdrum_pads.h | 22 +++++++++
+ src/input_common/drivers/sdl_driver.cpp  | 58 ++++++++++++++++++++++++
+ 2 files changed, 80 insertions(+)
+ create mode 100644 src/input_common/drivers/renhdrum_pads.h
+
+diff --git a/src/input_common/drivers/renhdrum_pads.h b/src/input_common/drivers/renhdrum_pads.h
+new file mode 100644
+index 0000000000..4e0e879ea0
+--- /dev/null
++++ b/src/input_common/drivers/renhdrum_pads.h
+@@ -0,0 +1,22 @@
++// SPDX-FileCopyrightText: Copyright 2026 Brontide
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <string>
++#include <vector>
++
++// Kept free of SDL so the Qt UI can include it.
++namespace InputCommon {
++
++struct RenHDrumPadInfo {
++    std::string name;
++    bool is_dualsense;
++    bool is_bluetooth;
++    std::string mode;
++};
++
++/// Controllers RenHDrum is driving right now (a copy, safe from any thread).
++std::vector<RenHDrumPadInfo> GetRenHDrumPads();
++
++} // namespace InputCommon
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 6fad051b90..3eac543597 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -6,6 +6,7 @@
+ #include <array>
+ #include <chrono>
+ #include <cstring>
++#include <map>
+ #include <numbers>
+ #include <string>
+ #include "common/logging.h"
+@@ -14,6 +15,7 @@
+ #include "common/settings.h"
+ #include "common/thread.h"
+ #include "common/vector_math.h"
++#include "input_common/drivers/renhdrum_pads.h"
+ #include "input_common/drivers/sdl_driver.h"
+ 
+ // HD Rumble modes added by .patch/sdl3/0002-hdrumble-idle-write.patch (port of Ryuhdr's SDL2 patch; SDL3 is linked
+@@ -72,6 +74,20 @@ SDL_GamepadBinding FindBinding(const GamepadBindings& bindings, Predicate matche
+     return it != bindings.end() ? *it : EmptyBinding();
+ }
+ 
++// Pads shown in Brontide's HD Rumble dialog, keyed by SDLJoystick. Never held while calling SDL.
++std::mutex pads_mutex;
++std::map<const void*, RenHDrumPadInfo> pads;
++
++void SetPadInfo(const void* key, RenHDrumPadInfo info) {
++    std::scoped_lock lock{pads_mutex};
++    pads[key] = std::move(info);
++}
++
++void ErasePadInfo(const void* key) {
++    std::scoped_lock lock{pads_mutex};
++    pads.erase(key);
++}
++
+ SDL_GamepadBinding GetBindingForButton(const GamepadBindings& bindings, SDL_GamepadButton button) {
+     return FindBinding(bindings, [button](const SDL_GamepadBinding& current) {
+         return current.output_type == SDL_GAMEPAD_BINDTYPE_BUTTON &&
+@@ -87,6 +103,15 @@ SDL_GamepadBinding GetBindingForAxis(const GamepadBindings& bindings, SDL_Gamepa
+ }
+ } // Anonymous namespace
+ 
++std::vector<RenHDrumPadInfo> GetRenHDrumPads() {
++    std::scoped_lock lock{pads_mutex};
++    std::vector<RenHDrumPadInfo> result;
++    for (const auto& [key, info] : pads) {
++        result.push_back(info);
++    }
++    return result;
++}
++
+ static bool SDLEventWatcher(void* user_data, SDL_Event* event) {
+     auto* const sdl_state = static_cast<SDLDriver*>(user_data);
+ 
+@@ -486,6 +511,7 @@ private:
+                 const bool is_pro = (pid == 0x2009);
+                 renhdrum_engine = renhdrum_engine_create(is_bluetooth, is_pro);
+                 if (renhdrum_engine) {
++                    pad_name = is_pro ? "Pro Controller" : pid == 0x2006 ? "Joy-Con (L)" : "Joy-Con (R)";
+                     LOG_INFO(Input, "Initialized RenHDrum engine for Switch controller {:04X}:{:04X} (BT: {})",
+                              vid, pid, is_bluetooth);
+                     ApplyRenHDrumSettings(is_bluetooth);
+@@ -497,6 +523,11 @@ private:
+             dualsense_dsp = renhdrum_dualsense_dsp_create(100, true);
+             if (dualsense_dsp) {
+                 LOG_INFO(Input, "Initialized RenHDrum DualSense DSP for controller {:04X}:{:04X}", vid, pid);
++                pad_name = pid == 0x0DF2 ? "DualSense Edge" : "DualSense";
++                SetPadInfo(this, {pad_name, true,
++                                  SDL_GetJoystickConnectionState(sdl_joystick.get()) ==
++                                      SDL_JOYSTICK_CONNECTION_WIRELESS,
++                                  "DualSense standard rumble"});
+                 TryOpenDualSenseAudio();
+             }
+         }
+@@ -554,6 +585,30 @@ private:
+                      envelope && settings.crisp_notes ? ", card 8 crisp notes" : "");
+         }
+         renhdrum_engine_apply_settings(renhdrum_engine, &settings);
++
++        std::string mode;
++        if (!settings.enabled) {
++            mode = "off";
++        } else if (is_bluetooth) {
++            mode = "BT level " + std::to_string(settings.bluetooth_level);
++            std::string cards;
++            cards += settings.bt_after_input ? " B1" : "";
++            cards += settings.bt_fast ? " B3" : "";
++            cards += settings.bt_crisp_notes ? " B2" : "";
++            mode += cards.empty() ? "" : " · " + cards.substr(1);
++        } else if (!settings.usb_no_queue) {
++            mode = "wired " + std::to_string(settings.usb_interval_ms) + " ms · queued";
++        } else {
++            std::string cards = " 1";
++            if (settings.envelope_5ms) {
++                cards += " 3";
++                cards += settings.frequency_in_packet ? " 5" : "";
++                cards += settings.frequency_in_packet && settings.frequency_both_bands ? " 7" : "";
++                cards += settings.crisp_notes ? " 8" : "";
++            }
++            mode = "wired " + std::to_string(settings.usb_interval_ms) + " ms · cards" + cards;
++        }
++        SetPadInfo(this, {pad_name, false, is_bluetooth, std::move(mode)});
+     }
+ 
+     void TryOpenDualSenseAudio() {
+@@ -611,6 +666,7 @@ private:
+             return;
+         }
+         SDL_ResumeAudioStreamDevice(ds_audio_stream);
++        SetPadInfo(this, {pad_name, true, false, "DualSense haptics"});
+ 
+         // Stop SDL's HID rumble once so the pad plays the audio haptics (Ryuhdr: _hapticsStopSdlRumble).
+         if (sdl_controller) {
+@@ -657,6 +713,7 @@ private:
+     }
+ 
+     void CleanupRenHDrum() {
++        ErasePadInfo(this);
+         if (ds_audio_stream) {
+             SDL_PauseAudioStreamDevice(ds_audio_stream);
+             SDL_ClearAudioStream(ds_audio_stream);
+@@ -694,6 +751,7 @@ private:
+     std::mutex renhdrum_mutex;
+ 
+     RenHdcEngine* renhdrum_engine{nullptr};
++    std::string pad_name;
+     RenHdcDualSenseDsp* dualsense_dsp{nullptr};
+     SDL_AudioStream* ds_audio_stream{nullptr};
+     static constexpr int DS_AUDIO_MAX_ATTEMPTS = 10;
+-- 
+2.55.0.windows.5
+

@@ -5,13 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-11-06
 
 ### Added
 - **Switch 2 HD Rumble Research & Integration Docs**: Monograph 11 (`docs/research/11-switch2-hd-rumble.md`) analyzing Switch 2 guest IPC vibration commands (`nn::hid::IHidServer` 213, 214, 220), signal routing across DualSense, Switch Pro Controller 1, and Xbox One, root cause of the 2000 ms hanging rumble defect, and early hardware limits.
 - **Switch 2 Games Integration Guide**: Integration manual (`docs/integration/switch2-games.md`) detailing command 214 dispatching (credited to neo Luigi / Eglantine PR #155) and routing through RenHDrum's public `_half_` C ABI endpoints.
 - **Brontide-NS2 Reference Testbed**: Documented reference test build (0.1.0 beta) based on PokeDinner 2.5.0 by Franseven, validating HD Rumble playback in retail Switch 2 titles.
 
+### Integrations
+- **Brontide hook series extended** (`integrations/brontide/`): 11 more patches (0008-0018) on top of 0007: DualSense voice-coil haptics over Bluetooth, Xbox One S rumble wiring, releasing a wired Pro Controller back to the OS on close, the per-controller HD Rumble dialog hooks, and the main on/off switch. Patches 0008, 0009, 0010 and 0018 are named `ui` but only contain their `input_common` part; the dialog itself is in `studio/`. All apply cleanly in order on Eden `989768aa46`.
+- **HD Rumble Studio reference code** (`integrations/brontide/studio/`): the Qt dialog, widgets, thunder effect and `renhdrum_pads.h`, as reference code (not a patch).
+- **Brontide-NS2 patch series** (`integrations/brontide-ns2/`): command 214 dispatcher (credit: neo Luigi, Eglantine PR #155) plus the RenHDrum thin hook, 4 patches on commit `216b5034c6`, GPL.
+
+### Changed
+- `RENHDRUM_VERSION` is now `0x000201`.
+- Documentation: the "known limitation" notes about the settings resolver no longer promise a version.
 ## [0.2.0] - 2026-11-04
 
 ### Added

@@ -1,0 +1,147 @@
+From 1ed0424a80f3accc2d96873f9b79384e2dd23698 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 23:40:19 +0700
+Subject: [PATCH 05/11] input_common: wire Xbox One S rumble mapper into
+ SDLDriver
+
+---
+ src/input_common/drivers/sdl_driver.cpp | 75 ++++++++++++++++++++++++-
+ 1 file changed, 73 insertions(+), 2 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index cf8806911c..43b1ba6bbc 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -461,6 +461,50 @@ public:
+         return dualsense_dsp;
+     }
+ 
++    RenHdcXboxRumble* GetXboxRumble() const {
++        return xbox_rumble;
++    }
++
++    void TickXboxRumble(int64_t now_us) {
++        constexpr u32 grip_duration_ms = 2000;
++        // Trigger pulses are short: a lost stop must not leave these motors running
++        constexpr u32 trigger_duration_ms = 200;
++        uint16_t motors[4];
++        SDL_Joystick* joystick = nullptr;
++        {
++            std::scoped_lock lock{renhdrum_mutex};
++            if (!xbox_rumble || !sdl_joystick ||
++                renhdrum_xbox_rumble_tick(xbox_rumble, now_us, motors) != 1) {
++                return;
++            }
++            joystick = sdl_joystick.get();
++        }
++        const bool sent = SDL_RumbleJoystick(joystick, motors[0], motors[1], grip_duration_ms);
++        // XInput has no trigger motors, so only the grips decide the retry
++        SDL_RumbleJoystickTriggers(joystick, motors[2], motors[3], trigger_duration_ms);
++        if (!sent) {
++            // rawinput refuses rumble until the first button press
++            std::scoped_lock lock{renhdrum_mutex};
++            if (xbox_rumble) {
++                renhdrum_xbox_rumble_resend(xbox_rumble);
++            }
++        }
++    }
++
++    bool XboxRumbleVibrate(int64_t now_us, bool is_right,
++                           const Common::Input::VibrationStatus& v) {
++        {
++            std::scoped_lock lock{renhdrum_mutex};
++            if (!xbox_rumble) {
++                return false;
++            }
++            renhdrum_xbox_rumble_push_half_sample(xbox_rumble, now_us, is_right, v.low_amplitude,
++                                                  v.high_amplitude);
++        }
++        TickXboxRumble(now_us);
++        return true;
++    }
++
+     bool HasDualSenseAudio() const {
+         return ds_audio_stream != nullptr;
+     }
+@@ -485,6 +529,9 @@ public:
+         if (v.low_amplitude > 0.01f || v.high_amplitude > 0.01f) {
+             last_vibrate_us.store(now_us, std::memory_order_relaxed);
+         }
++        if (XboxRumbleVibrate(now_us, is_right, v)) {
++            return true;
++        }
+         {
+             std::scoped_lock lock{renhdrum_mutex};
+             if (!renhdrum_engine) {
+@@ -550,6 +597,18 @@ private:
+                 TryOpenDualSenseAudio();
+             }
+         }
++        // Xbox One S family. Only the wired PIDs get 10 ms, anything else takes the safer 20 ms
++        else if (vid == 0x045E && sdl_controller &&
++                 SDL_GetGamepadType(sdl_controller.get()) == SDL_GAMEPAD_TYPE_XBOXONE) {
++            const bool is_bluetooth = pid != 0x02EA && pid != 0x02FF;
++            xbox_rumble = renhdrum_xbox_rumble_create(is_bluetooth);
++            if (xbox_rumble) {
++                LOG_INFO(Input, "Initialized Xbox rumble converter for controller {:04X}:{:04X} (BT: {})",
++                         vid, pid, is_bluetooth);
++                pad_name = "Xbox One Controller";
++                PublishPad({pad_name, false, is_bluetooth, "Xbox rumble", false});
++            }
++        }
+     }
+ 
+     // Ryuhdr's recommended mode for a configured pad (0.2.6): wired 15 ms + cards 1 / 3 / 5 / 7 / 8, Bluetooth level 3 +
+@@ -849,6 +908,14 @@ private:
+             renhdrum_dualsense_dsp_destroy(dualsense_dsp);
+             dualsense_dsp = nullptr;
+         }
++        if (xbox_rumble) {
++            if (sdl_joystick) {
++                SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
++                SDL_RumbleJoystickTriggers(sdl_joystick.get(), 0, 0, 0);
++            }
++            renhdrum_xbox_rumble_destroy(xbox_rumble);
++            xbox_rumble = nullptr;
++        }
+     }
+ 
+     Common::UUID guid;
+@@ -857,13 +924,14 @@ private:
+     std::unique_ptr<SDL_Gamepad, decltype(&SDL_CloseGamepad)> sdl_controller;
+     mutable std::mutex mutex;
+ 
+-    // Guards renhdrum_engine / dualsense_dsp / ds_audio_stream: SetVibration runs on the HLE thread while
++    // Guards renhdrum_engine / dualsense_dsp / ds_audio_stream / xbox_rumble: SetVibration runs on the HLE thread while
+     // CloseJoystick frees them. Never held while calling SDL_SendJoystickEffect from the HLE thread.
+     std::mutex renhdrum_mutex;
+ 
+     RenHdcEngine* renhdrum_engine{nullptr};
+     std::string pad_name;
+     RenHdcDualSenseDsp* dualsense_dsp{nullptr};
++    RenHdcXboxRumble* xbox_rumble{nullptr};
+     SDL_AudioStream* ds_audio_stream{nullptr};
+     static constexpr int DS_AUDIO_MAX_ATTEMPTS = 10;
+     // SDL no-queue gap while the 5 ms envelope runs (Ryuhdr AmFmNoQueueGapMs)
+@@ -1068,6 +1136,9 @@ void SDLDriver::PumpEvents() const {
+                 if (joystick && joystick->GetDualSenseDsp()) {
+                     joystick->MaintainDualSenseAudio(now_us);
+                 }
++                if (joystick && joystick->GetXboxRumble()) {
++                    joystick->TickXboxRumble(now_us);
++                }
+             }
+         }
+     }
+@@ -1322,7 +1393,7 @@ bool SDLDriver::IsVibrationEnabled(const PadIdentifier& identifier) {
+         return joystick->HasVibration();
+     }
+ 
+-    if (joystick->GetRenHDrumEngine() || joystick->GetDualSenseDsp()) {
++    if (joystick->GetRenHDrumEngine() || joystick->GetDualSenseDsp() || joystick->GetXboxRumble()) {
+         joystick->EnableVibration(true);
+         return true;
+     }
+-- 
+2.55.0.windows.5
+

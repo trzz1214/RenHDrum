@@ -1,0 +1,207 @@
+From 1f3919bc5570078fa96c2acd2c51b6ebdf3ab93e Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 19:07:47 +0700
+Subject: [PATCH 11/11] HD Rumble dialog: one main switch, controller sidebar,
+ apply on Done
+
+- Main HD Rumble switch moves to a bar at the top; one copy only. Off now
+  means standard rumble on every controller: Switch pads no longer keep a
+  disabled engine that swallowed all rumble, DualSense skips the haptics
+  DSP, Xbox stays on plain rumble; all still listed as "HD Rumble off".
+- Closing the dialog re-applies the saved settings to connected pads
+  (InputCommon::ReapplyRenHDrumSettings, run on the input pump), so no
+  replug is needed. Cleanup hands SDL back its normal writes and clears
+  SDL's remembered standard rumble before the new mode starts.
+- Sidebar shows a connected dot per controller; Overview becomes
+  Controllers; recommended row only when settings differ; shorter notes;
+  Xbox page drops Step 1/2; footer only after a save.
+- Vietnamese translations for the new strings.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/renhdrum_pads.h |  4 ++
+ src/input_common/drivers/sdl_driver.cpp  | 86 ++++++++++++++++++++----
+ 2 files changed, 77 insertions(+), 13 deletions(-)
+
+diff --git a/src/input_common/drivers/renhdrum_pads.h b/src/input_common/drivers/renhdrum_pads.h
+index 1e598bf01b..db29026b6e 100644
+--- a/src/input_common/drivers/renhdrum_pads.h
++++ b/src/input_common/drivers/renhdrum_pads.h
+@@ -22,4 +22,8 @@ struct RenHDrumPadInfo {
+ /// Controllers RenHDrum is driving right now (a copy, safe from any thread).
+ std::vector<RenHDrumPadInfo> GetRenHDrumPads();
+ 
++/// Re-reads the HD Rumble settings for every connected controller, as a reconnect would.
++/// Safe from any thread: the input thread does the work on its next pass.
++void ReapplyRenHDrumSettings();
++
+ } // namespace InputCommon
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 8736c3ddce..41c9a629e3 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -85,6 +85,7 @@ struct PadEntry {
+ };
+ std::mutex pads_mutex;
+ std::map<const void*, PadEntry> pads;
++std::atomic<bool> reapply_requested{false};
+ 
+ void SetPadInfo(const void* key, RenHDrumPadInfo info, const std::atomic<int64_t>* last_vibrate_us = nullptr) {
+     std::scoped_lock lock{pads_mutex};
+@@ -129,6 +130,11 @@ std::vector<RenHDrumPadInfo> GetRenHDrumPads() {
+     return result;
+ }
+ 
++void ReapplyRenHDrumSettings() {
++    LOG_INFO(Input, "HD Rumble settings saved: re-applying to connected controllers");
++    reapply_requested.store(true, std::memory_order_relaxed);
++}
++
+ static bool SDLEventWatcher(void* user_data, SDL_Event* event) {
+     auto* const sdl_state = static_cast<SDLDriver*>(user_data);
+ 
+@@ -374,6 +380,27 @@ public:
+         return sdl_controller.get();
+     }
+ 
++    /// The reconnect path without the reconnect: drop the RenHDrum state, build it from the settings now
++    void ReapplyRenHDrum() {
++        {
++            // A sample queued for the standard path must not land on the new mode
++            std::scoped_lock lock{pending_vibration_mutex};
++            pending_vibration.reset();
++        }
++        std::scoped_lock lock{renhdrum_mutex};
++        // SDL remembers the last standard rumble and re-sends it for up to 2 s; each re-send drops the
++        // Switch driver out of HD mode. Zero it so the pad starts the new mode clean
++        if (sdl_controller) {
++            SDL_RumbleGamepad(sdl_controller.get(), 0, 0, 0);
++        } else if (sdl_joystick) {
++            SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
++        }
++        CleanupRenHDrum();
++        if (sdl_joystick) {
++            InitRenHDrum();
++        }
++    }
++
+     void SetSDLJoystick(SDL_Joystick* joystick, SDL_Gamepad* controller) {
+         std::scoped_lock lock{renhdrum_mutex};
+         CleanupRenHDrum();
+@@ -596,9 +623,17 @@ private:
+                 const bool is_bluetooth =
+                     (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS);
+                 const bool is_pro = (pid == 0x2009);
++                pad_name = is_pro ? "Pro Controller" : pid == 0x2006 ? "Joy-Con (L)" : "Joy-Con (R)";
++                // Off: no engine at all, so SetVibration takes SDL's standard rumble. A disabled engine
++                // would swallow every vibration and leave the pad silent
++                if (!HdRumbleEnabled()) {
++                    LOG_INFO(Input, "HD Rumble off: Switch controller {:04X}:{:04X} uses standard rumble", vid,
++                             pid);
++                    PublishPad({pad_name, false, is_bluetooth, "off", false});
++                    return;
++                }
+                 renhdrum_engine = renhdrum_engine_create(is_bluetooth, is_pro);
+                 if (renhdrum_engine) {
+-                    pad_name = is_pro ? "Pro Controller" : pid == 0x2006 ? "Joy-Con (L)" : "Joy-Con (R)";
+                     LOG_INFO(Input, "Initialized RenHDrum engine for Switch controller {:04X}:{:04X} (BT: {})",
+                              vid, pid, is_bluetooth);
+                     ApplyRenHDrumSettings(is_bluetooth);
+@@ -607,28 +642,26 @@ private:
+         }
+         // Sony DualSense (VID 0x054C, PID 0x0CE6 or 0x0DF2)
+         else if (vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)) {
++            const bool wireless =
++                SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS;
++            // The main HD Rumble switch covers DualSense too: off means SDL's standard rumble, no haptics
++            if (!HdRumbleEnabled()) {
++                LOG_INFO(Input, "HD Rumble off: DualSense {:04X}:{:04X} uses standard rumble", vid, pid);
++                pad_name = pid == 0x0DF2 ? "DualSense Edge" : "DualSense";
++                PublishPad({pad_name, true, wireless, "off", false});
++                return;
++            }
+             dualsense_dsp = renhdrum_dualsense_dsp_create(100, true);
+             if (dualsense_dsp) {
+                 LOG_INFO(Input, "Initialized RenHDrum DualSense DSP for controller {:04X}:{:04X}", vid, pid);
+                 pad_name = pid == 0x0DF2 ? "DualSense Edge" : "DualSense";
+-                PublishPad({pad_name, true,
+-                            SDL_GetJoystickConnectionState(sdl_joystick.get()) ==
+-                                SDL_JOYSTICK_CONNECTION_WIRELESS,
+-                            "DualSense standard rumble", false});
++                PublishPad({pad_name, true, wireless, "DualSense standard rumble", false});
+                 TryOpenDualSenseAudio();
+             }
+         }
+         // Xbox One S family. Only the wired PIDs get 10 ms, anything else takes the safer 20 ms
+         else if (vid == 0x045E && sdl_controller &&
+                  SDL_GetGamepadType(sdl_controller.get()) == SDL_GAMEPAD_TYPE_XBOXONE) {
+-            // The main HD Rumble switch also covers Xbox: off means SDL's plain 2-motor rumble
+-            RenHdcConfig config{};
+-            config.enable_hd_rumble = true;
+-            RenHdcSettings settings{};
+-            if (renhdrum_settings_resolve(&config, &settings) == RENHDRUM_OK && !settings.enabled) {
+-                LOG_INFO(Input, "HD Rumble off: Xbox controller {:04X}:{:04X} uses plain rumble", vid, pid);
+-                return;
+-            }
+             // Wired or wireless from SDL's own connection state (any Microsoft pad, as DualSense above);
+             // when SDL cannot tell, fall back to the two known wired PIDs
+             const auto connection = SDL_GetJoystickConnectionState(sdl_joystick.get());
+@@ -636,6 +669,13 @@ private:
+                 (connection == SDL_JOYSTICK_CONNECTION_WIRED || connection == SDL_JOYSTICK_CONNECTION_WIRELESS)
+                     ? connection == SDL_JOYSTICK_CONNECTION_WIRELESS
+                     : (pid != 0x02EA && pid != 0x02FF);
++            // The main HD Rumble switch also covers Xbox: off means SDL's plain 2-motor rumble
++            if (!HdRumbleEnabled()) {
++                LOG_INFO(Input, "HD Rumble off: Xbox controller {:04X}:{:04X} uses plain rumble", vid, pid);
++                pad_name = "Xbox One Controller";
++                PublishPad({pad_name, false, is_bluetooth, "Xbox off", false});
++                return;
++            }
+             xbox_rumble = renhdrum_xbox_rumble_create(is_bluetooth);
+             if (xbox_rumble) {
+                 LOG_INFO(Input,
+@@ -647,6 +687,14 @@ private:
+         }
+     }
+ 
++    /// The main HD Rumble switch (settings file, or the old off flag file next to the exe).
++    static bool HdRumbleEnabled() {
++        RenHdcConfig config{};
++        config.enable_hd_rumble = true;
++        RenHdcSettings settings{};
++        return renhdrum_settings_resolve(&config, &settings) != RENHDRUM_OK || settings.enabled;
++    }
++
+     // Ryuhdr's recommended mode for a configured pad (0.2.6): wired 15 ms + cards 1 / 3 / 5 / 7 / 8, Bluetooth level 3 +
+     // B1 / B3 / B2. Flag files next to eden.exe still win (renhdrum_settings_resolve). Then the SDL modes are switched on; a mode
+     // SDL refused is cleared, so the engine never paces for writes that SDL does not gate (Ryuhdr: _noQueueActive / _btFastActive).
+@@ -936,6 +984,11 @@ private:
+             if (sdl_joystick) {
+                 uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
+                 SDL_SendJoystickEffect(sdl_joystick.get(), stop_pkt, sizeof(stop_pkt));
++                // The pad may stay connected (settings re-applied from the dialog): hand SDL back its
++                // normal writes before the next InitRenHDrum picks the modes again
++                SDL_HDRumbleSetNoQueue(sdl_joystick.get(), 0, 0, 0);
++                SDL_HDRumbleSetNoQueueBluetooth(sdl_joystick.get(), 0, 0);
++                SDL_HDRumbleSetBluetoothAfterInput(sdl_joystick.get(), 0);
+             }
+             renhdrum_engine_destroy(renhdrum_engine);
+             renhdrum_engine = nullptr;
+@@ -1174,7 +1227,14 @@ void SDLDriver::PumpEvents() const {
+                 joysticks.insert(joysticks.end(), joystick_list.begin(), joystick_list.end());
+             }
+         }
++        const bool reapply = reapply_requested.exchange(false, std::memory_order_relaxed);
++        if (reapply) {
++            LOG_INFO(Input, "Re-applying HD Rumble settings to {} controller(s)", joysticks.size());
++        }
+         for (const auto& joystick : joysticks) {
++            if (joystick && reapply) {
++                joystick->ReapplyRenHDrum();
++            }
+             if (joystick) {
+                 joystick->FlushPendingVibration();
+             }
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,1465 @@
+From 08d0243b0074bca43a04d86592420643674570c2 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 14:51:56 +0700
+Subject: [PATCH 2/4] input: RenHDrum core thin hook + SDL3 patches
+
+sdl_driver, renhdrum_pads.h, input_common CMake, emulated_controller from brontide-1.2.0 (git apply -3, clean), renhdrum.dll copy block in yuzu CMake, plus the SDL3 hdrumble patches and their cpmfile.json entry (approved by the owner: the SDL_HDRumble* calls need them).
+---
+ .patch/sdl3/0001-hdrumble.patch               |  50 ++
+ .patch/sdl3/0002-hdrumble-idle-write.patch    | 508 ++++++++++++++
+ cpmfile.json                                  |   4 +
+ src/hid_core/frontend/emulated_controller.cpp |  12 +-
+ src/input_common/CMakeLists.txt               |   8 +
+ src/input_common/drivers/renhdrum_pads.h      |  25 +
+ src/input_common/drivers/sdl_driver.cpp       | 648 +++++++++++++++++-
+ src/input_common/drivers/sdl_driver.h         |   3 +-
+ 8 files changed, 1244 insertions(+), 14 deletions(-)
+ create mode 100644 .patch/sdl3/0001-hdrumble.patch
+ create mode 100644 .patch/sdl3/0002-hdrumble-idle-write.patch
+ create mode 100644 src/input_common/drivers/renhdrum_pads.h
+
+diff --git a/.patch/sdl3/0001-hdrumble.patch b/.patch/sdl3/0001-hdrumble.patch
+new file mode 100644
+index 0000000000..bea2b5bb90
+--- /dev/null
++++ b/.patch/sdl3/0001-hdrumble.patch
+@@ -0,0 +1,50 @@
++--- a/src/joystick/hidapi/SDL_hidapi_switch.c
+++++ b/src/joystick/hidapi/SDL_hidapi_switch.c
++@@ -56,6 +56,7 @@
++ 
++ // How often you have to refresh a long duration rumble to keep the motors running
++ #define RUMBLE_REFRESH_FREQUENCY_MS 50
+++#define HD_RUMBLE_BT_REFRESH_MS 150
++ 
++ #define SWITCH_GYRO_SCALE  14.2842f
++ #define SWITCH_ACCEL_SCALE 4096.f
++@@ -1837,6 +1838,19 @@ static bool HIDAPI_DriverSwitch_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_Jo
++     return SetHomeLED(ctx, (Uint8)value);
++ }
++ 
+++static bool HDRumble_IsNeutral(const SwitchRumbleData_t *pRumble)
+++{
+++    return (pRumble->rgucData[0] == 0x00 && pRumble->rgucData[1] == 0x01 &&
+++            pRumble->rgucData[2] == 0x40 && pRumble->rgucData[3] == 0x40) ||
+++           (pRumble->rgucData[0] == 0x00 && pRumble->rgucData[1] == 0x00 &&
+++            pRumble->rgucData[2] == 0x00 && pRumble->rgucData[3] == 0x00);
+++}
+++
+++static bool HDRumble_IsClickPacket(const Uint8 *packet8)
+++{
+++    return !((packet8[0] & 0x03) == 0 && (packet8[3] & 0xC0) == 0x40);
+++}
+++
++ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
++ {
++     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
++@@ -1848,8 +1862,10 @@ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SD
++             return SDL_SetError("Unknown Nintendo Switch Pro effect type");
++         }
++ 
+++        bool is_click = HDRumble_IsClickPacket(&packet->rumbleData[0].rgucData[0]);
++         SDL_copyp(&ctx->m_RumblePacket.rumbleData[0], &packet->rumbleData[0]);
++         SDL_copyp(&ctx->m_RumblePacket.rumbleData[1], &packet->rumbleData[1]);
+++        ctx->m_bRumbleActive = (!is_click && !(HDRumble_IsNeutral(&packet->rumbleData[0]) && HDRumble_IsNeutral(&packet->rumbleData[1])));
++         if (!WriteRumble(ctx)) {
++             return false;
++         }
++@@ -2823,7 +2839,7 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
++         if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
++             HIDAPI_DriverSwitch_SendPendingRumble(ctx);
++         } else if (ctx->m_bRumbleActive &&
++-                   now >= (ctx->m_ulRumbleSent + RUMBLE_REFRESH_FREQUENCY_MS)) {
+++                   now >= (ctx->m_ulRumbleSent + (device->is_bluetooth ? HD_RUMBLE_BT_REFRESH_MS : RUMBLE_REFRESH_FREQUENCY_MS))) {
++ #ifdef DEBUG_RUMBLE
++             SDL_Log("Sent continuing rumble, %d ms after previous rumble", now - ctx->m_ulRumbleSent);
++ #endif
+diff --git a/.patch/sdl3/0002-hdrumble-idle-write.patch b/.patch/sdl3/0002-hdrumble-idle-write.patch
+new file mode 100644
+index 0000000000..2a4207726b
+--- /dev/null
++++ b/.patch/sdl3/0002-hdrumble-idle-write.patch
+@@ -0,0 +1,508 @@
++diff --git a/src/joystick/hidapi/SDL_hidapi_rumble.c b/src/joystick/hidapi/SDL_hidapi_rumble.c
++index ef3fede..eb08821 100644
++--- a/src/joystick/hidapi/SDL_hidapi_rumble.c
+++++ b/src/joystick/hidapi/SDL_hidapi_rumble.c
++@@ -55,6 +55,15 @@ static
++ SDL_Mutex *SDL_HIDAPI_rumble_lock;
++ static SDL_HIDAPI_RumbleContext rumble_context SDL_GUARDED_BY(SDL_HIDAPI_rumble_lock);
++ 
+++// HD Rumble (eden-hdr, port of Ryuhdr's SDL2 patch): requests queued or being handled, including the pause after a write.
+++// rumble_pending of a device is already 0 during that pause, but a packet queued then still waits for it.
+++static SDL_AtomicInt rumble_busy;
+++
+++bool SDL_HIDAPI_RumbleIsIdle(void)
+++{
+++    return SDL_GetAtomicInt(&rumble_busy) == 0;
+++}
+++
++ static int SDLCALL SDL_HIDAPI_RumbleThread(void *data)
++ {
++     SDL_HIDAPI_RumbleContext *ctx = (SDL_HIDAPI_RumbleContext *)data;
++@@ -77,6 +86,9 @@ static int SDLCALL SDL_HIDAPI_RumbleThread(void *data)
++         SDL_UnlockMutex(SDL_HIDAPI_rumble_lock);
++ 
++         if (request) {
+++            const int pause_setting = SDL_GetAtomicInt(&request->device->hd_pause_ms);
+++            const Uint32 pause_ms = pause_setting > 0 ? (Uint32)pause_setting : 10;
+++
++             SDL_LockMutex(request->device->dev_lock);
++             if (request->device->dev) {
++ #ifdef DEBUG_RUMBLE
++@@ -92,7 +104,8 @@ static int SDLCALL SDL_HIDAPI_RumbleThread(void *data)
++             SDL_free(request);
++ 
++             // Make sure we're not starving report reads when there's lots of rumble
++-            SDL_Delay(10);
+++            SDL_Delay(pause_ms);
+++            (void)SDL_AtomicDecRef(&rumble_busy);
++         }
++     }
++     return 0;
++@@ -124,6 +137,7 @@ static void SDL_HIDAPI_StopRumbleThread(SDL_HIDAPI_RumbleContext *ctx)
++             request->callback(request->userdata);
++         }
++         (void)SDL_AtomicDecRef(&request->device->rumble_pending);
+++        (void)SDL_AtomicDecRef(&rumble_busy);
++         SDL_free(request);
++     }
++     SDL_UnlockMutex(SDL_HIDAPI_rumble_lock);
++@@ -226,6 +240,7 @@ int SDL_HIDAPI_SendRumbleWithCallbackAndUnlock(SDL_HIDAPI_Device *device, const
++     request->userdata = userdata;
++ 
++     SDL_AtomicIncRef(&device->rumble_pending);
+++    SDL_AtomicIncRef(&rumble_busy);
++ 
++     if (ctx->requests_head) {
++         ctx->requests_head->prev = request;
++diff --git a/src/joystick/hidapi/SDL_hidapi_rumble.h b/src/joystick/hidapi/SDL_hidapi_rumble.h
++index bcd4a79..226eaa9 100644
++--- a/src/joystick/hidapi/SDL_hidapi_rumble.h
+++++ b/src/joystick/hidapi/SDL_hidapi_rumble.h
++@@ -39,4 +39,7 @@ void SDL_HIDAPI_UnlockRumble(void) SDL_RELEASE(SDL_HIDAPI_rumble_lock);
++ int SDL_HIDAPI_SendRumble(SDL_HIDAPI_Device *device, const Uint8 *data, int size);
++ void SDL_HIDAPI_QuitRumble(void);
++ 
+++// HD Rumble (eden-hdr): no request queued or being handled by the rumble thread (pause after a write included)
+++bool SDL_HIDAPI_RumbleIsIdle(void);
+++
++ #endif // SDL_JOYSTICK_HIDAPI
++diff --git a/src/joystick/hidapi/SDL_hidapi_switch.c b/src/joystick/hidapi/SDL_hidapi_switch.c
++index 944eaed..237f598 100644
++--- a/src/joystick/hidapi/SDL_hidapi_switch.c
+++++ b/src/joystick/hidapi/SDL_hidapi_switch.c
++@@ -282,6 +282,19 @@ typedef enum
++     SWITCH_ENHANCED_REPORT_HINT_AUTO
++ } HIDAPI_Switch_EnhancedReportHint;
++ 
+++// HD Rumble merge state (eden-hdr, port of Ryuhdr's SDL2 patch), used by no-queue and Bluetooth after input.
+++// Only touched with the joysticks locked (SendJoystickEffect, UpdateDevice, the exports).
+++typedef struct
+++{
+++    bool dirty;           // acc holds data that was not written yet
+++    Uint8 acc[8];         // peak of everything received since the last real write
+++    Uint8 latest[8];      // newest packet from the game
+++    Uint8 sent[8];        // last packet written
+++    Uint64 last_report_us;
+++    Uint64 last_send_us;
+++    Uint32 nq_gap_us;     // no-queue: minimum gap between writes
+++} HDSyncState;
+++
++ typedef struct
++ {
++     SDL_HIDAPI_Device *device;
++@@ -307,6 +320,8 @@ typedef struct
++     bool m_bRumblePending;
++     bool m_bRumbleZeroPending;
++     Uint32 m_unRumblePending;
+++    bool m_bHDRumbleMode;
+++    HDSyncState m_HDSync;
++     bool m_bSensorsSupported;
++     bool m_bReportSensors;
++     bool m_bHasSensorData;
++@@ -1766,6 +1781,9 @@ static bool HIDAPI_DriverSwitch_RumbleJoystick(SDL_HIDAPI_Device *device, SDL_Jo
++         }
++     }
++ 
+++    ctx->m_bHDRumbleMode = false;
+++    ctx->m_HDSync.dirty = false;
+++
++     if (ctx->m_bRumblePending) {
++         if (!HIDAPI_DriverSwitch_SendPendingRumble(ctx)) {
++             return false;
++@@ -1851,6 +1869,233 @@ static bool HDRumble_IsClickPacket(const Uint8 *packet8)
++     return !((packet8[0] & 0x03) == 0 && (packet8[3] & 0xC0) == 0x40);
++ }
++ 
+++/* ---- HD Rumble no-queue and Bluetooth after input (eden-hdr, port of Ryuhdr's SDL2 patch) ----
+++   SDL does not read input while a rumble write is queued or running (ReadInput, rumble_pending). Both modes therefore write a
+++   packet only while the rumble thread is idle (nothing queued, not in its pause after a write), so it never waits in the queue.
+++   Packets that arrive meanwhile are peak-merged, so a short pulse and the stop after it are never lost. */
+++
+++// Bluetooth after input: never write more often than this (safety floor, the caller paces with its Bluetooth level)
+++#define HD_RUMBLE_BT_WRITE_MS 20
+++// Bluetooth after input: no input report for this long = the link is in trouble, only a pending stop is written
+++#define HD_SYNC_BT_STOP_FALLBACK_US 150000
+++
+++// Amplitude thresholds (0..65535) of the 101 amplitude codes, same table as the RenHDrum / Ryuhdr encoder (dekuNukem)
+++static const Uint16 HDSync_AmpThresholds[101] = {
+++    0, 514, 775, 921, 1096, 1303, 1550, 1843, 2192, 2606, 3100, 3686,
+++    4383, 5213, 6199, 7372, 7698, 8039, 8395, 8767, 9155, 9560, 9984, 10426,
+++    10887, 11369, 11873, 12398, 12947, 13520, 14119, 14744, 15067, 15397, 15734, 16079,
+++    16431, 16790, 17158, 17534, 17918, 18310, 18711, 19121, 19540, 19967, 20405, 20851,
+++    21308, 21775, 22251, 22739, 23236, 23745, 24265, 24797, 25340, 25894, 26462, 27041,
+++    27633, 28238, 28856, 29488, 30134, 30794, 31468, 32157, 32861, 33581, 34316, 35068,
+++    35836, 36620, 37422, 38242, 39079, 39935, 40809, 41703, 42616, 43549, 44503, 45477,
+++    46473, 47491, 48531, 49593, 50679, 51789, 52923, 54082, 55266, 56476, 57713, 58977,
+++    60268, 61588, 62936, 64315, 65535,
+++};
+++
+++static const Uint8 HDSync_Neutral[8] = { 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40 };
+++
+++static Uint64 HDSync_NowUs(void)
+++{
+++    return SDL_GetTicksNS() / 1000;
+++}
+++
+++static int HDSync_AmpHigh(const Uint8 *side)
+++{
+++    const int code = side[1] >> 1;
+++    return code > 100 ? 100 : code;
+++}
+++
+++static int HDSync_AmpLow(const Uint8 *side)
+++{
+++    const int code = side[3] < 0x40 ? 0 : (((side[3] - 0x40) << 1) | (side[2] >> 7));
+++    return code > 100 ? 100 : code;
+++}
+++
+++static Uint32 HDSync_SideSum(const Uint8 *side)
+++{
+++    return (Uint32)HDSync_AmpThresholds[HDSync_AmpHigh(side)] + (Uint32)HDSync_AmpThresholds[HDSync_AmpLow(side)];
+++}
+++
+++static bool HDSync_IsClick8(const Uint8 *rumble8)
+++{
+++    return HDRumble_IsClickPacket(&rumble8[0]) || HDRumble_IsClickPacket(&rumble8[4]);
+++}
+++
+++static bool HDSync_IsNeutralSide(const Uint8 *side)
+++{
+++    return (side[1] & 0xFE) == 0 && side[3] == 0x40 && (side[2] & 0x80) == 0;
+++}
+++
+++static bool HDSync_IsNeutral8(const Uint8 *rumble8)
+++{
+++    return HDSync_IsNeutralSide(&rumble8[0]) && HDSync_IsNeutralSide(&rumble8[4]);
+++}
+++
+++/* Peak of two sides: the stronger amplitude of each band, with the frequency of the sample it came from. If the two peaks
+++   together would be stronger than full scale and stronger than both sources, take the stronger source as it was (motor protection). */
+++static void HDSync_MergeSide(Uint8 *acc, const Uint8 *in)
+++{
+++    Uint8 merged[4];
+++    Uint32 sum_merged, sum_acc, sum_in;
+++
+++    SDL_memcpy(merged, acc, 4);
+++    if (HDSync_AmpHigh(in) > HDSync_AmpHigh(acc)) {
+++        merged[0] = in[0];
+++        merged[1] = in[1];
+++    }
+++    if (HDSync_AmpLow(in) > HDSync_AmpLow(acc)) {
+++        merged[2] = in[2];
+++        merged[3] = in[3];
+++    }
+++
+++    sum_merged = HDSync_SideSum(merged);
+++    sum_acc = HDSync_SideSum(acc);
+++    sum_in = HDSync_SideSum(in);
+++    if (sum_merged > 65535 && sum_merged > sum_acc && sum_merged > sum_in) {
+++        SDL_memcpy(merged, sum_acc >= sum_in ? acc : in, 4);
+++    }
+++    SDL_memcpy(acc, merged, 4);
+++}
+++
+++static void HDSync_Reset(HDSyncState *sync)
+++{
+++    SDL_zerop(sync);
+++    SDL_memcpy(sync->acc, HDSync_Neutral, 8);
+++    SDL_memcpy(sync->latest, HDSync_Neutral, 8);
+++    SDL_memcpy(sync->sent, HDSync_Neutral, 8);
+++}
+++
+++// A packet from the game: nothing is written here, it is merged and written when the rumble thread is idle
+++static void HDSync_Receive(SDL_DriverSwitch_Context *ctx, const Uint8 *rumble)
+++{
+++    HDSyncState *sync = &ctx->m_HDSync;
+++
+++    SDL_memcpy(sync->latest, rumble, 8);
+++
+++    if (HDSync_IsClick8(rumble)) {
+++        // A click packet cannot be peak-merged by bytes: it replaces whatever waits
+++        SDL_memcpy(sync->acc, rumble, 8);
+++        sync->dirty = true;
+++    } else if (sync->dirty) {
+++        if (!HDSync_IsClick8(sync->acc)) {
+++            HDSync_MergeSide(&sync->acc[0], &rumble[0]);
+++            HDSync_MergeSide(&sync->acc[4], &rumble[4]);
+++        }
+++        // else: a click waits to be written, this packet is only kept in "latest" and goes out at the next chance
+++    } else if (SDL_memcmp(rumble, sync->sent, 8) != 0) {
+++        SDL_memcpy(sync->acc, rumble, 8);
+++        sync->dirty = true;
+++    }
+++}
+++
+++// Writes acc (one request to the rumble thread) and moves the window on. The caller checked that the rumble thread is idle.
+++static void HDSync_Write(SDL_DriverSwitch_Context *ctx, Uint64 now_us)
+++{
+++    HDSyncState *sync = &ctx->m_HDSync;
+++
+++    SDL_memcpy(&ctx->m_RumblePacket.rumbleData[0], sync->acc, 8);
+++    WriteRumble(ctx);
+++    SDL_memcpy(&ctx->m_RumblePacket.rumbleData[0], sync->latest, 8);
+++
+++    sync->last_send_us = now_us;
+++    SDL_memcpy(sync->sent, sync->acc, 8);
+++
+++    // The next window has to end on the game's current state; a stop right after a peak goes out at the next chance
+++    SDL_memcpy(sync->acc, sync->latest, 8);
+++    sync->dirty = SDL_memcmp(sync->sent, sync->latest, 8) != 0;
+++}
+++
+++static bool HDSync_RumbleIdle(SDL_HIDAPI_Device *device)
+++{
+++    return SDL_GetAtomicInt(&device->rumble_pending) == 0 && SDL_HIDAPI_RumbleIsIdle();
+++}
+++
+++// No-queue (Ryuhdr card 1 on USB, card B3 on Bluetooth): written from the clock as soon as the gap has passed and the rumble thread is idle
+++static void HDNoQueue_TryWrite(SDL_DriverSwitch_Context *ctx, SDL_HIDAPI_Device *device, bool allow_refresh, Uint64 now)
+++{
+++    HDSyncState *sync = &ctx->m_HDSync;
+++    const Uint64 now_us = HDSync_NowUs();
+++
+++    if (allow_refresh && !sync->dirty && ctx->m_bRumbleActive &&
+++        now >= ctx->m_ulRumbleSent + (device->is_bluetooth ? HD_RUMBLE_BT_REFRESH_MS : RUMBLE_REFRESH_FREQUENCY_MS)) {
+++        // Keep a running vibration alive, like the clock based path
+++        SDL_memcpy(sync->acc, sync->latest, 8);
+++        sync->dirty = true;
+++    }
+++
+++    if (!sync->dirty || (sync->last_send_us != 0 && now_us - sync->last_send_us < sync->nq_gap_us) || !HDSync_RumbleIdle(device)) {
+++        return;
+++    }
+++    HDSync_Write(ctx, now_us);
+++}
+++
+++// Bluetooth after input (Ryuhdr card B1): written right after this update read at least one input report, only while the rumble thread is idle
+++static void HDBtAfterInput_Update(SDL_DriverSwitch_Context *ctx, SDL_HIDAPI_Device *device, bool got_report, Uint64 now)
+++{
+++    HDSyncState *sync = &ctx->m_HDSync;
+++    const Uint64 now_us = HDSync_NowUs();
+++
+++    if (got_report) {
+++        sync->last_report_us = now_us;
+++    }
+++
+++    if (!sync->dirty && ctx->m_bRumbleActive && now >= ctx->m_ulRumbleSent + HD_RUMBLE_BT_REFRESH_MS) {
+++        // Keep a running vibration alive, like the clock based Bluetooth path
+++        SDL_memcpy(sync->acc, sync->latest, 8);
+++        sync->dirty = true;
+++    }
+++
+++    if (!sync->dirty || (sync->last_send_us != 0 && now_us - sync->last_send_us < (Uint64)HD_RUMBLE_BT_WRITE_MS * 1000)) {
+++        return;
+++    }
+++    if (!got_report &&
+++        !(HDSync_IsNeutral8(sync->acc) && !HDSync_IsNeutral8(sync->sent) &&
+++          (sync->last_report_us == 0 || now_us - sync->last_report_us > HD_SYNC_BT_STOP_FALLBACK_US))) {
+++        return; // without a fresh input report only a stop may go out, and only when the reports stopped
+++    }
+++    if (!HDSync_RumbleIdle(device)) {
+++        return;
+++    }
+++    HDSync_Write(ctx, now_us);
+++}
+++
+++// Returns 1 when active, 0 otherwise (Bluetooth pad without allow_bluetooth, B1 on, input-only pad, enable = false)
+++int HIDAPI_DriverSwitch_SetHDNoQueue(SDL_HIDAPI_Device *device, bool enable, int gap_ms, bool allow_bluetooth)
+++{
+++    SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
+++
+++    if (!ctx || ctx->m_bInputOnly) {
+++        return 0;
+++    }
+++    if (enable && (device->is_bluetooth != allow_bluetooth || device->hd_bt_after_input)) {
+++        return 0;
+++    }
+++    if (enable != device->hd_rumble_noqueue) {
+++        HDSync_Reset(&ctx->m_HDSync);
+++    }
+++    ctx->m_HDSync.nq_gap_us = (Uint32)(gap_ms < 5 ? 5 : (gap_ms > 100 ? 100 : gap_ms)) * 1000;
+++    device->hd_rumble_noqueue = enable;
+++    return enable ? 1 : 0;
+++}
+++
+++// Returns 1 when active, 0 otherwise (USB pad, no-queue on, input-only pad, enable = false)
+++int HIDAPI_DriverSwitch_SetHDBtAfterInput(SDL_HIDAPI_Device *device, bool enable)
+++{
+++    SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
+++
+++    if (!ctx || ctx->m_bInputOnly) {
+++        return 0;
+++    }
+++    if (enable && (!device->is_bluetooth || device->hd_rumble_noqueue)) {
+++        return 0;
+++    }
+++    if (enable != device->hd_bt_after_input) {
+++        HDSync_Reset(&ctx->m_HDSync);
+++        device->hd_bt_after_input = enable;
+++    }
+++    return enable ? 1 : 0;
+++}
+++
++ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
++ {
++     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
++@@ -1866,6 +2111,19 @@ static bool HIDAPI_DriverSwitch_SendJoystickEffect(SDL_HIDAPI_Device *device, SD
++         SDL_copyp(&ctx->m_RumblePacket.rumbleData[0], &packet->rumbleData[0]);
++         SDL_copyp(&ctx->m_RumblePacket.rumbleData[1], &packet->rumbleData[1]);
++         ctx->m_bRumbleActive = (!is_click && !(HDRumble_IsNeutral(&packet->rumbleData[0]) && HDRumble_IsNeutral(&packet->rumbleData[1])));
+++        ctx->m_bHDRumbleMode = true;
+++
+++        if (device->hd_rumble_noqueue || device->hd_bt_after_input) {
+++            // No-queue: written now if the rumble thread is idle. Bluetooth after input: UpdateDevice writes it after an input report.
+++            ctx->m_bRumblePending = false;
+++            ctx->m_bRumbleZeroPending = false;
+++            HDSync_Receive(ctx, &packet->rumbleData[0].rgucData[0]);
+++            if (device->hd_rumble_noqueue) {
+++                HDNoQueue_TryWrite(ctx, device, false, SDL_GetTicks());
+++            }
+++            return true;
+++        }
+++
++         if (!WriteRumble(ctx)) {
++             return false;
++         }
++@@ -2836,7 +3094,11 @@ static bool HIDAPI_DriverSwitch_UpdateDevice(SDL_HIDAPI_Device *device)
++             }
++         }
++ 
++-        if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
+++        if (device->hd_rumble_noqueue && ctx->m_bHDRumbleMode) {
+++            HDNoQueue_TryWrite(ctx, device, true, now);
+++        } else if (device->hd_bt_after_input && ctx->m_bHDRumbleMode) {
+++            HDBtAfterInput_Update(ctx, device, packet_count > 0, now);
+++        } else if (ctx->m_bRumblePending || ctx->m_bRumbleZeroPending) {
++             HIDAPI_DriverSwitch_SendPendingRumble(ctx);
++         } else if (ctx->m_bRumbleActive &&
++                    now >= (ctx->m_ulRumbleSent + (device->is_bluetooth ? HD_RUMBLE_BT_REFRESH_MS : RUMBLE_REFRESH_FREQUENCY_MS))) {
++@@ -2865,12 +3127,23 @@ static void HIDAPI_DriverSwitch_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joy
++ {
++     SDL_DriverSwitch_Context *ctx = (SDL_DriverSwitch_Context *)device->context;
++ 
+++    device->hd_rumble_noqueue = false;
+++    device->hd_bt_after_input = false;
+++    SDL_SetAtomicInt(&device->hd_pause_ms, 0);
+++    ctx->m_bHDRumbleMode = false;
+++
++     if (!ctx->m_bInputOnly) {
++         // Restore simple input mode for other applications
++         if (!ctx->m_nInitialInputMode ||
++             ctx->m_nInitialInputMode == k_eSwitchInputReportIDs_SimpleControllerState) {
++             SetInputMode(ctx, k_eSwitchInputReportIDs_SimpleControllerState);
++         }
+++        // HD Rumble (Brontide): hand a wired pad back to the OS. Without this it stays in USB
+++        // HID-only full-report mode after we close, and other apps read its stick as held.
+++        if (!device->is_bluetooth) {
+++            ctx->m_bSyncWrite = true;
+++            WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ClearUSB, NULL, 0, false);
+++        }
++     }
++ 
++     SDL_RemoveHintCallback(SDL_HINT_JOYSTICK_ENHANCED_REPORTS,
++diff --git a/src/joystick/hidapi/SDL_hidapijoystick.c b/src/joystick/hidapi/SDL_hidapijoystick.c
++index 7629b1a..e4be4d0 100644
++--- a/src/joystick/hidapi/SDL_hidapijoystick.c
+++++ b/src/joystick/hidapi/SDL_hidapijoystick.c
++@@ -1754,6 +1754,70 @@ static bool HIDAPI_JoystickGetGamepadMapping(int device_index, SDL_GamepadMappin
++     return false;
++ }
++ 
+++// HD Rumble (eden-hdr, port of Ryuhdr's SDL2 patch): the Switch pad behind a joystick handle; the joysticks must be locked
+++static SDL_HIDAPI_Device *HDRumble_GetSwitchDevice(SDL_Joystick *joystick)
+++{
+++    SDL_HIDAPI_Device *device = NULL;
+++
+++    if (!SDL_IsJoystickValid(joystick) || joystick->driver != &SDL_HIDAPI_JoystickDriver ||
+++        !HIDAPI_GetJoystickDevice(joystick, &device) || device->driver != &SDL_HIDAPI_DriverSwitch) {
+++        return NULL;
+++    }
+++    return device;
+++}
+++
+++/* USB no-queue (Ryuhdr card 1). gap_ms = minimum gap between writes (5-100), pause_ms = pause of the rumble thread after a
+++   write to this pad (1-10; SDL's default is 10). Returns 1 when active, 0 when not (Bluetooth pad, B1 on, input-only pad,
+++   enable = 0), -1 when this is not a HIDAPI Switch pad. */
+++int SDLCALL SDL_HDRumbleSetNoQueue(SDL_Joystick *joystick, int enable, int gap_ms, int pause_ms)
+++{
+++    SDL_HIDAPI_Device *device;
+++    int result = -1;
+++
+++    SDL_LockJoysticks();
+++    device = HDRumble_GetSwitchDevice(joystick);
+++    if (device) {
+++        result = HIDAPI_DriverSwitch_SetHDNoQueue(device, enable != 0, gap_ms, false);
+++        SDL_SetAtomicInt(&device->hd_pause_ms, result == 1 ? (pause_ms < 1 ? 1 : (pause_ms > 10 ? 10 : pause_ms)) : 0);
+++    }
+++    SDL_UnlockJoysticks();
+++    return result;
+++}
+++
+++/* Bluetooth fast (Ryuhdr card B3): the no-queue writes for a Bluetooth pad; the rumble thread keeps SDL's 10 ms pause.
+++   Returns 1 when active, 0 when not (wired pad, B1 on, input-only pad, enable = 0), -1 when this is not a HIDAPI Switch pad. */
+++int SDLCALL SDL_HDRumbleSetNoQueueBluetooth(SDL_Joystick *joystick, int enable, int gap_ms)
+++{
+++    SDL_HIDAPI_Device *device;
+++    int result = -1;
+++
+++    SDL_LockJoysticks();
+++    device = HDRumble_GetSwitchDevice(joystick);
+++    if (device) {
+++        result = HIDAPI_DriverSwitch_SetHDNoQueue(device, enable != 0, gap_ms, true);
+++        SDL_SetAtomicInt(&device->hd_pause_ms, 0);
+++    }
+++    SDL_UnlockJoysticks();
+++    return result;
+++}
+++
+++/* Bluetooth after input (Ryuhdr card B1). SDL_SendJoystickEffect only hands the packet over; it is written right after the next
+++   input report while the rumble thread is idle. Returns 1 when active, 0 when not (wired pad, no-queue on, input-only pad,
+++   enable = 0), -1 when this is not a HIDAPI Switch pad. */
+++int SDLCALL SDL_HDRumbleSetBluetoothAfterInput(SDL_Joystick *joystick, int enable)
+++{
+++    SDL_HIDAPI_Device *device;
+++    int result = -1;
+++
+++    SDL_LockJoysticks();
+++    device = HDRumble_GetSwitchDevice(joystick);
+++    if (device) {
+++        result = HIDAPI_DriverSwitch_SetHDBtAfterInput(device, enable != 0);
+++    }
+++    SDL_UnlockJoysticks();
+++    return result;
+++}
+++
++ SDL_JoystickDriver SDL_HIDAPI_JoystickDriver = {
++     HIDAPI_JoystickInit,
++     HIDAPI_JoystickGetCount,
++diff --git a/src/joystick/hidapi/SDL_hidapijoystick_c.h b/src/joystick/hidapi/SDL_hidapijoystick_c.h
++index 6129441..4236427 100644
++--- a/src/joystick/hidapi/SDL_hidapijoystick_c.h
+++++ b/src/joystick/hidapi/SDL_hidapijoystick_c.h
++@@ -102,6 +102,15 @@ typedef struct SDL_HIDAPI_Device
++     SDL_Mutex *dev_lock;
++     SDL_hid_device *dev;
++     SDL_AtomicInt rumble_pending;
+++
+++    // HD Rumble (eden-hdr, port of Ryuhdr's SDL2 patch), Switch pads only. No-queue (USB, or Bluetooth = card B3): packets
+++    // are merged and written only while the rumble thread is idle, never queued. Bluetooth after input (card B1): merged and
+++    // written from UpdateDevice right after an input report, only while the rumble thread is idle. Never both on one pad.
+++    bool hd_rumble_noqueue;
+++    bool hd_bt_after_input;
+++    // Pause of the rumble thread after a write to this device in ms; 0 = SDL's default 10 ms. Only set with USB no-queue.
+++    SDL_AtomicInt hd_pause_ms;
+++
++     int num_joysticks;
++     SDL_JoystickID *joysticks;
++ 
++@@ -212,6 +221,10 @@ extern void HIDAPI_UpdateDeviceProperties(SDL_HIDAPI_Device *device);
++ 
++ extern void HIDAPI_DumpPacket(const char *prefix, const Uint8 *data, int size);
++ 
+++// HD Rumble (eden-hdr), implemented in the Switch driver; the joysticks must be locked
+++extern int HIDAPI_DriverSwitch_SetHDNoQueue(SDL_HIDAPI_Device *device, bool enable, int gap_ms, bool allow_bluetooth);
+++extern int HIDAPI_DriverSwitch_SetHDBtAfterInput(SDL_HIDAPI_Device *device, bool enable);
+++
++ extern bool HIDAPI_SupportsPlaystationDetection(Uint16 vendor, Uint16 product);
++ 
++ extern float HIDAPI_RemapVal(float val, float val_min, float val_max, float output_min, float output_max);
+diff --git a/cpmfile.json b/cpmfile.json
+index 341e5b2c9f..f577971e81 100644
+--- a/cpmfile.json
++++ b/cpmfile.json
+@@ -255,6 +255,10 @@
+         "hash": "df5a323af7ac366661a3c0e887969c72584d232f3cc211419d59b0487b620b6b2859d4549c9e8df002ee489290062e466fcfddf7edc0872a37b1f2845e81c0f3",
+         "min_version": "3.2.10",
+         "package": "SDL3",
++        "patches": [
++            "0001-hdrumble.patch",
++            "0002-hdrumble-idle-write.patch"
++        ],
+         "repo": "libsdl-org/SDL",
+         "version": "release-3.4.8"
+     },
+diff --git a/src/hid_core/frontend/emulated_controller.cpp b/src/hid_core/frontend/emulated_controller.cpp
+index 32746e7c61..c009e2e801 100644
+--- a/src/hid_core/frontend/emulated_controller.cpp
++++ b/src/hid_core/frontend/emulated_controller.cpp
+@@ -202,6 +202,8 @@ void EmulatedController::LoadDevices() {
+     output_params[4] = android_params;
+     output_params[LeftIndex].Set("output", true);
+     output_params[RightIndex].Set("output", true);
++    output_params[LeftIndex].Set("pad", 0);
++    output_params[RightIndex].Set("pad", 1);
+     output_params[2].Set("output", true);
+     output_params[3].Set("output", true);
+     output_params[4].Set("output", true);
+@@ -1268,18 +1270,12 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
+     }
+ 
+     if (!Settings::values.enable_accurate_vibrations.GetValue()) {
+-        using std::chrono::duration_cast;
+-        using std::chrono::milliseconds;
+         using std::chrono::steady_clock;
+ 
+         const auto now = steady_clock::now();
+ 
+-        // Filter out non-zero vibrations that are within 15ms of each other.
+-        if ((vibration.low_amplitude != 0.0f || vibration.high_amplitude != 0.0f) &&
+-            duration_cast<milliseconds>(now - last_vibration_timepoint[index]) < milliseconds(15)) {
+-            return false;
+-        }
+-
++        // RenHDrum manages stateful pacing, click pulses, and token bucket.
++        // Do not drop short pulse vibrations (<= 20 ms) here so they reach RenHDrum.
+         last_vibration_timepoint[index] = now;
+     }
+ 
+diff --git a/src/input_common/CMakeLists.txt b/src/input_common/CMakeLists.txt
+index 840602f4ce..cc8cf17fa6 100644
+--- a/src/input_common/CMakeLists.txt
++++ b/src/input_common/CMakeLists.txt
+@@ -94,3 +94,11 @@ endif()
+ 
+ create_target_directory_groups(input_common)
+ target_link_libraries(input_common PUBLIC hid_core PRIVATE common Boost::headers)
++
++# RenHDrum HD Rumble & DualSense engine integration
++set(RENHDRUM_DIR "${CMAKE_SOURCE_DIR}/../RenHDrum" CACHE PATH "RenHDrum checkout (include/ and target/release/)")
++if (NOT EXISTS "${RENHDRUM_DIR}/target/release/renhdrum.dll.lib")
++    message(FATAL_ERROR "RenHDrum is not built: run 'cargo build --release' in ${RENHDRUM_DIR}")
++endif()
++target_include_directories(input_common PUBLIC "${RENHDRUM_DIR}/include")
++target_link_libraries(input_common PRIVATE "${RENHDRUM_DIR}/target/release/renhdrum.dll.lib")
+diff --git a/src/input_common/drivers/renhdrum_pads.h b/src/input_common/drivers/renhdrum_pads.h
+new file mode 100644
+index 0000000000..1e598bf01b
+--- /dev/null
++++ b/src/input_common/drivers/renhdrum_pads.h
+@@ -0,0 +1,25 @@
++// SPDX-FileCopyrightText: Copyright 2026 Brontide
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <string>
++#include <vector>
++
++// Kept free of SDL so the Qt UI can include it.
++namespace InputCommon {
++
++struct RenHDrumPadInfo {
++    std::string name;
++    bool is_dualsense;
++    bool is_bluetooth;
++    std::string mode;
++    bool is_vibrating{false};
++    std::string guid;
++    int port{0};
++};
++
++/// Controllers RenHDrum is driving right now (a copy, safe from any thread).
++std::vector<RenHDrumPadInfo> GetRenHDrumPads();
++
++} // namespace InputCommon
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index c3e9a066b3..8736c3ddce 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -4,15 +4,32 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <array>
++#include <chrono>
++#include <cstring>
++#include <map>
++#include <mutex>
+ #include <numbers>
++#include <optional>
++#include <string>
++#include <thread>
++#include <SDL3/SDL_hidapi.h>
+ #include "common/logging.h"
+ #include "common/math_util.h"
+ #include "common/param_package.h"
+ #include "common/settings.h"
+ #include "common/thread.h"
+ #include "common/vector_math.h"
++#include "input_common/drivers/renhdrum_pads.h"
+ #include "input_common/drivers/sdl_driver.h"
+ 
++// HD Rumble modes added by .patch/sdl3/0002-hdrumble-idle-write.patch (port of Ryuhdr's SDL2 patch; SDL3 is linked
++// statically). Each returns 1 when the mode is active, 0 when SDL refused it, -1 for a pad that is not a HIDAPI Switch pad.
++extern "C" {
++int SDLCALL SDL_HDRumbleSetNoQueue(SDL_Joystick* joystick, int enable, int gap_ms, int pause_ms);
++int SDLCALL SDL_HDRumbleSetNoQueueBluetooth(SDL_Joystick* joystick, int enable, int gap_ms);
++int SDLCALL SDL_HDRumbleSetBluetoothAfterInput(SDL_Joystick* joystick, int enable);
++}
++
+ namespace InputCommon {
+ 
+ namespace {
+@@ -61,6 +78,24 @@ SDL_GamepadBinding FindBinding(const GamepadBindings& bindings, Predicate matche
+     return it != bindings.end() ? *it : EmptyBinding();
+ }
+ 
++// Pads shown in Brontide's HD Rumble dialog, keyed by SDLJoystick. Never held while calling SDL.
++struct PadEntry {
++    RenHDrumPadInfo info;
++    const std::atomic<int64_t>* last_vibrate_us{nullptr};
++};
++std::mutex pads_mutex;
++std::map<const void*, PadEntry> pads;
++
++void SetPadInfo(const void* key, RenHDrumPadInfo info, const std::atomic<int64_t>* last_vibrate_us = nullptr) {
++    std::scoped_lock lock{pads_mutex};
++    pads[key] = {std::move(info), last_vibrate_us};
++}
++
++void ErasePadInfo(const void* key) {
++    std::scoped_lock lock{pads_mutex};
++    pads.erase(key);
++}
++
+ SDL_GamepadBinding GetBindingForButton(const GamepadBindings& bindings, SDL_GamepadButton button) {
+     return FindBinding(bindings, [button](const SDL_GamepadBinding& current) {
+         return current.output_type == SDL_GAMEPAD_BINDTYPE_BUTTON &&
+@@ -76,6 +111,24 @@ SDL_GamepadBinding GetBindingForAxis(const GamepadBindings& bindings, SDL_Gamepa
+ }
+ } // Anonymous namespace
+ 
++std::vector<RenHDrumPadInfo> GetRenHDrumPads() {
++    using namespace std::chrono;
++    const int64_t now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
++    std::scoped_lock lock{pads_mutex};
++    std::vector<RenHDrumPadInfo> result;
++    for (const auto& [key, entry] : pads) {
++        RenHDrumPadInfo info = entry.info;
++        if (entry.last_vibrate_us) {
++            const int64_t last_vibrate = entry.last_vibrate_us->load(std::memory_order_relaxed);
++            info.is_vibrating = (last_vibrate > 0 && (now_us - last_vibrate) < 300'000);
++        } else {
++            info.is_vibrating = false;
++        }
++        result.push_back(std::move(info));
++    }
++    return result;
++}
++
+ static bool SDLEventWatcher(void* user_data, SDL_Event* event) {
+     auto* const sdl_state = static_cast<SDLDriver*>(user_data);
+ 
+@@ -91,6 +144,13 @@ public:
+                 : guid{guid_}, port{port_}, sdl_joystick{joystick, &SDL_CloseJoystick},
+                     sdl_controller{game_controller, &SDL_CloseGamepad} {
+         EnableMotion();
++        if (sdl_joystick) {
++            InitRenHDrum();
++        }
++    }
++
++    ~SDLJoystick() {
++        CleanupRenHDrum();
+     }
+ 
+     void EnableMotion() {
+@@ -218,7 +278,30 @@ public:
+         return false;
+     }
+ 
++    // HLE thread: only store the newest sample (SDL rumble can block for ms on WGI/XInput)
++    void QueueVibration(const Common::Input::VibrationStatus& vibration) {
++        std::scoped_lock lock{pending_vibration_mutex};
++        pending_vibration = vibration;
++    }
++
++    // PumpEvents thread: send the stored sample, outside the lock
++    void FlushPendingVibration() {
++        std::optional<Common::Input::VibrationStatus> vibration;
++        {
++            std::scoped_lock lock{pending_vibration_mutex};
++            vibration.swap(pending_vibration);
++        }
++        if (vibration) {
++            RumblePlay(*vibration);
++        }
++    }
++
+     bool HasHDRumble() const {
++        if (renhdrum_engine || (dualsense_dsp && ds_audio_stream) ||
++            (dualsense_dsp && ds_bt_running.load(std::memory_order_relaxed))) {
++            return true;
++        }
++
+         constexpr Uint16 valve_vendor_id = 0x28DE;
+         const auto is_known_hd_type = [](SDL_GamepadType type) {
+             return type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO ||
+@@ -292,8 +375,13 @@ public:
+     }
+ 
+     void SetSDLJoystick(SDL_Joystick* joystick, SDL_Gamepad* controller) {
++        std::scoped_lock lock{renhdrum_mutex};
++        CleanupRenHDrum();
+         sdl_joystick.reset(joystick);
+         sdl_controller.reset(controller);
++        if (sdl_joystick) {
++            InitRenHDrum();
++        }
+     }
+ 
+     bool IsJoyconLeft() const {
+@@ -385,13 +473,516 @@ public:
+         return "Unknown";
+     }
+ 
++    RenHdcEngine* GetRenHDrumEngine() const {
++        return renhdrum_engine;
++    }
++
++    RenHdcDualSenseDsp* GetDualSenseDsp() const {
++        return dualsense_dsp;
++    }
++
++    RenHdcXboxRumble* GetXboxRumble() const {
++        return xbox_rumble;
++    }
++
++    void TickXboxRumble(int64_t now_us) {
++        constexpr u32 grip_duration_ms = 2000;
++        // Trigger pulses are short: a lost stop must not leave these motors running
++        constexpr u32 trigger_duration_ms = 200;
++        uint16_t motors[4];
++        SDL_Joystick* joystick = nullptr;
++        {
++            std::scoped_lock lock{renhdrum_mutex};
++            if (!xbox_rumble || !sdl_joystick ||
++                renhdrum_xbox_rumble_tick(xbox_rumble, now_us, motors) != 1) {
++                return;
++            }
++            joystick = sdl_joystick.get();
++        }
++        const bool sent = SDL_RumbleJoystick(joystick, motors[0], motors[1], grip_duration_ms);
++        // XInput has no trigger motors, so only the grips decide the retry
++        SDL_RumbleJoystickTriggers(joystick, motors[2], motors[3], trigger_duration_ms);
++        if (!sent) {
++            // rawinput refuses rumble until the first button press
++            std::scoped_lock lock{renhdrum_mutex};
++            if (xbox_rumble) {
++                renhdrum_xbox_rumble_resend(xbox_rumble);
++            }
++        }
++    }
++
++    bool XboxRumbleVibrate(int64_t now_us, bool is_right,
++                           const Common::Input::VibrationStatus& v) {
++        {
++            std::scoped_lock lock{renhdrum_mutex};
++            if (!xbox_rumble) {
++                return false;
++            }
++            renhdrum_xbox_rumble_push_half_sample(xbox_rumble, now_us, is_right, v.low_amplitude,
++                                                  v.low_frequency, v.high_amplitude,
++                                                  v.high_frequency);
++        }
++        TickXboxRumble(now_us);
++        return true;
++    }
++
++    bool HasDualSenseAudio() const {
++        return ds_audio_stream != nullptr;
++    }
++
++    void TickRenHDrum(int64_t now_us) {
++        uint8_t packet[10];
++        SDL_Joystick* joystick = nullptr;
++        {
++            std::scoped_lock lock{renhdrum_mutex};
++            if (!renhdrum_engine || !sdl_joystick ||
++                renhdrum_engine_tick(renhdrum_engine, now_us, packet) != 1) {
++                return;
++            }
++            joystick = sdl_joystick.get();
++        }
++        SDL_SendJoystickEffect(joystick, packet, sizeof(packet));
++    }
++
++    // Called on the HLE thread. Returns true when RenHDrum took the vibration (Switch HD engine, or
++    // DualSense haptics audio running); false = use the standard rumble below.
++    bool RenHDrumVibrate(int64_t now_us, bool is_right, const Common::Input::VibrationStatus& v) {
++        if (v.low_amplitude > 0.01f || v.high_amplitude > 0.01f) {
++            last_vibrate_us.store(now_us, std::memory_order_relaxed);
++        }
++        if (XboxRumbleVibrate(now_us, is_right, v)) {
++            return true;
++        }
++        {
++            std::scoped_lock lock{renhdrum_mutex};
++            if (!renhdrum_engine) {
++                if (!dualsense_dsp) {
++                    return false;
++                }
++                renhdrum_dualsense_dsp_set_half_target(dualsense_dsp, is_right, v.low_amplitude,
++                                                       v.low_frequency, v.high_amplitude,
++                                                       v.high_frequency);
++                return ds_audio_stream != nullptr || ds_bt_running.load(std::memory_order_relaxed);
++            }
++            renhdrum_engine_push_half_sample(renhdrum_engine, now_us, is_right, v.low_amplitude,
++                                             v.low_frequency, v.high_amplitude, v.high_frequency);
++        }
++        TickRenHDrum(now_us);
++        return true;
++    }
++
++    void MaintainDualSenseAudio(int64_t now_us) {
++        std::scoped_lock lock{renhdrum_mutex};
++        if (!dualsense_dsp || ds_audio_stream || ds_audio_attempts >= DS_AUDIO_MAX_ATTEMPTS ||
++            now_us < ds_audio_next_us) {
++            return;
++        }
++        ds_audio_next_us = now_us + 2'000'000;
++        TryOpenDualSenseAudio();
++    }
++
+ private:
++    void InitRenHDrum() {
++        if (!sdl_joystick) {
++            return;
++        }
++
++        const Uint16 vid = SDL_GetJoystickVendor(sdl_joystick.get());
++        const Uint16 pid = SDL_GetJoystickProduct(sdl_joystick.get());
++
++        // Nintendo Switch controllers (VID 0x057E)
++        if (vid == 0x057E) {
++            if (pid == 0x2009 || pid == 0x2006 || pid == 0x2007) {
++                const bool is_bluetooth =
++                    (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS);
++                const bool is_pro = (pid == 0x2009);
++                renhdrum_engine = renhdrum_engine_create(is_bluetooth, is_pro);
++                if (renhdrum_engine) {
++                    pad_name = is_pro ? "Pro Controller" : pid == 0x2006 ? "Joy-Con (L)" : "Joy-Con (R)";
++                    LOG_INFO(Input, "Initialized RenHDrum engine for Switch controller {:04X}:{:04X} (BT: {})",
++                             vid, pid, is_bluetooth);
++                    ApplyRenHDrumSettings(is_bluetooth);
++                }
++            }
++        }
++        // Sony DualSense (VID 0x054C, PID 0x0CE6 or 0x0DF2)
++        else if (vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)) {
++            dualsense_dsp = renhdrum_dualsense_dsp_create(100, true);
++            if (dualsense_dsp) {
++                LOG_INFO(Input, "Initialized RenHDrum DualSense DSP for controller {:04X}:{:04X}", vid, pid);
++                pad_name = pid == 0x0DF2 ? "DualSense Edge" : "DualSense";
++                PublishPad({pad_name, true,
++                            SDL_GetJoystickConnectionState(sdl_joystick.get()) ==
++                                SDL_JOYSTICK_CONNECTION_WIRELESS,
++                            "DualSense standard rumble", false});
++                TryOpenDualSenseAudio();
++            }
++        }
++        // Xbox One S family. Only the wired PIDs get 10 ms, anything else takes the safer 20 ms
++        else if (vid == 0x045E && sdl_controller &&
++                 SDL_GetGamepadType(sdl_controller.get()) == SDL_GAMEPAD_TYPE_XBOXONE) {
++            // The main HD Rumble switch also covers Xbox: off means SDL's plain 2-motor rumble
++            RenHdcConfig config{};
++            config.enable_hd_rumble = true;
++            RenHdcSettings settings{};
++            if (renhdrum_settings_resolve(&config, &settings) == RENHDRUM_OK && !settings.enabled) {
++                LOG_INFO(Input, "HD Rumble off: Xbox controller {:04X}:{:04X} uses plain rumble", vid, pid);
++                return;
++            }
++            // Wired or wireless from SDL's own connection state (any Microsoft pad, as DualSense above);
++            // when SDL cannot tell, fall back to the two known wired PIDs
++            const auto connection = SDL_GetJoystickConnectionState(sdl_joystick.get());
++            const bool is_bluetooth =
++                (connection == SDL_JOYSTICK_CONNECTION_WIRED || connection == SDL_JOYSTICK_CONNECTION_WIRELESS)
++                    ? connection == SDL_JOYSTICK_CONNECTION_WIRELESS
++                    : (pid != 0x02EA && pid != 0x02FF);
++            xbox_rumble = renhdrum_xbox_rumble_create(is_bluetooth);
++            if (xbox_rumble) {
++                LOG_INFO(Input,
++                         "Initialized Xbox rumble converter for controller {:04X}:{:04X} (BT: {}, SDL connection: {})",
++                         vid, pid, is_bluetooth, static_cast<int>(connection));
++                pad_name = "Xbox One Controller";
++                PublishPad({pad_name, false, is_bluetooth, "Xbox rumble", false});
++            }
++        }
++    }
++
++    // Ryuhdr's recommended mode for a configured pad (0.2.6): wired 15 ms + cards 1 / 3 / 5 / 7 / 8, Bluetooth level 3 +
++    // B1 / B3 / B2. Flag files next to eden.exe still win (renhdrum_settings_resolve). Then the SDL modes are switched on; a mode
++    // SDL refused is cleared, so the engine never paces for writes that SDL does not gate (Ryuhdr: _noQueueActive / _btFastActive).
++    void ApplyRenHDrumSettings(bool is_bluetooth) {
++        RenHdcConfig config{};
++        config.enable_hd_rumble = true;
++        config.hd_rumble_usb_interval_ms = 15;
++        config.hd_rumble_bluetooth_level = 3;
++        config.hd_rumble_usb_auto_slow = true;
++        config.hd_rumble_experimental_usb_no_queue = true;
++        config.hd_rumble_experimental_envelope_5ms = true;
++        config.hd_rumble_experimental_frequency_in_packet = true;
++        config.hd_rumble_experimental_frequency_both_bands = true;
++        config.hd_rumble_experimental_crisp_notes = true;
++        config.hd_rumble_experimental_bt_after_input = true;
++        config.hd_rumble_experimental_bt_fast = true;
++        config.hd_rumble_experimental_bt_crisp_notes = true;
++
++        RenHdcSettings settings{};
++        if (renhdrum_settings_resolve(&config, &settings) != RENHDRUM_OK) {
++            return;
++        }
++
++        SDL_Joystick* joystick = sdl_joystick.get();
++        if (is_bluetooth) {
++            // Card B3 needs B1 on (Ryuhdr HdApplyBtFast); SDL never runs both on one pad, B3 wins
++            settings.bt_fast = settings.enabled && settings.bt_fast && settings.bt_after_input &&
++                               SDL_HDRumbleSetNoQueueBluetooth(joystick, 1, HD_NO_QUEUE_ENVELOPE_GAP_MS) == 1;
++            settings.bt_after_input = settings.enabled && settings.bt_after_input && !settings.bt_fast &&
++                                      SDL_HDRumbleSetBluetoothAfterInput(joystick, 1) == 1;
++            settings.usb_no_queue = false;
++            LOG_INFO(Input, "RenHDrum HD Rumble Bluetooth: level {}, {}{}", settings.bluetooth_level,
++                     settings.bt_fast          ? "card B3 (5 ms envelope, written while SDL is idle)"
++                     : settings.bt_after_input ? "card B1 (written right after an input report)"
++                                               : "clock based writes",
++                     settings.enabled && settings.bt_crisp_notes ? ", card B2 crisp notes" : "");
++        } else {
++            // Card 3 sends one packet per 15 ms window itself: a smaller SDL gap (Ryuhdr HdApplyNoQueue)
++            const int gap_ms =
++                settings.envelope_5ms ? HD_NO_QUEUE_ENVELOPE_GAP_MS : settings.usb_interval_ms;
++            settings.usb_no_queue = settings.enabled && settings.usb_no_queue &&
++                                    SDL_HDRumbleSetNoQueue(joystick, 1, gap_ms, settings.usb_pause_ms) == 1;
++            settings.bt_after_input = false;
++            settings.bt_fast = false;
++            const bool envelope = settings.usb_no_queue && settings.envelope_5ms;
++            LOG_INFO(Input, "RenHDrum HD Rumble wired: {} ms, {}{}{}{}", settings.usb_interval_ms,
++                     settings.usb_no_queue ? "no-queue (written while SDL is idle)" : "queued writes",
++                     envelope ? ", card 3 5 ms envelope" : "",
++                     envelope && settings.frequency_in_packet && settings.frequency_both_bands ? ", cards 5 + 7" : "",
++                     envelope && settings.crisp_notes ? ", card 8 crisp notes" : "");
++        }
++        renhdrum_engine_apply_settings(renhdrum_engine, &settings);
++
++        std::string mode;
++        if (!settings.enabled) {
++            mode = "off";
++        } else if (is_bluetooth) {
++            mode = "BT level " + std::to_string(settings.bluetooth_level);
++            std::string cards;
++            cards += settings.bt_after_input ? " B1" : "";
++            cards += settings.bt_fast ? " B3" : "";
++            cards += settings.bt_crisp_notes ? " B2" : "";
++            mode += cards.empty() ? "" : " · " + cards.substr(1);
++        } else if (!settings.usb_no_queue) {
++            mode = "wired " + std::to_string(settings.usb_interval_ms) + " ms · queued";
++        } else {
++            std::string cards = " 1";
++            if (settings.envelope_5ms) {
++                cards += " 3";
++                cards += settings.frequency_in_packet ? " 5" : "";
++                cards += settings.frequency_in_packet && settings.frequency_both_bands ? " 7" : "";
++                cards += settings.crisp_notes ? " 8" : "";
++            }
++            mode = "wired " + std::to_string(settings.usb_interval_ms) + " ms · cards" + cards;
++        }
++        PublishPad({pad_name, false, is_bluetooth, std::move(mode), false});
++    }
++
++    // The guid and port tell the HD Rumble dialog which pads are mapped to a player
++    void PublishPad(RenHDrumPadInfo info) {
++        info.guid = guid.RawString();
++        info.port = port;
++        SetPadInfo(this, std::move(info), &last_vibrate_us);
++    }
++
++    void TryOpenDualSenseAudio() {
++        if (!dualsense_dsp || !sdl_joystick || ds_audio_stream) {
++            return;
++        }
++        ++ds_audio_attempts;
++        if (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS) {
++            ds_audio_attempts = DS_AUDIO_MAX_ATTEMPTS;
++            StartDualSenseBluetooth();
++            return;
++        }
++        if (!SDL_WasInit(SDL_INIT_AUDIO)) {
++            if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
++                LOG_WARNING(Input, "DualSense haptics: SDL audio init failed: {}", SDL_GetError());
++                return;
++            }
++            ds_audio_inited = true;
++        }
++
++        int dev_count = 0;
++        SDL_AudioDeviceID* devices = SDL_GetAudioPlaybackDevices(&dev_count);
++        SDL_AudioDeviceID matched_dev = 0;
++        std::string seen;
++        for (int i = 0; devices && i < dev_count; ++i) {
++            const char* name = SDL_GetAudioDeviceName(devices[i]);
++            SDL_AudioSpec dev_spec{};
++            const int channels =
++                SDL_GetAudioDeviceFormat(devices[i], &dev_spec, nullptr) ? dev_spec.channels : 0;
++            seen += std::string("\"") + (name ? name : "?") + "\" (" + std::to_string(channels) + " ch); ";
++            if (name && channels >= 4 &&
++                (std::strstr(name, "DualSense") != nullptr ||
++                 std::strstr(name, "Wireless Controller") != nullptr)) {
++                matched_dev = devices[i];
++                break;
++            }
++        }
++        SDL_free(devices);
++
++        if (matched_dev == 0) {
++            LOG_WARNING(Input, "DualSense haptics: no 4-channel DualSense audio device yet (attempt {}): {}",
++                        ds_audio_attempts, seen);
++            return;
++        }
++
++        const SDL_AudioSpec spec{
++            .format = SDL_AUDIO_F32,
++            .channels = 4,
++            .freq = 48000,
++        };
++        ds_audio_stream =
++            SDL_OpenAudioDeviceStream(matched_dev, &spec, &SDLJoystick::DualSenseAudioCallback, this);
++        if (!ds_audio_stream) {
++            LOG_WARNING(Input, "DualSense haptics: could not open audio device: {}", SDL_GetError());
++            return;
++        }
++        SDL_ResumeAudioStreamDevice(ds_audio_stream);
++        PublishPad({pad_name, true, false, "DualSense haptics", false});
++
++        // Stop SDL's HID rumble once so the pad plays the audio haptics (Ryuhdr: _hapticsStopSdlRumble).
++        if (sdl_controller) {
++            SDL_RumbleGamepad(sdl_controller.get(), 0, 0, 0);
++        } else {
++            SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
++        }
++        int device_frames = 0;
++        SDL_AudioSpec device_spec{};
++        SDL_GetAudioDeviceFormat(matched_dev, &device_spec, &device_frames);
++        LOG_INFO(Input, "DualSense haptics audio opened on \"{}\" (attempt {}, device {} ch {} Hz, {} frames per buffer)",
++                 SDL_GetAudioDeviceName(matched_dev), ds_audio_attempts, device_spec.channels,
++                 device_spec.freq, device_frames);
++    }
++
++    // DualSense on Bluetooth has no audio endpoint: open a second HID handle on the pad and send voice-coil
++    // haptics as output report 0x32 (s8 3 kHz PCM built by RenHDrum) every 10.667 ms on a thread of its own.
++    void StartDualSenseBluetooth() {
++        if (!dualsense_dsp || !sdl_joystick || ds_bt_hid) {
++            return;
++        }
++        const char* path = SDL_GetJoystickPath(sdl_joystick.get());
++        if (!path || !*path) {
++            LOG_INFO(Input, "DualSense BT haptics: no HID path, using standard rumble");
++            return;
++        }
++        ds_bt_hid = SDL_hid_open_path(path);
++        if (!ds_bt_hid) {
++            LOG_WARNING(Input, "DualSense BT haptics: could not open HID path {}: {}, using standard rumble",
++                        path, SDL_GetError());
++            return;
++        }
++        ds_bt_running.store(true, std::memory_order_relaxed);
++        ds_bt_thread = std::thread([this] { DualSenseBtLoop(); });
++
++        // Stop SDL's HID rumble once so the pad plays the voice-coil haptics (same as the USB audio path).
++        if (sdl_controller) {
++            SDL_RumbleGamepad(sdl_controller.get(), 0, 0, 0);
++        } else {
++            SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
++        }
++        PublishPad({pad_name, true, true, "DualSense haptics · Bluetooth", false});
++        LOG_INFO(Input, "DualSense haptics over Bluetooth started (report 0x32, path {})", path);
++    }
++
++    // Runs on ds_bt_thread. Never takes renhdrum_mutex: the DSP has its own lock, and CleanupRenHDrum joins this
++    // thread (while holding renhdrum_mutex) before the DSP and the HID handle are freed.
++    void DualSenseBtLoop() {
++        Common::SetCurrentThreadName("DualSenseBT");
++        std::array<uint8_t, RENHDRUM_DS5_BT_REPORT_SIZE> report{};
++        Uint64 next = SDL_GetTicksNS();
++        Uint64 last_signal = 0, stats_at = next;
++        int sent = 0, failed = 0, fails_in_row = 0;
++        while (ds_bt_running.load(std::memory_order_relaxed)) {
++            next += RENHDRUM_DS5_BT_PERIOD_NS;
++            const int r = renhdrum_dualsense_dsp_build_bt_report(
++                dualsense_dsp, RENHDRUM_DS5_BT_BUFFER_LENGTH_DEFAULT, report.data());
++            const Uint64 now = SDL_GetTicksNS();
++            if (r == 1) {
++                last_signal = now;
++            }
++            // Silence gate: keep sending 2 s after the last vibration, then stay quiet on the radio.
++            if (r >= 0 && last_signal != 0 && now - last_signal < 2'000'000'000ULL) {
++                if (SDL_hid_write(ds_bt_hid, report.data(), report.size()) < 0) {
++                    ++failed;
++                    ++fails_in_row;
++                } else {
++                    ++sent;
++                    fails_in_row = 0;
++                }
++            }
++            if (fails_in_row >= 50) { // ~0.5 s of failed writes: pad gone, fall back to standard rumble
++                LOG_WARNING(Input, "DualSense BT haptics: writes failing ({}), stopping", SDL_GetError());
++                break;
++            }
++            if (now - stats_at >= 5'000'000'000ULL) {
++                if (sent > 0 || failed > 0) {
++                    LOG_INFO(Input, "DualSense BT haptics: {} reports/s, {} failed", sent / 5, failed);
++                }
++                sent = failed = 0;
++                stats_at = now;
++            }
++            if (next > now) {
++                SDL_DelayPrecise(next - now);
++            } else if (now - next > 100'000'000ULL) {
++                next = now; // stalled > 100 ms: resync instead of bursting
++            }
++        }
++        ds_bt_running.store(false, std::memory_order_relaxed);
++    }
++
++    static void DualSenseAudioCallback(void* userdata, SDL_AudioStream* stream, int additional_amount,
++                                       int total_amount) {
++        if (additional_amount <= 0 || !userdata) {
++            return;
++        }
++        auto* self = static_cast<SDLJoystick*>(userdata);
++        if (!self->dualsense_dsp) {
++            return;
++        }
++
++        constexpr int bytes_per_frame = 4 * static_cast<int>(sizeof(float));
++        int frames_needed = additional_amount / bytes_per_frame;
++        if (frames_needed <= 0) {
++            return;
++        }
++
++        constexpr int CHUNK_FRAMES = 256;
++        float chunk[CHUNK_FRAMES * 4];
++
++        while (frames_needed > 0) {
++            const int cur_frames = (std::min)(frames_needed, CHUNK_FRAMES);
++            if (renhdrum_dualsense_dsp_fill_f32(self->dualsense_dsp, chunk,
++                                                static_cast<size_t>(cur_frames)) != RENHDRUM_OK) {
++                std::memset(chunk, 0, sizeof(chunk)); // never send stack garbage to the actuators
++            }
++            SDL_PutAudioStreamData(stream, chunk, cur_frames * bytes_per_frame);
++            frames_needed -= cur_frames;
++        }
++    }
++
++    void CleanupRenHDrum() {
++        ErasePadInfo(this);
++        if (ds_audio_stream) {
++            SDL_PauseAudioStreamDevice(ds_audio_stream);
++            SDL_ClearAudioStream(ds_audio_stream);
++            SDL_DestroyAudioStream(ds_audio_stream);
++            ds_audio_stream = nullptr;
++        }
++        if (ds_audio_inited) {
++            SDL_QuitSubSystem(SDL_INIT_AUDIO);
++            ds_audio_inited = false;
++        }
++        ds_audio_attempts = 0;
++        ds_audio_next_us = 0;
++        // Stop the Bluetooth sender before the DSP and the HID handle it uses are freed
++        ds_bt_running.store(false, std::memory_order_relaxed);
++        if (ds_bt_thread.joinable()) {
++            ds_bt_thread.join();
++        }
++        if (ds_bt_hid) {
++            SDL_hid_close(ds_bt_hid);
++            ds_bt_hid = nullptr;
++        }
++        if (renhdrum_engine) {
++            if (sdl_joystick) {
++                uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
++                SDL_SendJoystickEffect(sdl_joystick.get(), stop_pkt, sizeof(stop_pkt));
++            }
++            renhdrum_engine_destroy(renhdrum_engine);
++            renhdrum_engine = nullptr;
++        }
++        if (dualsense_dsp) {
++            renhdrum_dualsense_dsp_destroy(dualsense_dsp);
++            dualsense_dsp = nullptr;
++        }
++        if (xbox_rumble) {
++            if (sdl_joystick) {
++                SDL_RumbleJoystick(sdl_joystick.get(), 0, 0, 0);
++                SDL_RumbleJoystickTriggers(sdl_joystick.get(), 0, 0, 0);
++            }
++            renhdrum_xbox_rumble_destroy(xbox_rumble);
++            xbox_rumble = nullptr;
++        }
++    }
++
+     Common::UUID guid;
+     int port;
+     std::unique_ptr<SDL_Joystick, decltype(&SDL_CloseJoystick)> sdl_joystick;
+     std::unique_ptr<SDL_Gamepad, decltype(&SDL_CloseGamepad)> sdl_controller;
+     mutable std::mutex mutex;
+ 
++    // Guards renhdrum_engine / dualsense_dsp / ds_audio_stream / xbox_rumble: SetVibration runs on the HLE thread while
++    // CloseJoystick frees them. Never held while calling SDL_SendJoystickEffect from the HLE thread.
++    std::mutex renhdrum_mutex;
++
++    RenHdcEngine* renhdrum_engine{nullptr};
++    std::string pad_name;
++    RenHdcDualSenseDsp* dualsense_dsp{nullptr};
++    RenHdcXboxRumble* xbox_rumble{nullptr};
++    std::mutex pending_vibration_mutex;
++    std::optional<Common::Input::VibrationStatus> pending_vibration;
++    SDL_AudioStream* ds_audio_stream{nullptr};
++    static constexpr int DS_AUDIO_MAX_ATTEMPTS = 10;
++    // SDL no-queue gap while the 5 ms envelope runs (Ryuhdr AmFmNoQueueGapMs)
++    static constexpr int HD_NO_QUEUE_ENVELOPE_GAP_MS = 10;
++    int ds_audio_attempts{0};
++    int64_t ds_audio_next_us{0};
++    bool ds_audio_inited{false};
++    // DualSense on Bluetooth: second HID handle + sender thread for report 0x32
++    SDL_hid_device* ds_bt_hid{nullptr};
++    std::thread ds_bt_thread;
++    std::atomic<bool> ds_bt_running{false};
++    std::atomic<int64_t> last_vibrate_us{0};
++
+     u64 last_motion_update{};
+     std::size_t motion_error_count{};
+     bool has_gyro{false};
+@@ -570,6 +1161,33 @@ void SDLDriver::CloseJoystick(SDL_Joystick* sdl_joystick) {
+ void SDLDriver::PumpEvents() const {
+     if (initialized) {
+         SDL_PumpEvents();
++
++        using namespace std::chrono;
++        const int64_t now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
++
++        // Tick outside joystick_map_mutex: these call into SDL, and SDL's rawinput thread holds the
++        // SDL lock while SDLEventWatcher waits for that mutex, so holding it here deadlocks
++        std::vector<std::shared_ptr<SDLJoystick>> joysticks;
++        {
++            std::scoped_lock lock{joystick_map_mutex};
++            for (const auto& [guid, joystick_list] : joystick_map) {
++                joysticks.insert(joysticks.end(), joystick_list.begin(), joystick_list.end());
++            }
++        }
++        for (const auto& joystick : joysticks) {
++            if (joystick) {
++                joystick->FlushPendingVibration();
++            }
++            if (joystick && joystick->GetRenHDrumEngine()) {
++                joystick->TickRenHDrum(now_us);
++            }
++            if (joystick && joystick->GetDualSenseDsp()) {
++                joystick->MaintainDualSenseAudio(now_us);
++            }
++            if (joystick && joystick->GetXboxRumble()) {
++                joystick->TickXboxRumble(now_us);
++            }
++        }
+     }
+ }
+ 
+@@ -769,6 +1387,18 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+     const PadIdentifier& identifier, const Common::Input::VibrationStatus& vibration) {
+     const auto joystick =
+         GetSDLJoystickByGUID(identifier.guid.RawString(), static_cast<int>(identifier.port));
++    if (!joystick) {
++        return Common::Input::DriverResult::InvalidHandle;
++    }
++
++    using namespace std::chrono;
++    const int64_t now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
++    const bool is_right = (identifier.pad == 1);
++
++    if (joystick->RenHDrumVibrate(now_us, is_right, vibration)) {
++        return Common::Input::DriverResult::Success;
++    }
++
+     const auto process_amplitude_exp = [](f32 amplitude, f32 factor) {
+         return (amplitude + std::pow(amplitude, factor)) * 0.5f * 0xFFFF;
+     };
+@@ -794,7 +1424,7 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+         .type = Common::Input::VibrationAmplificationType::Exponential,
+     };
+ 
+-    joystick->RumblePlay(new_vibration);
++    joystick->QueueVibration(new_vibration);
+ 
+     return Common::Input::DriverResult::Success;
+ }
+@@ -802,6 +1432,18 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+ bool SDLDriver::IsVibrationEnabled(const PadIdentifier& identifier) {
+     const auto joystick =
+         GetSDLJoystickByGUID(identifier.guid.RawString(), static_cast<int>(identifier.port));
++    if (!joystick) {
++        return false;
++    }
++
++    if (joystick->IsVibrationTested()) {
++        return joystick->HasVibration();
++    }
++
++    if (joystick->GetRenHDrumEngine() || joystick->GetDualSenseDsp() || joystick->GetXboxRumble()) {
++        joystick->EnableVibration(true);
++        return true;
++    }
+ 
+     static constexpr Common::Input::VibrationStatus test_vibration{
+         .low_amplitude = 1,
+@@ -819,10 +1461,6 @@ bool SDLDriver::IsVibrationEnabled(const PadIdentifier& identifier) {
+         .type = Common::Input::VibrationAmplificationType::Exponential,
+     };
+ 
+-    if (joystick->IsVibrationTested()) {
+-        return joystick->HasVibration();
+-    }
+-
+     // First vibration might fail
+     joystick->RumblePlay(test_vibration);
+ 
+diff --git a/src/input_common/drivers/sdl_driver.h b/src/input_common/drivers/sdl_driver.h
+index e6751b6688..f253991f06 100644
+--- a/src/input_common/drivers/sdl_driver.h
++++ b/src/input_common/drivers/sdl_driver.h
+@@ -12,6 +12,7 @@
+ #include "common/container/unordered_map.h"
+ 
+ #include <SDL3/SDL.h>
++#include <renhdrum.h>
+ 
+ #include "common/common_types.h"
+ #include "common/threadsafe_queue.h"
+@@ -115,7 +116,7 @@ private:
+ 
+     /// Map of GUID of a list of corresponding virtual Joysticks
+     ::Common::unordered_map<Common::UUID, std::vector<std::shared_ptr<SDLJoystick>>> joystick_map;
+-    std::mutex joystick_map_mutex;
++    mutable std::mutex joystick_map_mutex;
+ 
+     std::atomic<bool> initialized = false;
+     bool start_thread;
+-- 
+2.55.0.windows.5
+

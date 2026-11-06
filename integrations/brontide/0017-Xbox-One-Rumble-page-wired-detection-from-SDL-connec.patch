@@ -1,0 +1,40 @@
+From 69be0f43ac9f070406171e47c6af173a0aab6698 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 17:27:48 +0700
+Subject: [PATCH 10/11] Xbox One Rumble page: wired detection from SDL
+ connection state, status card, steps, restart button
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/sdl_driver.cpp | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 93f2db62e4..8736c3ddce 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -629,11 +629,18 @@ private:
+                 LOG_INFO(Input, "HD Rumble off: Xbox controller {:04X}:{:04X} uses plain rumble", vid, pid);
+                 return;
+             }
+-            const bool is_bluetooth = pid != 0x02EA && pid != 0x02FF;
++            // Wired or wireless from SDL's own connection state (any Microsoft pad, as DualSense above);
++            // when SDL cannot tell, fall back to the two known wired PIDs
++            const auto connection = SDL_GetJoystickConnectionState(sdl_joystick.get());
++            const bool is_bluetooth =
++                (connection == SDL_JOYSTICK_CONNECTION_WIRED || connection == SDL_JOYSTICK_CONNECTION_WIRELESS)
++                    ? connection == SDL_JOYSTICK_CONNECTION_WIRELESS
++                    : (pid != 0x02EA && pid != 0x02FF);
+             xbox_rumble = renhdrum_xbox_rumble_create(is_bluetooth);
+             if (xbox_rumble) {
+-                LOG_INFO(Input, "Initialized Xbox rumble converter for controller {:04X}:{:04X} (BT: {})",
+-                         vid, pid, is_bluetooth);
++                LOG_INFO(Input,
++                         "Initialized Xbox rumble converter for controller {:04X}:{:04X} (BT: {}, SDL connection: {})",
++                         vid, pid, is_bluetooth, static_cast<int>(connection));
+                 pad_name = "Xbox One Controller";
+                 PublishPad({pad_name, false, is_bluetooth, "Xbox rumble", false});
+             }
+-- 
+2.55.0.windows.5
+

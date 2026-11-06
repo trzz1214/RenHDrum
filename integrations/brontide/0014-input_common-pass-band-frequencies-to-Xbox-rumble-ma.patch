@@ -1,0 +1,27 @@
+From 65823748408cb69fba8584f95f99e6da8308b8aa Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 19:49:25 +0700
+Subject: [PATCH 07/11] input_common: pass band frequencies to Xbox rumble
+ mapper
+
+---
+ src/input_common/drivers/sdl_driver.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 1080ea04a0..90589a5cf5 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -499,7 +499,8 @@ public:
+                 return false;
+             }
+             renhdrum_xbox_rumble_push_half_sample(xbox_rumble, now_us, is_right, v.low_amplitude,
+-                                                  v.high_amplitude);
++                                                  v.low_frequency, v.high_amplitude,
++                                                  v.high_frequency);
+         }
+         TickXboxRumble(now_us);
+         return true;
+-- 
+2.55.0.windows.5
+
