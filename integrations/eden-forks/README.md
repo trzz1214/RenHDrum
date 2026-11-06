@@ -31,16 +31,17 @@ It is a two-part `git am` series:
 
 ## Switch 2 finding: amplitude scale
 
-Measured with the trace on Lichii, about two minutes of play per game:
+Measured with the trace on Lichii, time-weighted: two Ocarina of Time sessions (108 s and 145 s) and one Donkey Kong Bananza session (331 s). The files and the analysis script are in [samaBR85/renhdrum-eden](https://github.com/samaBR85/renhdrum-eden/tree/main/research/traces), discussed in [#2](https://github.com/trzz1214/RenHDrum/issues/2). Ocarina of Time values are session 1 / session 2.
 
 | | Ocarina of Time (Switch 2, `0400486024DEC000`) | Donkey Kong Bananza |
 |---|---|---|
 | Command / mode | 214, Mode 2 | 214, Mode 2 |
-| Peak amplitude | 0.096 | 0.534 |
-| Median amplitude (when vibrating) | 0.003 | 0.009 |
-| Frequency range | 40-330 Hz | 40-510 Hz |
+| Peak amplitude | 0.096 / 0.178 | 0.401 |
+| Median amplitude (when vibrating) | 0.001 / 0.006 | 0.014 |
+| Vibrating time at 0.1 or more | 0.0 % / 1.5 % | 8.3 % |
+| Frequency range | 42-341 Hz | 30-504 Hz |
 
-Ocarina of Time never sends an amplitude above 0.1, yet it rumbles strongly on a Switch 2. Played as sent, it is barely felt on a DualSense. A gain of 10x with a power curve (exponent 0.64) above a small quadratic knee came close to the console. This may be the cross-generation equalization described in [research/11](../../docs/research/11-switch2-hd-rumble.md) (section 1.3, the `Mode` flag).
+Ocarina of Time rarely sends an amplitude above 0.1, yet it rumbles strongly on a Switch 2. Played as sent, it is barely felt on a DualSense. A gain of 10x with a power curve (exponent 0.64) above a small quadratic knee came close to the console. This may be the cross-generation equalization described in [research/11](../../docs/research/11-switch2-hd-rumble.md) (section 1.3), though both games send `Mode` 2, so the flag alone does not explain it.
 
 ## License
 
