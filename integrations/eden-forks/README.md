@@ -4,16 +4,30 @@ A port of the [Brontide reference patches](../brontide/) to current Eden-based S
 
 **[samaBR85/renhdrum-eden](https://github.com/samaBR85/renhdrum-eden)**
 
-It is a four-part `git am` series:
+It is a two-part `git am` series:
 
 | Patch | Contents |
 |---|---|
-| `0001` | Brontide `0002`-`0007` ported to Lichii `frizti-v1`, with the conflicts resolved by hand. `msvc_compat.cpp` is left out: it only works around static Qt prebuilts. SDL3 3.4.8 is built from source with the two [SDL3 patches](../sdl3/sdl3-patches/). |
-| `0002` | An HD Rumble settings dialog (Controls > Vibration > HD Rumble...). The SDL driver reads it on every vibration and re-applies changes to connected controllers. |
-| `0003` | Per-game amplitude gain and a weak rumble boost curve. |
-| `0004` | `EDEN_HDRUMBLE_TRACE=1`: a CSV trace of every command 214 vibration value. |
+| `0001` | HD Rumble and DualSense haptics through RenHDrum. Includes an HD Rumble settings dialog and a per-game amplitude gain and weak rumble boost. |
+| `0002` | `EDEN_HDRUMBLE_TRACE=1`: a CSV trace of every command 214 vibration value. Optional. |
 
-The series applies to the tips of [Frizti/Lichii](https://github.com/Frizti/Lichii), [zortos293/Lichii](https://github.com/zortos293/Lichii) and [Djihads80/Eglantine](https://github.com/Djihads80/Eglantine), checked weekly by CI. It has been built and played on Lichii `frizti-v1` (Windows x64, MSVC) with a wired DualSense Edge.
+### How `0001` differs from Brontide
+
+- **Runtime loading.** `renhdrum.dll` is loaded with the emulator's `Common::DynamicLibrary`, so nothing links against it and no Rust toolchain is needed to build. Without the library every controller keeps the standard rumble.
+- **Layout.** The code lives in `input_common/drivers/renhdrum_pad.{h,cpp}`. The SDL driver change is about 70 lines.
+- **Locking.** No SDL joystick call is made while the pad mutex is held, and pads are ticked outside the joystick map lock. SDL runs its joystick-removed watcher under the SDL joystick lock, which otherwise could deadlock against the HLE thread.
+- **CMake options:**
+  - `RENHDRUM_DOWNLOAD` fetches the v0.1.1 release DLL, SHA-256 checked.
+  - `RENHDRUM_SDL_PATCHES` builds SDL3 with the [SDL3 patches](../sdl3/sdl3-patches/) as a separate package. It is opt-in, since `0001-hdrumble.patch` also changes SDL's default Switch rumble refresh.
+- **Side tagging.** The left/right `pad` tag is set only for SDL outputs; the native Joy-Con driver keeps its controller type in `pad`.
+- **`msvc_compat.cpp`** is left out: it only works around static Qt prebuilts.
+
+### Testing
+
+- CI checks weekly that the series applies to the tips of [Frizti/Lichii](https://github.com/Frizti/Lichii), [zortos293/Lichii](https://github.com/zortos293/Lichii) and [Djihads80/Eglantine](https://github.com/Djihads80/Eglantine).
+- It builds on Windows x64 (MSVC), and on Linux with GCC 13 and `-Werror`, in Lichii's own build-check.
+- It was played with a wired DualSense Edge in Ocarina of Time and Donkey Kong Bananza.
+- The same change is proposed to Lichii as [zortos293/Lichii#213](https://github.com/zortos293/Lichii/pull/213).
 
 ## Switch 2 finding: amplitude scale
 
