@@ -4,6 +4,13 @@ This guide shows how to drive a Microsoft Xbox One controller (`0x045E`, tested 
 
 Background and measurements: [research/10: Xbox One Rumble](../research/10-xbox-one-rumble.md).
 
+> [!NOTE]
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+
+> [!WARNING]
+> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
+> For authentic HD Rumble synthesis, host emulators **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) in controller settings or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+
 ---
 
 ## 1. When to Create the Converter
@@ -11,7 +18,7 @@ Background and measurements: [research/10: Xbox One Rumble](../research/10-xbox-
 Create one converter per controller when **both** hold:
 
 - the vendor ID is Microsoft (`0x045E`), and
-- your input layer (SDL3 in our case) reports the device as an Xbox One type.
+- your input layer (SDL3 in Brontide) reports the device as an Xbox One type.
 
 Pass `is_bluetooth` from the connection state (wired or wireless). If your input layer cannot tell, treat a controller as wired only when you know it is.
 
@@ -86,5 +93,7 @@ Each call takes an internal lock, so the functions are safe to call from differe
 ---
 
 ## 7. Supported Controllers
+
+`🔬 Xbox One S (research)`
 
 Built and tested on the Xbox One S controller. Other Microsoft Xbox One and Series X|S controllers share the same four-motor design and should work too, but they have not been tested yet.

@@ -4,14 +4,13 @@
 
 pub mod classify;
 pub mod rotor;
-pub mod trace;
 
 use std::path::Path;
 
 use self::classify::{BandClassifier, RumbleKind, KICK_MIN};
 use self::rotor::RotorModel;
-use self::trace::XboxTrace;
 use crate::settings::HdRumbleSettings;
+use crate::trace::RumbleTrace;
 
 /// USB limit, clean over 10 cycles.
 const USB_INTERVAL_US: i64 = 10_000;
@@ -384,7 +383,7 @@ pub struct XboxRumbleMapper {
     last_eval_us: Option<i64>,
     next_send_us: i64,
     last_sent: Option<[u16; 4]>,
-    trace: Option<XboxTrace>,
+    trace: Option<RumbleTrace>,
 }
 
 impl XboxRumbleMapper {
@@ -422,7 +421,7 @@ impl XboxRumbleMapper {
             last_eval_us: None,
             next_send_us: 0,
             last_sent: None,
-            trace: XboxTrace::open_in(base_dir),
+            trace: RumbleTrace::open_in("xbox", base_dir),
         }
     }
 
@@ -1629,7 +1628,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("xbox-trace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(trace::TRACE_FLAG_FILE), "1").unwrap();
+        std::fs::write(dir.join(crate::trace::TRACE_FLAG_FILE_LEGACY), "1").unwrap();
         {
             let mut m = XboxRumbleMapper::new_in(false, XboxRumbleTuning::default(), Some(&dir));
             m.push_half_sample(1_000, false, 0.5, 160.0, 0.0, 320.0);
@@ -1649,10 +1648,11 @@ mod tests {
         let csv = std::fs::read_to_string(&csvs[0]).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0], "G,1000,L,0.5,160,0,320");
-        assert_eq!(lines[1], "O,1000,7,0,0,0,Tap,-");
-        assert_eq!(lines[2], "R,7,0,0,0");
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "K,xbox");
+        assert_eq!(lines[1], "G,1000,L,0.5,160,0,320");
+        assert_eq!(lines[2], "O,1000,7,0,0,0,Tap,-");
+        assert_eq!(lines[3], "R,7,0,0,0");
     }
 
     // --- Step 3 new mandatory tests ---

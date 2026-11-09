@@ -105,8 +105,14 @@ pub struct DualSenseHapticsDsp {
 
     target_left: DualSenseSide,
     target_right: DualSenseSide,
+    latest_left: DualSenseSide,
+    latest_right: DualSenseSide,
     raw_left: HdSideSample,
     raw_right: HdSideSample,
+    latest_raw_left: HdSideSample,
+    latest_raw_right: HdSideSample,
+    slot_dirty_left: bool,
+    slot_dirty_right: bool,
 
     voice_left: DualSenseVoice,
     voice_right: DualSenseVoice,
@@ -128,8 +134,14 @@ impl DualSenseHapticsDsp {
                 as f32,
             target_left: DualSenseSide::default(),
             target_right: DualSenseSide::default(),
+            latest_left: DualSenseSide::default(),
+            latest_right: DualSenseSide::default(),
             raw_left: HdSideSample::default(),
             raw_right: HdSideSample::default(),
+            latest_raw_left: HdSideSample::default(),
+            latest_raw_right: HdSideSample::default(),
+            slot_dirty_left: false,
+            slot_dirty_right: false,
             voice_left: DualSenseVoice {
                 freq_low: DUALSENSE_DEFAULT_LOW_FREQUENCY,
                 freq_high: DUALSENSE_DEFAULT_HIGH_FREQUENCY,
@@ -160,6 +172,45 @@ impl DualSenseHapticsDsp {
         self.crisp_notes = enabled;
     }
 
+    #[inline]
+    fn raw_amp_sum(s: &HdSideSample) -> f32 {
+        let low = if s.amp_low.is_finite() {
+            s.amp_low.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let high = if s.amp_high.is_finite() {
+            s.amp_high.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        low + high
+    }
+
+    fn update_side_left(&mut self, al: f32, fl: f32, ah: f32, fh: f32) {
+        let side = make_side(al, fl, ah, fh);
+        let raw = HdSideSample::new(al, fl, ah, fh);
+        self.latest_left = side;
+        self.latest_raw_left = raw;
+        if !self.slot_dirty_left || Self::raw_amp_sum(&raw) >= Self::raw_amp_sum(&self.raw_left) {
+            self.target_left = side;
+            self.raw_left = raw;
+        }
+        self.slot_dirty_left = true;
+    }
+
+    fn update_side_right(&mut self, al: f32, fl: f32, ah: f32, fh: f32) {
+        let side = make_side(al, fl, ah, fh);
+        let raw = HdSideSample::new(al, fl, ah, fh);
+        self.latest_right = side;
+        self.latest_raw_right = raw;
+        if !self.slot_dirty_right || Self::raw_amp_sum(&raw) >= Self::raw_amp_sum(&self.raw_right) {
+            self.target_right = side;
+            self.raw_right = raw;
+        }
+        self.slot_dirty_right = true;
+    }
+
     pub fn set_target(
         &mut self,
         left_al: f32,
@@ -171,20 +222,16 @@ impl DualSenseHapticsDsp {
         right_ah: f32,
         right_fh: f32,
     ) {
-        self.target_left = make_side(left_al, left_fl, left_ah, left_fh);
-        self.target_right = make_side(right_al, right_fl, right_ah, right_fh);
-        self.raw_left = HdSideSample::new(left_al, left_fl, left_ah, left_fh);
-        self.raw_right = HdSideSample::new(right_al, right_fl, right_ah, right_fh);
+        self.update_side_left(left_al, left_fl, left_ah, left_fh);
+        self.update_side_right(right_al, right_fl, right_ah, right_fh);
     }
 
     /// Sets target vibration for a single side (Left or Right) preserving the other side.
     pub fn set_half_target(&mut self, is_right: bool, al: f32, fl: f32, ah: f32, fh: f32) {
         if is_right {
-            self.target_right = make_side(al, fl, ah, fh);
-            self.raw_right = HdSideSample::new(al, fl, ah, fh);
+            self.update_side_right(al, fl, ah, fh);
         } else {
-            self.target_left = make_side(al, fl, ah, fh);
-            self.raw_left = HdSideSample::new(al, fl, ah, fh);
+            self.update_side_left(al, fl, ah, fh);
         }
     }
 
@@ -223,6 +270,12 @@ impl DualSenseHapticsDsp {
             self.slot_left = self.target_left;
             self.slot_right = self.target_right;
         }
+        self.target_left = self.latest_left;
+        self.target_right = self.latest_right;
+        self.raw_left = self.latest_raw_left;
+        self.raw_right = self.latest_raw_right;
+        self.slot_dirty_left = false;
+        self.slot_dirty_right = false;
         self.slot_frames_left = DUALSENSE_BUFFER_FRAMES;
     }
 
@@ -464,5 +517,33 @@ mod tests {
             dsp.fill_interleaved_f32(&mut buf);
         }
         assert_eq!(dsp.crisp_left, 2);
+    }
+
+    #[test]
+    fn test_peak_hold_in_slot_preserves_short_menu_tick_then_releases() {
+        let mut dsp = DualSenseHapticsDsp::new(100, false);
+        let mut buf = [0.0f32; DUALSENSE_BUFFER_FRAMES * DUALSENSE_CHANNELS];
+        dsp.fill_interleaved_f32(&mut buf);
+        assert_eq!(dsp.slot_frames_left, 0);
+
+        // Simulate 5 ms menu "tick" packet being overwritten by 0.0 packet in the same 5.3 ms slot:
+        dsp.set_target(0.25, 160.0, 0.0, 320.0, 0.25, 160.0, 0.0, 320.0);
+        dsp.set_target(0.0, 160.0, 0.0, 320.0, 0.0, 160.0, 0.0, 320.0);
+
+        // Call fill_interleaved_f32 for exactly 1 slot (256 frames):
+        dsp.fill_interleaved_f32(&mut buf);
+        assert!((dsp.slot_left.amp_low - 0.5).abs() < TOLERANCE);
+        assert!((dsp.slot_right.amp_low - 0.5).abs() < TOLERANCE);
+        let has_signal = buf
+            .iter()
+            .skip(DUALSENSE_LEFT_CHANNEL)
+            .step_by(DUALSENSE_CHANNELS)
+            .any(|&s| s != 0.0);
+        assert!(has_signal);
+
+        // Call fill_interleaved_f32 for 1 more slot (256 frames) without calling a new set_target:
+        dsp.fill_interleaved_f32(&mut buf);
+        assert_eq!(dsp.slot_left.amp_low, 0.0);
+        assert_eq!(dsp.slot_right.amp_low, 0.0);
     }
 }

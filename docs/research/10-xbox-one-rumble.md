@@ -26,7 +26,7 @@ Pushing a Switch signal straight into such motors gives a constant hum in which 
 The pad has four independent motors: two in the grips (different sizes, left heavier, right lighter) and two in the triggers (a matching light pair). On Windows the default path, XInput, drives the two grip motors only; the trigger motors are reported as unsupported through it (`sdl_driver.cpp:503`, comment "XInput has no trigger motors").
 
 ### 1.3 What emulators usually do
-The ordinary path (Brontide with HD Rumble switched off) takes amplitude of two bands, drops the frequency and sends both values to the two grip motors as plain rumble (`sdl_driver.cpp:624`, comment "plain 2-motor rumble"). To our knowledge, as of November 2026, Switch emulators generally leave the trigger motors idle.
+The ordinary path (Brontide with HD Rumble switched off) takes amplitude of two bands, drops the frequency and sends both values to the two grip motors as plain rumble (`sdl_driver.cpp:624`, comment "plain 2-motor rumble"). To my knowledge, as of November 2026, Switch emulators generally leave the trigger motors idle.
 
 ---
 
@@ -67,7 +67,7 @@ Commands were sent continuously for 30 s per cycle and every cycle checked for S
 | `rawinput` | Bluetooth | 20 ms | 3/3 | 20.0 ms | 26.7–27.2 ms |
 | WGI | Bluetooth | 20 ms | 3/3 | 20.0 ms | 26.3–26.8 ms |
 
-This shows commands were accepted at that pace, the pad did not drop, and rumble stopped on request. It does **not** show that the motors follow every individual command. The 10 ms floor matches what Linux drivers report (the `xone` driver throttles to 10 ms; `xpadneo` reports 20 ms as safe on Bluetooth); the figures above are our own check on the 1708.
+This shows commands were accepted at that pace, the pad did not drop, and rumble stopped on request. It does **not** show that the motors follow every individual command. The 10 ms floor matches what Linux drivers report (the `xone` driver throttles to 10 ms; `xpadneo` reports 20 ms as safe on Bluetooth); the figures above are from my own measurements on the 1708.
 
 ---
 
@@ -229,7 +229,7 @@ Wired or wireless is read from SDL's connection state; only if SDL cannot tell d
 
 The gate is a vendor ID check (Microsoft, `045E`) **and** SDL's gamepad type `SDL_GAMEPAD_TYPE_XBOXONE` (`sdl_driver.cpp:622-623`). That is a difference from Pro Controller support, where third-party pads that impersonate a Pro Controller speak the Switch protocol and receive HD Rumble unchanged.
 
-> **Built and tested on the Xbox One S controller. Other Microsoft Xbox One and Series X|S controllers share the same four-motor design and should work too, but we have not tested them yet: tell us how yours feels.**
+> **Built and tested on the Xbox One S controller. Other Microsoft Xbox One and Series X|S controllers share the same four-motor design and should work too, but I have not tested them yet: open an issue to report how yours feels.**
 
 ---
 
@@ -262,7 +262,7 @@ The file is created at the first line, so opening the emulator without rumble le
 
 ## 8. Sources
 
-| Source | What it gave us | How used |
+| Source | What it provided | How used |
 |---|---|---|
 | Linux `xpad` and [`medusalix/xone`](https://github.com/medusalix/xone) | Rumble packet format over GIP; the 10 ms limit | Reference |
 | [`atar-axis/xpadneo`](https://github.com/atar-axis/xpadneo) (issues #23, #487, #616) | Four-motor Bluetooth report; safe Bluetooth pacing | Reference |

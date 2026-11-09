@@ -3,13 +3,20 @@
 Header location: [`include/renhdrum.h`](../../include/renhdrum.h)  
 Library name: `renhdrum.dll` (Windows), `librenhdrum.so` (Linux), `librenhdrum.dylib` (macOS)
 
+> [!WARNING]
+> **CRITICAL REQUIREMENT: Accurate Vibration / 15 ms Throttle Bypass**
+> In Eden, yuzu, and PokeDinner derivatives, host configurations **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+
+> [!NOTE]
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+
 ---
 
 ## 1. Return Codes and Constants
 
 | Constant | Value | Description |
 |---|---|---|
-| `RENHDRUM_VERSION` | `0x000100` | Encoded as `0xMMNNPP` (Major 0, Minor 1, Patch 0). |
+| `RENHDRUM_VERSION` | `0x000300` | Encoded as `0xMMNNPP` (Major 0, Minor 3, Patch 0). |
 | `RENHDRUM_OK` | `0` | Call completed successfully. |
 | `RENHDRUM_ERR_NULL_PTR` | `-1` | A required pointer argument was null. |
 | `RENHDRUM_ERR_INVALID_ARG` | `-2` | An argument value was outside acceptable bounds. |
@@ -63,7 +70,17 @@ These functions perform pure mathematical transformations and packet encoding wi
 ```c
 uint32_t renhdrum_version(void);
 ```
-Returns the integer library version `0x000100`.
+Returns the integer library version `0x000300`.
+
+### `renhdrum_set_nx2_mode`
+```c
+void renhdrum_set_nx2_mode(int32_t mode);
+```
+Sets the Switch 2 vibration translation mode:
+- `mode == 2`: Switch 2 translation active. Call when receiving guest Switch 2 vibration commands (e.g. `nn::hid::IHidServer` Command 214 `SendVibrationValuesInMode`).
+  - **Sony DualSense**: Automatically applies piecewise response curve preset `[3]` (`T = 0.001, P1 = 0.004, P2 = 0.550, P3 = 0.900, P4 = 1.000`) for voice-coil actuators.
+  - **Nintendo Switch Pro Controller 1**: Automatically applies piecewise response curve preset `[4]` (`T = 0.001, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`) with an initial +20% (1.2x) attack transient boost for 25 ms on low frequencies below 150 Hz.
+- `mode == 0`: Classic Switch 1 mode. Amplitudes pass through 100% untouched and bit-exact. Call when running classic Switch 1 games or standard vibration commands.
 
 ### `renhdrum_encode_standard_side`
 ```c

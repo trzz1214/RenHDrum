@@ -7,12 +7,14 @@ pub mod dualsense;
 pub mod encoding;
 pub mod ffi;
 pub mod ipc;
+pub mod nx2;
 pub mod planner;
 pub mod play_report;
 pub mod preset;
 pub mod settings;
 pub mod status;
 pub mod test_pattern;
+pub mod trace;
 pub mod xbox;
 
 pub use backend::{HdSample, NintendoHdEngine};

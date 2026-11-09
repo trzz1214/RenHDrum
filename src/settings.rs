@@ -71,8 +71,8 @@ pub struct RumbleConfigController {
 impl RumbleConfigController {
     pub const DEFAULT_HD_RUMBLE_USB_INTERVAL_MS: i32 = 15;
     pub const DEFAULT_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 1;
-    pub const STANDARD_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 3;
-    pub const OLD_DEFAULT_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 2;
+    pub const STANDARD_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 2;
+    pub const OLD_DEFAULT_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 3;
     pub const DEFAULT_DUALSENSE_HAPTICS_VOLUME: i32 = 100;
     pub const OLD_DEFAULT_DUALSENSE_HAPTICS_VOLUME: i32 = 70;
 }
@@ -89,7 +89,7 @@ impl Default for RumbleConfigController {
             hd_rumble_experimental_frequency_in_packet: true,
             hd_rumble_experimental_frequency_both_bands: true,
             hd_rumble_experimental_bt_after_input: true,
-            hd_rumble_experimental_bt_fast: true,
+            hd_rumble_experimental_bt_fast: false,
             hd_rumble_experimental_crisp_notes: true,
             hd_rumble_experimental_bt_crisp_notes: true,
             hd_rumble_experimental_sync_to_input: false,
@@ -526,7 +526,7 @@ mod tests {
 
         assert!(settings.enabled);
         assert_eq!(settings.usb_interval_ms, 15);
-        assert_eq!(settings.bluetooth_level, 3);
+        assert_eq!(settings.bluetooth_level, 2);
         assert_eq!(settings.enabled_source, "config");
         assert_eq!(settings.usb_interval_source, "config");
         assert_eq!(settings.bluetooth_level_source, "config");
@@ -544,7 +544,7 @@ mod tests {
         assert!(settings.envelope_5ms);
         assert!(settings.frequency_in_packet);
         assert!(settings.frequency_both_bands);
-        assert_eq!(settings.bluetooth_level, 3);
+        assert_eq!(settings.bluetooth_level, 2);
 
         let unconfigured = dir.resolve(None);
         assert!(
@@ -634,7 +634,7 @@ mod tests {
             settings.usb_interval_source,
             "flag file hdrumble_interval_ms.txt"
         );
-        assert_eq!(settings.bluetooth_level, 3);
+        assert_eq!(settings.bluetooth_level, 2);
     }
 
     #[test]
@@ -1086,7 +1086,7 @@ mod tests {
         let on = dir.resolve(Some(&config));
         assert!(on.bt_after_input);
         assert_eq!(on.bt_after_input_source, "config");
-        assert_eq!(on.bluetooth_level, 3);
+        assert_eq!(on.bluetooth_level, 2);
         assert!(
             on.usb_no_queue && on.envelope_5ms && on.frequency_in_packet && on.frequency_both_bands
         );
@@ -1156,7 +1156,7 @@ mod tests {
             configured.bluetooth_level,
             RumbleConfigController::STANDARD_HD_RUMBLE_BLUETOOTH_LEVEL
         );
-        assert!(configured.bt_after_input && configured.bt_fast && configured.bt_crisp_notes);
+        assert!(configured.bt_after_input && !configured.bt_fast && configured.bt_crisp_notes);
         assert_eq!(configured.usb_interval_ms, 15);
 
         let unconfigured = dir.resolve(None);
@@ -1177,12 +1177,16 @@ mod tests {
     #[test]
     fn bt_fast_follows_config_or_flag_file() {
         let dir = TempFlagDir::new();
-        let on = dir.resolve(Some(&RumbleConfigController::default()));
+        let default_on = dir.resolve(Some(&RumbleConfigController::default()));
+        assert!(!default_on.bt_fast);
+
+        let mut config = RumbleConfigController::default();
+        config.hd_rumble_experimental_bt_fast = true;
+        let on = dir.resolve(Some(&config));
         assert!(on.bt_fast);
         assert_eq!(on.bt_fast_source, "config");
         assert!(on.to_string().contains("Bluetooth fast on (config)"));
 
-        let mut config = RumbleConfigController::default();
         config.hd_rumble_experimental_bt_fast = false;
         assert!(!dir.resolve(Some(&config)).bt_fast);
 

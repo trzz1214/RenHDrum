@@ -62,6 +62,7 @@ graph TD
 | `src/status.rs` | Human-readable telemetry formatting for active rumble status. |
 | `src/play_report.rs` | Detailed logging and performance diagnostic report generator. |
 | `src/ipc.rs` | 4096-byte memory-mapped shared memory structures (`RenHDrumSharedMemory`). |
+| `src/nx2.rs` | Switch 2 Mode 2 translation: DualSense preset [3], Pro 1 preset [4] with low-frequency boost, mode state. |
 | `src/test_pattern.rs` | Diagnostic test patterns and hearing test sequences. |
 
 ---

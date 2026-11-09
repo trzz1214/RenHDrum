@@ -2,6 +2,13 @@
 
 This guide details how to integrate PlayStation 5 DualSense (`0x054C:0x0CE6` / `0x0DF2`) 4-channel 48 kHz audio haptics over a wired USB connection using SDL3 and `renhdrum.dll`.
 
+> [!NOTE]
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+
+> [!WARNING]
+> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
+> For authentic HD Rumble synthesis, host emulators **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+
 ---
 
 ## 1. Hardware Architecture
@@ -133,3 +140,6 @@ Or for individual channels:
 ```cpp
 renhdrum_dualsense_dsp_set_half_target(dsp, is_right, al, fl, ah, fh);
 ```
+
+### Switch 2 Mode Routing
+When dispatching Switch 2 guest IPC command 214 (`SendNx2VibrationValues`), call `renhdrum_set_nx2_mode(2)`. The DSP automatically maps vibration amplitudes through piecewise response curve Preset `[3]` (`T = 0.001, P1 = 0.004, P2 = 0.550, P3 = 0.900, P4 = 1.000`) before audio synthesis, matching physical voice-coil dynamics. For classic Switch 1 games, set `renhdrum_set_nx2_mode(0)` to keep amplitudes 100% bit-exact and untouched.

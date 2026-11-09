@@ -4,6 +4,13 @@ This guide describes how to integrate RenHDrum into an Eden-family (or PokeDinne
 
 Background and physical analysis: [research/11: Switch 2 HD Rumble](../research/11-switch2-hd-rumble.md).
 
+> [!NOTE]
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+
+> [!WARNING]
+> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
+> For authentic HD Rumble synthesis, host emulators (Eden, yuzu, PokeDinner derivatives) **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) in controller settings, or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host frontend rate limiter will swallow and drop micro-timed HD Rumble packets before they ever reach RenHDrum!
+
 > [!IMPORTANT]
 > **Licensing & Clean Boundary**: RenHDrum is licensed under MIT OR Apache-2.0. The emulator integration relies exclusively on the public C ABI defined in `include/renhdrum.h`. Do not copy GPL emulator code into this repository; use function signatures and architectural descriptions only.
 
@@ -31,8 +38,31 @@ In `src/core/hle/service/hid/hid_server.cpp`:
 
 ### 1.2 Status of Commands 213 and 220
 
-- **Command 213 (`SendVibrationValueInMode`)**: Currently remains stubbed in initial builds. Games that issue single-handle requests via 213 (suspected in early tests of Kirby Air Riders) will require a matching dispatcher in a future revision.
-- **Command 220 (`IsOunceVibrationDeviceMounted`)**: Returns a 1-byte value of `0` indicating no native Switch 2 accessory is detected.
+- **Command 213 (`SendVibrationValueInMode`)**: A genuine dispatcher is implemented in reference testbeds (`Brontide-NS2 1.1.0` and `Brontide-oot 1.0.0`), unpacking the single handle and 16-byte `VibrationValue` from the raw `0x20` payload and routing it to `ResourceManager::SendVibrationValue`. Across 25 in-game trace sessions on retail titles (*Donkey Kong Bananza*, *Mario Kart World*, *Ocarina of Time* Switch 2 Edition), zero calls were observed (100% of game traffic flows through command 214).
+- **Command 220 (`IsOunceVibrationDeviceMounted`)**: Returns a 1-byte boolean `0`. Retail titles do not invoke command 220 during gameplay.
+
+### 1.3 Switch 2 Rumble Mode Notification (`renhdrum_set_nx2_mode`)
+
+When processing IPC command 214 (`SendNx2VibrationValues`), the host runtime notifies RenHDrum that Switch 2 rumble mode is active:
+
+```cpp
+// Switch 2 guest IPC command 214 active
+renhdrum_set_nx2_mode(2);
+```
+
+When classic Switch 1 vibration commands are processed, notify RenHDrum to keep mode 0:
+
+```cpp
+// Switch 1 classic vibration mode (untouched)
+renhdrum_set_nx2_mode(0);
+```
+
+#### How RenHDrum Handles Modes:
+- **`mode == 2` (Switch 2 Active)**:
+  - **Sony DualSense**: Automatically passes vibration amplitudes through piecewise response curve Preset `[3]` (`T = 0.001, P1 = 0.004, P2 = 0.550, P3 = 0.900, P4 = 1.000`) before DSP synthesis, matching physical voice-coil dynamics.
+  - **Nintendo Switch Pro Controller 1**: Automatically maps amplitudes through piecewise response curve Preset `[4]` (`T = 0.001, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`) and applies a 1.2x transient boost for the first 25 ms on low frequencies below 150 Hz.
+- **`mode == 0` (Classic Switch 1)**:
+  - Input amplitudes pass through 100% bit-exact and untouched.
 
 ---
 
@@ -118,6 +148,8 @@ Instead:
 
 ---
 
-## 4. Reference Testbed
+## 4. Reference Testbeds
 
-A complete reference implementation combining command 214 dispatching with RenHDrum 0.2.0 is demonstrated in **Brontide-NS2** (an experimental Switch 2 test build based on PokeDinner 2.5.0).
+Two reference implementations combining command 214 dispatching with RenHDrum 0.3.0 and Profile-Guided Optimization (PGO) are available:
+1. **Brontide-NS2 1.1.0** (based on PokeDinner 2.5.0 by Franseven): Tuned for *Donkey Kong Bananza* and *Mario Kart World*.
+2. **Brontide-oot 1.0.0** (based on Fritchii v5.3 by Frizti, Lichii by zortos293, and Dynamic FPS by Dark) - tuned for Ocarina of Time (Switch 2 Edition) with ahead-of-time shader preparation, lower memory footprint, and RenHDrum 0.3.0 HD Rumble.

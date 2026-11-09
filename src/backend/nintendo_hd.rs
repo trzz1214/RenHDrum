@@ -183,7 +183,7 @@ impl NintendoHdEngine {
         // (eden-hdr: SDL3 patch 0002), otherwise Bluetooth would get a packet every 15 ms.
         let amfm_wanted = settings.enabled
             && if self.is_bluetooth {
-                settings.bt_fast
+                settings.bt_fast && settings.bluetooth_level == 3
             } else {
                 settings.envelope_5ms && settings.usb_no_queue
             };
@@ -665,6 +665,10 @@ mod tests {
         bt.apply_settings(&settings);
         assert!(bt.amfm_planner.is_none());
         settings.bt_fast = true;
+        settings.bluetooth_level = 2;
+        bt.apply_settings(&settings);
+        assert!(bt.amfm_planner.is_none());
+        settings.bluetooth_level = 3;
         bt.apply_settings(&settings);
         assert!(bt.amfm_planner.is_some());
 

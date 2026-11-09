@@ -2,6 +2,13 @@
 
 This guide explains how to integrate `renhdrum.dll` into a C / C++ emulator or game engine using SDL3 (`libsdl-org/SDL`).
 
+> [!NOTE]
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+
+> [!WARNING]
+> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
+> In Eden, yuzu, and PokeDinner derivatives, host configurations **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) in controller settings or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+
 ---
 
 ## 1. Separation of Concerns: Algorithm vs. Transport
@@ -133,6 +140,13 @@ When the emulator core generates rumble data:
   renhdrum_engine_push_half_sample(engine, now_us, true  /* right */, al, fl, ah, fh);
   ```
 
+#### Switch 2 Mode Routing
+When dispatching Switch 2 guest IPC command 214 (`SendNx2VibrationValues`), notify RenHDrum by calling:
+```cpp
+renhdrum_set_nx2_mode(2);
+```
+RenHDrum automatically applies calibrated piecewise response curves tailored to the active controller (Preset `[3]` for DualSense, Preset `[4]` with low-frequency transient boost for Pro Controller 1). For classic Switch 1 vibration commands, call `renhdrum_set_nx2_mode(0)` to keep amplitudes 100% bit-exact and untouched.
+
 ### Step 4: Tick the Engine at 1 ms Intervals
 In a high-resolution timer worker (e.g., using `timeBeginPeriod(1)` on Windows):
 ```cpp
@@ -183,3 +197,14 @@ Retain standard rumble mechanisms (e.g. `SDL_RumbleJoystick`) for non-Switch har
 `renhdrum_settings_resolve` still reads local flag files adjacent to the host binary and queries IPC shared memory (`Local\RenHDrum_SharedState_v1` / `%APPDATA%\RenHDrum\renhdrum-settings.txt`) managed by `Brontide-App`. 
 
 Hosts wishing to supply custom settings purely in-process without reading IPC or disk flags should directly populate `RenHdcSettings` and invoke `renhdrum_engine_apply_settings`. There is no pure C ABI configuration resolver that bypasses disk and IPC yet.
+
+---
+
+## 5. Static Recompilation Hosts & Pro Controller Fixes
+
+For native C static recompilation runtimes and game ports using dynamic loading via `SDL_LoadObject`, see the dedicated [Static Recompilation Games Guide](recomp-games.md). It documents:
+- Dynamic runtime loading patterns without compile-time linkage.
+- A 1 ms tick thread with a 250 ms silence watchdog preventing hanging rumble during game pauses.
+- Standalone hardware reliability fixes for the Switch Pro Controller:
+  - **Right Stick Upward Drift**: Clamping center offsets where `|offset| > 0.5f` to `0.0f`.
+  - **Stuck Axes After Exit**: Clean `SDL_CloseGamepad` invocation and `ClearUSB` dispatch preventing controllers from remaining trapped in extended reporting mode.

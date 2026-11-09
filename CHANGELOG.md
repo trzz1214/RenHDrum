@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-08
+
+### Added
+- **Per-Controller Switch 2 Rumble Presets**: Calibrated piecewise transfer curves per controller hardware under Switch 2 mode (`renhdrum_set_nx2_mode(2)`, receiving guest IPC command 214 `SendVibrationValuesInMode`). DualSense audio haptics apply preset `[3]` (`T = 0.001, P1 = 0.004, P2 = 0.550, P3 = 0.900, P4 = 1.000`) designed for voice-coil response; Nintendo Switch Pro Controller 1 applies preset `[4]` (`T = 0.001, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`) combined with an automated +20% (1.2x) attack transient boost for 25 ms on low frequencies below 150 Hz. Classic Switch 1 rumble (`mode == 0`) remains 100% bit-exact and untouched (B028).
+- **Public C ABI Mode API**: Added `renhdrum_set_nx2_mode(int32_t mode)` in `renhdrum.h` and `renhdrum.dll` for host runtimes to notify the engine when Switch 2 rumble translation is active.
+- **Static Recompilation Games Guide**: Integration guide (`docs/integration/recomp-games.md`) for C and C++ SDL3 static recompilation runtimes, detailing dynamic runtime loading via `SDL_LoadObject`, 1 ms tick thread, 250 ms silence watchdog, lock ordering, and standalone Pro Controller drift/exit fixes.
+- **Generic Recomp C Bridge & Hookshot Reference Testbed**: Published `integrations/recomp-c/` providing a drop-in C bridge (`bridge/renhdrum_recomp_bridge.c/.h`) and a turnkey reference patch (`reference/recomp-c-reference.patch`) for Hookshot v2.0.6 (OoT Switch 2 Recompiler). Enables authentic HD Rumble on Nintendo Switch Pro Controller (USB & Bluetooth Level 2) and Sony DualSense (USB 4-channel 48 kHz float audio haptics & Bluetooth report 0x32) with zero configuration.
+- **Switch 2 Trace Quantification & Monograph 11 Update**: Documented quantitative findings from 25 in-game trace sessions in `docs/research/11-switch2-hd-rumble.md` and updated `docs/integration/switch2-games.md` with command 213 dispatcher implementation details.
+- **Brontide-NS2 1.1.0 & Brontide-oot Integration Patches**: Updated `integrations/brontide-ns2/` with patch 0005 adding real command 213 unpacking and dispatching, mode routing, and Pro Controller reliability fixes.
+
+### Changed
+- **DualSense 5.3 ms Peak Hold Window**: DualSense DSP retains attack peaks across a 5.3 ms sliding window to prevent transient clipping and preserve high-frequency tactile definition (B026).
+- **Pro Controller Bluetooth Default Level 2**: Pro Controller over Bluetooth now defaults to Balanced level 2 (`HD_BT_LEVELS[2]`: 45 ms pacing, burst 3, recharge 80 ms, `bt_fast = false`) for optimal radio balance between input latency and haptic fidelity (B027).
+- `RENHDRUM_VERSION` is now `0x000300`.
+
+### Acknowledgments
+- Credit to **samaBR85** ([`renhdrum-eden`](https://github.com/samaBR85/renhdrum-eden)) for independent research, porting patches to Eglantine/Lichii, deadlock fixes in Raw Input, and early Switch 2 trace measurements that informed the rumble scaling model.
+- Credit to **Frizti** (Fritchii v5.3), **zortos293** (Lichii), and **Dark** (Dynamic FPS) for providing the specialized Switch 2 platform used for Brontide-oot.
+- Credit to **NotRexed** and the **Hookshot Contributors** ([`NotRexed/Hookshot`](https://github.com/NotRexed/Hookshot)) for authoring the reference static recompilation platform used for `integrations/recomp-c/`.
+
 ## [0.2.1] - 2026-11-06
 
 ### Added

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RENHDRUM_VERSION 0x000201
+#define RENHDRUM_VERSION 0x000300
 
 #define RENHDRUM_OK 0
 #define RENHDRUM_ERR_NULL_PTR -1
@@ -286,6 +286,9 @@ int32_t renhdrum_xbox_rumble_push_half_sample(
 /* out_motors4: left grip, right grip, left trigger, right trigger. Returns 1 when they must be sent now. */
 int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
 int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
+
+/* Switch 2 rumble mode: 0 = Switch 1 default / untouched, 2 = Switch 2 Mode 2 translation */
+void renhdrum_set_nx2_mode(int32_t mode);
 
 #ifdef __cplusplus
 }

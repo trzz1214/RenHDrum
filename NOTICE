@@ -77,3 +77,21 @@ Attributions & Third-Party Credits
     Original implementation of nn::hid::IHidServer command 214
     (SendVibrationValuesInMode) dispatching (commits 2b413a46a2 and 465aa33077).
     Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
+
+12. samaBR85 (renhdrum-eden)
+    Patch adaptations porting RenHDrum into Eglantine and Lichii, independent Switch 2
+    in-game trace verification, and SDL Raw Input deadlock resolution.
+    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
+    https://github.com/samaBR85/renhdrum-eden
+
+13. Frizti, zortos293, Dark (Fritchii v5.3 / Lichii / Dynamic FPS)
+    Authors of Fritchii v5.3 (commit 1a7a3c03c5), Lichii, and Dynamic FPS, providing
+    the baseline Switch 2 emulator platform used for Brontide-oot.
+    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
+
+14. NotRexed & Hookshot Contributors (Hookshot)
+    Authors of Hookshot (OoT Switch 2 Recompiler, commit fa43939, tag v2.0.6),
+    providing the reference static recompilation testbed for integrations/recomp-c/
+    (see integrations/recomp-c/reference/).
+    Licensed under the GNU General Public License, version 3 (GPL-3.0).
+    https://github.com/NotRexed/Hookshot

@@ -1,0 +1,738 @@
+﻿From 1de40b2fd24 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 00:19:34 +0700
+Subject: [PATCH 5/5] hid, input: Switch 2 real command 213, nx2 mode, and Pro Controller fixes
+
+Update hook to Brontide-NS2 1.1.0 and RenHDrum 0.3.0:
+- Add real command 213 (SendVibrationValueInMode) dispatcher.
+- Route guest Mode flag to RenHDrum via renhdrum_set_nx2_mode.
+- Fix Switch Pro Controller right stick upward drift by clamping center offset.
+- Synchronize controller attach and detach to prevent Raw Input deadlocks.
+---
+ src/core/hle/service/hid/hid_server.cpp | 304 ++++++++++++++++++++++++++++++--
+ src/core/hle/service/hid/hid_server.h   |  16 +-
+ src/input_common/drivers/sdl_driver.cpp | 167 +++++++++++-------
+ src/input_common/input_poller.cpp       |  24 ++-
+ 4 files changed, 430 insertions(+), 81 deletions(-)
+
+diff --git a/src/core/hle/service/hid/hid_server.cpp b/src/core/hle/service/hid/hid_server.cpp
+index f2a7b7d04a..1fc8dc09c3 100644
+--- a/src/core/hle/service/hid/hid_server.cpp
++++ b/src/core/hle/service/hid/hid_server.cpp
+@@ -6,8 +6,15 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
+ 
+ #include "common/common_types.h"
++#include "common/fs/path_util.h"
+ #include "common/logging.h"
+ #include "common/settings.h"
+ #include "core/hle/kernel/k_shared_memory.h"
+@@ -140,9 +147,9 @@ IHidServer::IHidServer(Core::System& system_, std::shared_ptr<ResourceManager> r
+         {210, C<&IHidServer::EndPermitVibrationSession>, "EndPermitVibrationSession"},
+         {211, C<&IHidServer::IsVibrationDeviceMounted>, "IsVibrationDeviceMounted"},
+         {212, C<&IHidServer::SendVibrationValueInBool>, "SendVibrationValueInBool"},
+-        {213, C<&IHidServer::Unknown213>, "Unknown213"},
++        {213, C<&IHidServer::SendVibrationValueInMode>, "SendVibrationValueInMode (guessed)"},
+         {214, C<&IHidServer::SendNx2VibrationValues>, "SendNx2VibrationValues (guessed)"},
+-        {220, C<&IHidServer::Unknown220>, "Unknown220"},
++        {220, C<&IHidServer::IsOunceVibrationDeviceMounted>, "IsOunceVibrationDeviceMounted"},
+         {300, C<&IHidServer::ActivateConsoleSixAxisSensor>, "ActivateConsoleSixAxisSensor"},
+         {301, C<&IHidServer::StartConsoleSixAxisSensor>, "StartConsoleSixAxisSensor"},
+         {302, C<&IHidServer::StopConsoleSixAxisSensor>, "StopConsoleSixAxisSensor"},
+@@ -955,6 +962,7 @@ Result IHidServer::SendVibrationValue(Core::HID::VibrationDeviceHandle vibration
+               vibration_device_handle.npad_type, vibration_device_handle.npad_id,
+               vibration_device_handle.device_index, aruid.pid);
+ 
++    Settings::values.nx2_active_mode.store(0, std::memory_order_relaxed);
+     GetResourceManager()->SendVibrationValue(aruid.pid, vibration_device_handle, vibration_value);
+     R_SUCCEED()
+ }
+@@ -1020,6 +1028,7 @@ Result IHidServer::SendVibrationValues(
+ 
+     R_UNLESS(vibration_handles.size() == vibration_values.size(), ResultVibrationArraySizeMismatch);
+ 
++    Settings::values.nx2_active_mode.store(0, std::memory_order_relaxed);
+     for (std::size_t i = 0; i < vibration_handles.size(); i++) {
+         R_TRY(GetResourceManager()->SendVibrationValue(aruid.pid, vibration_handles[i],
+                                                        vibration_values[i]));
+@@ -1113,19 +1122,248 @@ Result IHidServer::IsVibrationDeviceMounted(
+     R_SUCCEED();
+ }
+ 
++// B017: patent-shaped HD Rumble 2 -> 1 translation (JP 2026015701). Points are guesses.
++static float ApplyNx2MapExplicit(float a, float t, float p1, float p2, float p3, float p4) {
++    if (a < t) {
++        return 0.0f;
++    }
++    if (a >= 1.0f) {
++        return p4;
++    }
++    if (a < 0.1f) {
++        if (0.1f <= t) {
++            return p2;
++        }
++        return p1 + (a - t) * (p2 - p1) / (0.1f - t);
++    }
++    if (a < 0.5f) {
++        return p2 + (a - 0.1f) * (p3 - p2) / (0.5f - 0.1f);
++    }
++    return p3 + (a - 0.5f) * (p4 - p3) / (1.0f - 0.5f);
++}
++
++static float ApplyNx2Map(float a) {
++    const float t = Settings::values.hd_rumble_nx2_t.GetValue() / 1000.0f;
++    const float p1 = Settings::values.hd_rumble_nx2_p1.GetValue() / 1000.0f;
++    const float p2 = Settings::values.hd_rumble_nx2_p2.GetValue() / 1000.0f;
++    const float p3 = Settings::values.hd_rumble_nx2_p3.GetValue() / 1000.0f;
++    const float p4 = Settings::values.hd_rumble_nx2_p4.GetValue() / 1000.0f;
++    return ApplyNx2MapExplicit(a, t, p1, p2, p3, p4);
++}
++
++struct Nx2BoostState {
++    bool was_zero{true};
++    std::chrono::steady_clock::time_point start_time{};
++};
++
++static std::array<std::array<std::array<Nx2BoostState, 2>, 2>, 10> s_nx2_boost_states{};
++static std::mutex s_nx2_boost_mutex;
++
++static float ApplyNx2Boost(std::size_t npad_idx, std::size_t dev_idx, std::size_t band_idx,
++                           float amp, float freq, float boost_factor, int boost_duration_ms,
++                           std::chrono::steady_clock::time_point now) {
++    if (npad_idx >= 10 || dev_idx >= 2 || band_idx >= 2) {
++        return amp;
++    }
++    std::scoped_lock lock{s_nx2_boost_mutex};
++    auto& state = s_nx2_boost_states[npad_idx][dev_idx][band_idx];
++
++    if (amp <= 0.0f) {
++        state.was_zero = true;
++        state.start_time = {};
++        return 0.0f;
++    }
++
++    if (state.was_zero) {
++        state.was_zero = false;
++        if (freq < 150.0f && boost_duration_ms > 0 && boost_factor > 1.0f) {
++            state.start_time = now;
++        } else {
++            state.start_time = {};
++        }
++    }
++
++    if (state.start_time != std::chrono::steady_clock::time_point{}) {
++        const auto elapsed_ms =
++            std::chrono::duration_cast<std::chrono::milliseconds>(now - state.start_time).count();
++        if (elapsed_ms < boost_duration_ms) {
++            amp = (std::min)(1.0f, amp * boost_factor);
++        } else {
++            state.start_time = {};
++        }
++    }
++
++    return amp;
++}
++
++// B017: self-test patent-shaped map against estimated points
++static bool RunNx2MapSelfTest() {
++    const auto approx = [](float val, float expected, float eps = 0.005f) {
++        return std::abs(val - expected) <= eps;
++    };
++    constexpr float t = 0.005f;
++    constexpr float p1 = 0.010f;
++    constexpr float p2 = 0.500f;
++    constexpr float p3 = 0.800f;
++    constexpr float p4 = 1.000f;
++
++    if (ApplyNx2MapExplicit(0.004f, t, p1, p2, p3, p4) != 0.0f) {
++        return false;
++    }
++    if (!approx(ApplyNx2MapExplicit(0.010f, t, p1, p2, p3, p4), 0.036f)) {
++        return false;
++    }
++    if (!approx(ApplyNx2MapExplicit(0.046f, t, p1, p2, p3, p4), 0.223f)) {
++        return false;
++    }
++    if (!approx(ApplyNx2MapExplicit(0.100f, t, p1, p2, p3, p4), 0.500f)) {
++        return false;
++    }
++    if (!approx(ApplyNx2MapExplicit(1.000f, t, p1, p2, p3, p4), 1.000f)) {
++        return false;
++    }
++    return true;
++}
++
++[[maybe_unused]] static float ApplyNx2Curve(float a, float k) {
++    constexpr float knee = 0.02f;
++    if (a <= knee || k >= 1.0f) {
++        return a;
++    }
++    return knee + (1.0f - knee) * std::pow((a - knee) / (1.0f - knee), k);
++}
++
+ Result IHidServer::SendNx2VibrationValues(
+-    u64 unknown, AppletResourceUserId aruid,
++    u64 mode, AppletResourceUserId aruid,
+     InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
+     InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values) {
+-    LOG_DEBUG(Service_HID, "called, unknown={}, applet_resource_user_id={}", unknown, aruid.pid);
++    LOG_DEBUG(Service_HID, "called, mode={}, applet_resource_user_id={}", mode, aruid.pid);
++
++    // B010: which Mode each game sends, logged on the first call and whenever it changes
++    static std::atomic<bool> mode_214_seen{false};
++    static std::atomic<u64> last_mode_214{0};
++    if (!mode_214_seen.exchange(true) || last_mode_214.exchange(mode) != mode) {
++        last_mode_214 = mode;
++        LOG_INFO(Service_HID, "Vibration 214 mode = {}", mode);
++    }
++
++    // B017: log Mode 2 translation setting on first call
++    if (mode == 2) {
++        static std::atomic<bool> map_log_seen{false};
++        if (!map_log_seen.exchange(true)) {
++            [[maybe_unused]] static const bool s_b017_selftest_passed = RunNx2MapSelfTest();
++            ASSERT_MSG(s_b017_selftest_passed, "B017 RunNx2MapSelfTest failed");
++
++            const int map_val = Settings::values.hd_rumble_nx2_map.GetValue();
++            const int t_val = Settings::values.hd_rumble_nx2_t.GetValue();
++            const int p1_val = Settings::values.hd_rumble_nx2_p1.GetValue();
++            const int p2_val = Settings::values.hd_rumble_nx2_p2.GetValue();
++            const int p3_val = Settings::values.hd_rumble_nx2_p3.GetValue();
++            const int p4_val = Settings::values.hd_rumble_nx2_p4.GetValue();
++            const int boost_val = Settings::values.hd_rumble_nx2_boost.GetValue();
++            const int boost_ms_val = Settings::values.hd_rumble_nx2_boost_ms.GetValue();
++
++            if (map_val == 1) {
++                const int curve_val = Settings::values.hd_rumble_nx2_curve.GetValue();
++                if (curve_val >= 100) {
++                    LOG_INFO(Service_HID,
++                             "Vibration 214 Mode 2 map={} t={} p={}/{}/{}/{} boost={}x{}ms k=off knee=0.02",
++                             map_val, t_val, p1_val, p2_val, p3_val, p4_val, boost_val, boost_ms_val);
++                } else {
++                    LOG_INFO(Service_HID,
++                             "Vibration 214 Mode 2 map={} t={} p={}/{}/{}/{} boost={}x{}ms k={:.2f} knee=0.02",
++                             map_val, t_val, p1_val, p2_val, p3_val, p4_val, boost_val, boost_ms_val,
++                             curve_val / 100.0f);
++                }
++            } else {
++                LOG_INFO(Service_HID,
++                         "Vibration 214 Mode 2 map={} t={} p={}/{}/{}/{} boost={}x{}ms",
++                         map_val, t_val, p1_val, p2_val, p3_val, p4_val, boost_val, boost_ms_val);
++            }
++        }
++    }
++
++    // B010: the real send rate, before EmulatedController drops repeated values. Every 5 s:
++    // how many 214 calls, how many carried only zero amplitudes, and the longest gap between calls.
++    {
++        using Clock = std::chrono::steady_clock;
++        static std::mutex rate_mutex;
++        static Clock::time_point window_start{}, last_call{};
++        static u32 calls = 0, zero_calls = 0;
++        static s64 max_gap_us = 0;
++        const auto now = Clock::now();
++        const bool all_zero = std::all_of(
++            vibration_values.begin(), vibration_values.end(), [](const auto& v) {
++                return v.low_amplitude == 0.0f && v.high_amplitude == 0.0f;
++            });
++        std::scoped_lock lock{rate_mutex};
++        if (calls == 0) {
++            window_start = now;
++        }
++        if (last_call != Clock::time_point{}) {
++            max_gap_us = (std::max)(
++                max_gap_us,
++                std::chrono::duration_cast<std::chrono::microseconds>(now - last_call).count());
++        }
++        last_call = now;
++        calls++;
++        zero_calls += all_zero ? 1 : 0;
++        const auto window_us =
++            std::chrono::duration_cast<std::chrono::microseconds>(now - window_start).count();
++        if (window_us >= 5'000'000) {
++            LOG_INFO(Service_HID,
++                     "Vibration 214 rate: {} calls in {:.1f} s ({} all zero), {} handles, "
++                     "max gap {:.1f} ms",
++                     calls, window_us / 1e6, zero_calls, vibration_handles.size(),
++                     max_gap_us / 1e3);
++            calls = 0;
++            zero_calls = 0;
++            max_gap_us = 0;
++        }
++    }
+ 
+     // Unlike 206 this never fails: rumble is best effort and the command is only known from
+     // captures, so an unexpected handle or layout shouldn't return an error a game may treat as
+     // fatal.
++    const int map_mode = Settings::values.hd_rumble_nx2_map.GetValue();
++    if (mode == 2) {
++        if (map_mode == 2) {
++            Settings::values.nx2_active_mode.store(static_cast<int>(mode), std::memory_order_relaxed);
++        } else {
++            Settings::values.nx2_active_mode.store(0, std::memory_order_relaxed);
++        }
++    } else {
++        Settings::values.nx2_active_mode.store(0, std::memory_order_relaxed);
++    }
++    const float boost_factor = Settings::values.hd_rumble_nx2_boost.GetValue() / 1000.0f;
++    const int boost_ms = Settings::values.hd_rumble_nx2_boost_ms.GetValue();
++    const auto now = std::chrono::steady_clock::now();
+     const auto count = (std::min)(vibration_handles.size(), vibration_values.size());
+     for (std::size_t i = 0; i < count; i++) {
++        auto value = vibration_values[i];
++        if (mode == 2) {
++            if (map_mode == 1) {
++                // map_mode == 1: phong lab muon do ghi de bo so tu ini
++                value.low_amplitude = ApplyNx2Map(value.low_amplitude);
++                value.high_amplitude = ApplyNx2Map(value.high_amplitude);
++
++                const auto& handle = vibration_handles[i];
++                const auto raw_npad = static_cast<Core::HID::NpadIdType>(handle.npad_id);
++                const auto npad_idx = IsNpadIdValid(raw_npad) ? NpadIdTypeToIndex(raw_npad) : 10;
++                const auto dev_idx = static_cast<std::size_t>(handle.device_index);
++
++                value.low_amplitude = ApplyNx2Boost(npad_idx, dev_idx, 0,
++                                                    value.low_amplitude, value.low_frequency,
++                                                    boost_factor, boost_ms, now);
++                value.high_amplitude = ApplyNx2Boost(npad_idx, dev_idx, 1,
++                                                     value.high_amplitude, value.high_frequency,
++                                                     boost_factor, boost_ms, now);
++            } else if (map_mode == 2) {
++                // map_mode == 2 (mac dinh): day mau tho xuong de RenHDrum tu chon [3] DualSense / [4] Pro 1
++            }
++        }
+         const auto result = GetResourceManager()->SendVibrationValue(
+-            aruid.pid, vibration_handles[i], vibration_values[i]);
++            aruid.pid, vibration_handles[i], value);
+         if (result.IsError()) {
+             LOG_DEBUG(Service_HID, "failed to send vibration {}, result={:#x}", i, result.raw);
+         }
+@@ -1134,14 +1372,60 @@ Result IHidServer::SendNx2VibrationValues(
+     R_SUCCEED();
+ }
+ 
+-Result IHidServer::Unknown213() {
+-    LOG_DEBUG(Service_HID, "(STUBBED) called");
++Result IHidServer::SendVibrationValueInMode(Core::HID::VibrationDeviceHandle vibration_device_handle,
++                                             u32 mode, Core::HID::VibrationValue vibration_value,
++                                             ClientAppletResourceUserId aruid) {
++    LOG_DEBUG(Service_HID,
++              "called, npad_type={}, npad_id={}, device_index={}, mode={}, "
++              "applet_resource_user_id={}",
++              vibration_device_handle.npad_type, vibration_device_handle.npad_id,
++              vibration_device_handle.device_index, mode, aruid.pid);
++
++    // B010: the 0x20 byte layout (handle 4, mode 4, value 16, aruid 8) is a guess, so the first
++    // call and every mode change print the raw fields to check the field order. If the floats
++    // look absurd, swap handle and mode.
++    static std::atomic<bool> mode_213_seen{false};
++    static std::atomic<u32> last_mode_213{0};
++    if (!mode_213_seen.exchange(true) || last_mode_213.exchange(mode) != mode) {
++        last_mode_213 = mode;
++        LOG_INFO(Service_HID,
++                 "Vibration 213 mode = {}, handle(type={}, npad_id={}, index={}), "
++                 "value=({}, {}, {}, {})",
++                 mode, vibration_device_handle.npad_type, vibration_device_handle.npad_id,
++                 vibration_device_handle.device_index, vibration_value.low_amplitude,
++                 vibration_value.low_frequency, vibration_value.high_amplitude,
++                 vibration_value.high_frequency);
++    }
++
++    // Never an error: rumble is best effort and the layout is only known from captures.
++    const auto result =
++        GetResourceManager()->SendVibrationValue(aruid.pid, vibration_device_handle, vibration_value);
++    if (result.IsError()) {
++        LOG_DEBUG(Service_HID, "failed to send vibration 213, result={:#x}", result.raw);
++    }
+     R_SUCCEED();
+ }
+ 
+-Result IHidServer::Unknown220(Out<u8> out) {
+-    LOG_DEBUG(Service_HID, "(STUBBED) called");
+-    *out = 0;
++Result IHidServer::IsOunceVibrationDeviceMounted(Out<u8> out) {
++    // B010 test flag: hdrumble_ounce_mounted.txt next to the exe with 1 answers "mounted".
++    // Read once, then remembered.
++    static const bool flag_read_ok = [] {
++        std::error_code ec;
++        const auto path = Common::FS::GetExeDirectory() / "hdrumble_ounce_mounted.txt";
++        std::ifstream file(path);
++        int value = 0;
++        const bool opened = file.is_open() && std::filesystem::is_regular_file(path, ec);
++        if (opened) {
++            file >> value;
++        }
++        return opened && value == 1;
++    }();
++    static std::atomic<bool> logged{false};
++    if (!logged.exchange(true)) {
++        LOG_INFO(Service_HID, "Vibration 220 IsOunceVibrationDeviceMounted returns {} (flag file {})",
++                 flag_read_ok ? 1 : 0, flag_read_ok ? "found with 1" : "missing or not 1");
++    }
++    *out = flag_read_ok ? 1 : 0;
+     R_SUCCEED();
+ }
+ 
+diff --git a/src/core/hle/service/hid/hid_server.h b/src/core/hle/service/hid/hid_server.h
+index 9bb62fabc4..0bd4cf951a 100644
+--- a/src/core/hle/service/hid/hid_server.h
++++ b/src/core/hle/service/hid/hid_server.h
+@@ -192,15 +192,17 @@ private:
+     // Switch 2 sends vibration every frame with 214: pointer buffers of device handles and values
+     // like 206, but the aruid is raw data after an unknown u64 instead of a sent process id.
+     Result SendNx2VibrationValues(
+-        u64 unknown, AppletResourceUserId aruid,
++        u64 mode, AppletResourceUserId aruid,
+         InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
+         InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values);
+-    // 213 (32 bytes, aruid): sent per controller every frame by Kirby Air Riders (tens of
+-    // thousands of auto stub log lines a run); no reply data. Accepted and dropped.
+-    Result Unknown213();
+-    // 220 (16 bytes, aruid): replies one byte (meaning unknown); answer 0 instead of leaving it to
+-    // the message buffer's leftovers.
+-    Result Unknown220(Out<u8> out);
++    // 213 (32 bytes, aruid): sent per controller every frame by Kirby Air Riders. Guessed layout:
++    // handle 4, mode 4, value 16, aruid 8. Forwarded like 201 and never fails.
++    Result SendVibrationValueInMode(Core::HID::VibrationDeviceHandle vibration_device_handle,
++                                    u32 mode, Core::HID::VibrationValue vibration_value,
++                                    ClientAppletResourceUserId aruid);
++    // 220 (16 bytes, aruid): replies one byte. 0 unless hdrumble_ounce_mounted.txt next to the exe
++    // holds 1 (B010 test flag).
++    Result IsOunceVibrationDeviceMounted(Out<u8> out);
+     Result ActivateConsoleSixAxisSensor(ClientAppletResourceUserId aruid);
+     Result StartConsoleSixAxisSensor(Core::HID::ConsoleSixAxisSensorHandle console_sixaxis_handle,
+                                      ClientAppletResourceUserId aruid);
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index e042273e47..4e8ff01efa 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -156,18 +156,12 @@ static bool SDLEventWatcher(void* user_data, SDL_Event* event) {
+ 
+ class SDLJoystick {
+ public:
+-    SDLJoystick(Common::UUID guid_, int port_, SDL_Joystick* joystick,
+-                                SDL_Gamepad* game_controller)
+-                : guid{guid_}, port{port_}, sdl_joystick{joystick, &SDL_CloseJoystick},
+-                    sdl_controller{game_controller, &SDL_CloseGamepad} {
+-        EnableMotion();
+-        if (sdl_joystick) {
+-            InitRenHDrum();
+-        }
+-    }
++    SDLJoystick(Common::UUID guid_, int port_)
++        : guid{guid_}, port{port_}, sdl_joystick{nullptr, &SDL_CloseJoystick},
++          sdl_controller{nullptr, &SDL_CloseGamepad} {}
+ 
+     ~SDLJoystick() {
+-        CleanupRenHDrum();
++        Detach();
+     }
+ 
+     void EnableMotion() {
+@@ -412,14 +406,33 @@ public:
+         }
+     }
+ 
+-    void SetSDLJoystick(SDL_Joystick* joystick, SDL_Gamepad* controller) {
++    void Attach(SDL_Joystick* joystick, SDL_Gamepad* controller) {
++        {
++            std::scoped_lock lock{pending_vibration_mutex};
++            pending_vibration.reset();
++        }
++        {
++            renhdrum_set_nx2_mode(Settings::values.nx2_active_mode.load(std::memory_order_relaxed));
++            std::scoped_lock lock{renhdrum_mutex};
++            CleanupRenHDrum();
++            sdl_joystick.reset(joystick);
++            sdl_controller.reset(controller);
++            if (sdl_joystick) {
++                InitRenHDrum();
++            }
++        }
++        EnableMotion();
++    }
++
++    void Detach() {
++        {
++            std::scoped_lock lock{pending_vibration_mutex};
++            pending_vibration.reset();
++        }
+         std::scoped_lock lock{renhdrum_mutex};
+         CleanupRenHDrum();
+-        sdl_joystick.reset(joystick);
+-        sdl_controller.reset(controller);
+-        if (sdl_joystick) {
+-            InitRenHDrum();
+-        }
++        sdl_joystick.reset();
++        sdl_controller.reset();
+     }
+ 
+     bool IsJoyconLeft() const {
+@@ -695,6 +708,15 @@ private:
+                 pad_name = "Xbox One Controller";
+                 PublishPad({pad_name, false, is_bluetooth, "Xbox rumble", false});
+             }
++        } else if (vid != 0) {
++            const char* sdl_name = SDL_GetJoystickName(sdl_joystick.get());
++            pad_name = (sdl_name && *sdl_name) ? sdl_name : "Controller";
++            const bool is_bluetooth =
++                (SDL_GetJoystickConnectionState(sdl_joystick.get()) == SDL_JOYSTICK_CONNECTION_WIRELESS);
++            LOG_INFO(Input,
++                     "RenHDrum: controller {:04X}:{:04X} ({}) is not supported for HD Rumble, using standard rumble",
++                     vid, pid, pad_name);
++            PublishPad({pad_name, false, is_bluetooth, "unsupported", false});
+         }
+     }
+ 
+@@ -705,7 +727,7 @@ private:
+         RenHdcConfig config{};
+         config.enable_hd_rumble = true;
+         config.hd_rumble_usb_interval_ms = 15;
+-        config.hd_rumble_bluetooth_level = 3;
++        config.hd_rumble_bluetooth_level = 2;
+         config.hd_rumble_usb_auto_slow = true;
+         config.hd_rumble_experimental_usb_no_queue = true;
+         config.hd_rumble_experimental_envelope_5ms = true;
+@@ -713,7 +735,7 @@ private:
+         config.hd_rumble_experimental_frequency_both_bands = true;
+         config.hd_rumble_experimental_crisp_notes = true;
+         config.hd_rumble_experimental_bt_after_input = true;
+-        config.hd_rumble_experimental_bt_fast = true;
++        config.hd_rumble_experimental_bt_fast = false;
+         config.hd_rumble_experimental_bt_crisp_notes = true;
+ 
+         RenHdcSettings settings{};
+@@ -989,6 +1011,7 @@ private:
+                 SDL_SendJoystickEffect(sdl_joystick.get(), stop_pkt, sizeof(stop_pkt));
+                 // A re-applied setting may want other SDL write modes (or none, when HD Rumble is off)
+                 SDL_HDRumbleSetNoQueue(sdl_joystick.get(), 0, 0, 0);
++                SDL_HDRumbleSetNoQueueBluetooth(sdl_joystick.get(), 0, 0);
+                 SDL_HDRumbleSetBluetoothAfterInput(sdl_joystick.get(), 0);
+             }
+             renhdrum_engine_destroy(renhdrum_engine);
+@@ -1052,15 +1075,15 @@ std::shared_ptr<SDLJoystick> SDLDriver::GetSDLJoystickByGUID(const Common::UUID&
+ 
+     if (it != joystick_map.end()) {
+         while (it->second.size() <= static_cast<std::size_t>(port)) {
+-            auto joystick = std::make_shared<SDLJoystick>(guid, static_cast<int>(it->second.size()),
+-                                                          nullptr, nullptr);
++            auto joystick =
++                std::make_shared<SDLJoystick>(guid, static_cast<int>(it->second.size()));
+             it->second.emplace_back(std::move(joystick));
+         }
+ 
+         return it->second[static_cast<std::size_t>(port)];
+     }
+ 
+-    auto joystick = std::make_shared<SDLJoystick>(guid, 0, nullptr, nullptr);
++    auto joystick = std::make_shared<SDLJoystick>(guid, 0);
+ 
+     return joystick_map[guid].emplace_back(std::move(joystick));
+ }
+@@ -1163,52 +1186,66 @@ void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
+         }
+     }
+ 
+-    std::scoped_lock lock{joystick_map_mutex};
+-    if (joystick_map.find(guid) == joystick_map.end()) {
+-        auto joystick = std::make_shared<SDLJoystick>(guid, 0, sdl_joystick, sdl_gamecontroller);
+-        PreSetController(joystick->GetPadIdentifier());
+-        joystick->EnableMotion();
+-        SetBattery(joystick->GetPadIdentifier(),
+-                   joystick->GetBatteryLevel(battery_state, battery_percent));
+-        joystick_map[guid].emplace_back(std::move(joystick));
+-        return;
++    std::shared_ptr<SDLJoystick> target;
++    {
++        std::scoped_lock lock{joystick_map_mutex};
++        if (joystick_map.find(guid) == joystick_map.end()) {
++            target = std::make_shared<SDLJoystick>(guid, 0);
++            PreSetController(target->GetPadIdentifier());
++            SetBattery(target->GetPadIdentifier(),
++                       target->GetBatteryLevel(battery_state, battery_percent));
++            joystick_map[guid].emplace_back(target);
++        } else {
++            auto& joystick_guid_list = joystick_map[guid];
++            const auto joystick_it =
++                std::find_if(joystick_guid_list.begin(), joystick_guid_list.end(),
++                             [](const auto& joystick) { return !joystick->GetSDLJoystick(); });
++
++            if (joystick_it != joystick_guid_list.end()) {
++                target = *joystick_it;
++            } else {
++                const int port = static_cast<int>(joystick_guid_list.size());
++                target = std::make_shared<SDLJoystick>(guid, port);
++                PreSetController(target->GetPadIdentifier());
++                joystick_guid_list.emplace_back(target);
++            }
++            SetBattery(target->GetPadIdentifier(),
++                       target->GetBatteryLevel(battery_state, battery_percent));
++        }
+     }
+ 
+-    auto& joystick_guid_list = joystick_map[guid];
+-    const auto joystick_it =
+-        std::find_if(joystick_guid_list.begin(), joystick_guid_list.end(),
+-                     [](const auto& joystick) { return !joystick->GetSDLJoystick(); });
+-
+-    if (joystick_it != joystick_guid_list.end()) {
+-        (*joystick_it)->SetSDLJoystick(sdl_joystick, sdl_gamecontroller);
+-        (*joystick_it)->EnableMotion();
+-        SetBattery((*joystick_it)->GetPadIdentifier(),
+-                   (*joystick_it)->GetBatteryLevel(battery_state, battery_percent));
+-        return;
++    if (target) {
++        target->Attach(sdl_joystick, sdl_gamecontroller);
+     }
+-
+-    const int port = static_cast<int>(joystick_guid_list.size());
+-    auto joystick = std::make_shared<SDLJoystick>(guid, port, sdl_joystick, sdl_gamecontroller);
+-    PreSetController(joystick->GetPadIdentifier());
+-    joystick->EnableMotion();
+-    SetBattery(joystick->GetPadIdentifier(),
+-               joystick->GetBatteryLevel(battery_state, battery_percent));
+-    joystick_guid_list.emplace_back(std::move(joystick));
+ }
+ 
+ void SDLDriver::CloseJoystick(SDL_Joystick* sdl_joystick) {
++    if (!sdl_joystick) {
++        return;
++    }
++
+     const auto guid = GetGUID(sdl_joystick);
+ 
+-    std::scoped_lock lock{joystick_map_mutex};
+-    // This call to guid is safe since the joystick is guaranteed to be in the map
+-    const auto& joystick_guid_list = joystick_map[guid];
+-    const auto joystick_it = std::find_if(joystick_guid_list.begin(), joystick_guid_list.end(),
+-                                          [&sdl_joystick](const auto& joystick) {
+-                                              return joystick->GetSDLJoystick() == sdl_joystick;
+-                                          });
++    std::shared_ptr<SDLJoystick> target;
++    {
++        std::scoped_lock lock{joystick_map_mutex};
++        const auto map_it = joystick_map.find(guid);
++        if (map_it != joystick_map.end()) {
++            const auto& joystick_guid_list = map_it->second;
++            const auto joystick_it =
++                std::find_if(joystick_guid_list.begin(), joystick_guid_list.end(),
++                             [&sdl_joystick](const auto& joystick) {
++                                 return joystick->GetSDLJoystick() == sdl_joystick;
++                             });
++
++            if (joystick_it != joystick_guid_list.end()) {
++                target = *joystick_it;
++            }
++        }
++    }
+ 
+-    if (joystick_it != joystick_guid_list.end()) {
+-        (*joystick_it)->SetSDLJoystick(nullptr, nullptr);
++    if (target) {
++        target->Detach();
+     }
+ }
+ 
+@@ -1317,8 +1354,12 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
+ }
+ 
+ void SDLDriver::CloseJoysticks() {
+-    std::scoped_lock lock{joystick_map_mutex};
+-    joystick_map.clear();
++    decltype(joystick_map) closing;
++    {
++        std::scoped_lock lock{joystick_map_mutex};
++        closing.swap(joystick_map);
++    }
++    closing.clear();
+ }
+ 
+ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_engine_)) {
+@@ -1606,6 +1647,12 @@ Common::ParamPackage SDLDriver::BuildParamPackageForAnalog(PadIdentifier identif
+     params.Set("guid", identifier.guid.RawString());
+     params.Set("axis_x", axis_x);
+     params.Set("axis_y", axis_y);
++    if (std::abs(offset_x) > 0.5f) {
++        offset_x = 0.0f;
++    }
++    if (std::abs(offset_y) > 0.5f) {
++        offset_y = 0.0f;
++    }
+     params.Set("offset_x", offset_x);
+     params.Set("offset_y", offset_y);
+     params.Set("invert_x", "+");
+diff --git a/src/input_common/input_poller.cpp b/src/input_common/input_poller.cpp
+index 188e862d7f..53dfb585d4 100644
+--- a/src/input_common/input_poller.cpp
++++ b/src/input_common/input_poller.cpp
+@@ -921,11 +921,19 @@ std::unique_ptr<Common::Input::InputDevice> InputFactory::CreateStickDevice(
+     };
+ 
+     const auto axis_x = params.Get("axis_x", 0);
++    float offset_x = params.Get("offset_x", 0.0f);
++    float offset_y = params.Get("offset_y", 0.0f);
++    if (std::abs(offset_x) > 0.5f) {
++        offset_x = 0.0f;
++    }
++    if (std::abs(offset_y) > 0.5f) {
++        offset_y = 0.0f;
++    }
+     const Common::Input::AnalogProperties properties_x = {
+         .deadzone = deadzone,
+         .range = range,
+         .threshold = threshold,
+-        .offset = std::clamp(params.Get("offset_x", 0.0f), -1.0f, 1.0f),
++        .offset = std::clamp(offset_x, -1.0f, 1.0f),
+         .inverted = params.Get("invert_x", "+") == "-",
+     };
+ 
+@@ -934,7 +942,7 @@ std::unique_ptr<Common::Input::InputDevice> InputFactory::CreateStickDevice(
+         .deadzone = deadzone,
+         .range = range,
+         .threshold = threshold,
+-        .offset = std::clamp(params.Get("offset_y", 0.0f), -1.0f, 1.0f),
++        .offset = std::clamp(offset_y, -1.0f, 1.0f),
+         .inverted = params.Get("invert_y", "+") != "+",
+     };
+     input_engine->PreSetController(identifier);
+@@ -1080,11 +1088,19 @@ std::unique_ptr<Common::Input::InputDevice> InputFactory::CreateMotionDevice(
+     const auto threshold = std::clamp(params.Get("threshold", 0.5f), 0.0f, 1.0f);
+ 
+     const auto axis_x = params.Get("axis_x", 0);
++    float offset_x = params.Get("offset_x", 0.0f);
++    float offset_y = params.Get("offset_y", 0.0f);
++    if (std::abs(offset_x) > 0.5f) {
++        offset_x = 0.0f;
++    }
++    if (std::abs(offset_y) > 0.5f) {
++        offset_y = 0.0f;
++    }
+     const Common::Input::AnalogProperties properties_x = {
+         .deadzone = deadzone,
+         .range = range,
+         .threshold = threshold,
+-        .offset = std::clamp(params.Get("offset_x", 0.0f), -1.0f, 1.0f),
++        .offset = std::clamp(offset_x, -1.0f, 1.0f),
+         .inverted = params.Get("invert_x", "+") == "-",
+     };
+ 
+@@ -1093,7 +1109,7 @@ std::unique_ptr<Common::Input::InputDevice> InputFactory::CreateMotionDevice(
+         .deadzone = deadzone,
+         .range = range,
+         .threshold = threshold,
+-        .offset = std::clamp(params.Get("offset_y", 0.0f), -1.0f, 1.0f),
++        .offset = std::clamp(offset_y, -1.0f, 1.0f),
+         .inverted = params.Get("invert_y", "+") != "+",
+     };
+ 
+-- 
+2.47.0

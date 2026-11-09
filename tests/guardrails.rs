@@ -8,6 +8,7 @@ use renhdrum::dualsense::{
     DUALSENSE_SAMPLE_RATE, DUALSENSE_SMOOTHING_MS,
 };
 use renhdrum::encoding::standard::{HD_AMP_THRESHOLDS, HD_BT_LEVELS};
+use renhdrum::settings::RumbleConfigController;
 use renhdrum::HdAmFmPlanner;
 
 #[test]
@@ -63,4 +64,13 @@ fn dualsense_constants_unchanged() {
     assert_eq!(DUALSENSE_SAMPLE_RATE, 48000);
     assert_eq!(DUALSENSE_BUFFER_FRAMES, 256);
     assert_eq!(DUALSENSE_SMOOTHING_MS, 4.0);
+}
+
+#[test]
+fn default_hd_rumble_settings_guardrails() {
+    assert_eq!(
+        RumbleConfigController::STANDARD_HD_RUMBLE_BLUETOOTH_LEVEL,
+        2
+    );
+    assert!(!RumbleConfigController::default().hd_rumble_experimental_bt_fast);
 }

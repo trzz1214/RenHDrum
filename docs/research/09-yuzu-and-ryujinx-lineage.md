@@ -1,7 +1,7 @@
 # Monograph 09: Two Ancestors — yuzu, Ryujinx and Their Forks
 
 > [!NOTE]
-> **Status: source-checked survey.** Every claim below was checked against either upstream/primary sources or public reference repositories (Eden, Ryujinx 1.1.1403, Ryubing). Claims we could not source were left out. Where the evidence only supports a mechanism, we state the mechanism and no performance figure. HTML comments at the end of each line are internal trace tags (`V` = verification table row, `R` = project fact) used by reviewers; they do not render.
+> **Status: source-checked survey.** Every claim below was checked against either upstream/primary sources or public reference repositories (Eden, Ryujinx 1.1.1403, Ryubing). Claims I could not source were left out. Where the evidence only supports a mechanism, I state the mechanism and no performance figure. HTML comments at the end of each line are internal trace tags (`V` = verification table row, `R` = project fact) used by reviewers; they do not render.
 
 The two best-known Nintendo Switch emulators of the last decade took different roads. This monograph surveys them as software engineering projects, analyzing their architectures, CPU translation approaches, and profile-guided optimization mechanisms.
 
@@ -23,7 +23,7 @@ The emphasis row describes each project's *stated* direction and how the communi
 
 ### 1.1 Continuations (as of 10/2026)
 
-| Lineage | Fork | What we can verify |
+| Lineage | Fork | What can be verified |
 |---|---|---|
 | yuzu | Suyu | Stopped at v0.0.3 <!-- V5.6 --> |
 | yuzu | Sudachi | A yuzu fork; its developer later recommended Eden and stopped development <!-- review 056: androidauthority.com/sudachi-ends-development-3590776 --> |
@@ -60,15 +60,15 @@ The MSVC mechanism is `/GENPROFILE` followed by `/USEPROFILE` (Microsoft Learn);
 - **Eden** distributes PGO packages (WinGet `Utopia.Eden.MinGW-PGO`, a Fedora COPR RPM, and releases v0.0.4, v0.2.0, v0.2.1). <!-- V1.1 -->
   Its Windows PGO build uses Clang/MinGW, while MSVC is the default stable build. <!-- V1.2 -->
   Profiles are collected from earlier runs to find hot spots; no public game script exists. <!-- V1.3 -->
-  Release posts quote different speed-ups from one release to the next, and we have not reproduced any of them, so we give no figure here. <!-- V1.4, review 056: figures differ between sources --> 
+  Release posts quote different speed-ups from one release to the next, and I have not reproduced any of them, so I give no figure here. <!-- V1.4, review 056: figures differ between sources --> 
 - **Citron** offers *optional* PGO scripts (`pgo-build.ps1`, `build-citron-linux.sh`) rather than automated CI builds; it uses Clang, collects profiles with `pgo-build.ps1 generate`. <!-- V1.5, V1.6 -->
-- **Sudachi:** we found no official PGO build. <!-- V1.7 -->
+- **Sudachi:** I found no official PGO build. <!-- V1.7 -->
 - **yuzu:** no official PGO release; community members experimented on Steam Deck. <!-- V1.8 -->
 
 **Why Ryujinx forks ship no separate PGO download.** .NET 8 and later enable Dynamic PGO together with tiered compilation by default: tier 0 gathers measurements, tier 1 re-optimizes hot code. <!-- V2.1 -->
 Ryujinx project files enable `<TieredPGO>true</TieredPGO>` in `src/Ryujinx/Ryujinx.csproj` (e.g. line 11 in Ryujinx 1.1.1403, line 10 in Ryubing); an older release (1.1.54) had tiered compilation turned off. <!-- V2.2 -->
 Official Ryujinx build configurations do not enable Native AOT, and ReadyToRun is not enabled in standard publish configurations (`PublishSingleFile=true`). <!-- V2.3, V2.4 -->
-Our reading, not a project statement: because the runtime tunes hot code while the program runs, and PPTC already stores the hot translated ARM code, a static profile download adds little. <!-- V2.5 -->
+My reading, not a project statement: because the runtime tunes hot code while the program runs, and PPTC already stores the hot translated ARM code, a static profile download adds little. <!-- V2.5 -->
 
 ---
 
@@ -77,15 +77,15 @@ Our reading, not a project statement: because the runtime tunes hot code while t
 **PPTC.** Ryujinx's persistent translation cache shipped in 1.0.4709 on 16 June 2020, developed by Ricken. <!-- V4.1 -->
 It stores the translation info, code, relocation and unwind streams, compressed with Deflate at the Fastest level (`ARMeilleure/Translation/PTC/Ptc.cs`, lines 46–54). <!-- V4.2 -->
 It shortens load time and the first-run stutter; it does not raise the steady-state FPS ceiling once code is in RAM. <!-- V4.3, R4 -->
-By contrast, we found no on-disk CPU translation cache in the yuzu/Eden CPU tree; what exists is a disk *shader* cache and an in-RAM JIT cache. <!-- V4.4 -->
+By contrast, I found no on-disk CPU translation cache in the yuzu/Eden CPU tree; what exists is a disk *shader* cache and an in-RAM JIT cache. <!-- V4.4 -->
 
-**Ahead-of-time (AOT) translation.** Compiling the guest code ahead of time and linking it into an emulator did not beat dynarmic's JIT on x86-64 in the measurements we have: mk8-recomp reached 56.1–59.8 FPS against 60 FPS under the JIT, and its first build ran at 23.7 FPS. <!-- R3 -->
+**Ahead-of-time (AOT) translation.** Compiling the guest code ahead of time and linking it into an emulator did not beat dynarmic's JIT on x86-64 in the measurements I have: mk8-recomp reached 56.1–59.8 FPS against 60 FPS under the JIT, and its first build ran at 23.7 FPS. <!-- R3 -->
 
 **The 2026 recompilation wave.** Today's recompilation projects translate AArch64 to C statically, compile on the player's machine, map NVN directly to Vulkan and use a reduced HLE OS. <!-- R6 -->
 Ryujinx code lives on there: its Shader Translator (MIT) is used by several recompilation projects (for example MacNativeGames and AC-Recomp), and LASRecomp ports the audio renderer from Ryujinx. <!-- R5 -->
 
 **Is PPTC the ancestor of recompilation?** The evidence supports only a difference of method. PPTC is dynamic translation whose results are saved and which still runs inside the emulator; recompilation translates everything ahead of time and runs outside the emulator. <!-- R6 -->
-Both reuse a translated result instead of retranslating, but we found no source stating that one influenced the other, so we draw no lineage conclusion. <!-- R6, V4.3 -->
+Both reuse a translated result instead of retranslating, but I found no source stating that one influenced the other, so I draw no lineage conclusion. <!-- R6, V4.3 -->
 
 ---
 

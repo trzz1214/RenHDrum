@@ -15,7 +15,7 @@ use crate::preset::{HdRumblePreset, HdRumblePresetKind};
 use crate::settings::{HdRumbleSettings, RumbleConfigController};
 use crate::xbox::{XboxRumbleMapper, XboxRumbleTuning};
 
-pub const RENHDRUM_VERSION: u32 = 0x000201; // 0.2.1
+pub const RENHDRUM_VERSION: u32 = 0x000300; // 0.3.0
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
@@ -680,6 +680,25 @@ pub unsafe extern "C" fn renhdrum_crisp_shape_slot(
 
 pub struct RenHdcEngine {
     pub(crate) inner: std::sync::Mutex<NintendoHdEngine>,
+    pub(crate) trace: Option<std::sync::Mutex<crate::trace::RumbleTrace>>,
+    pub(crate) nx2_boost_left: std::sync::Mutex<crate::nx2::Nx2ProBoostState>,
+    pub(crate) nx2_boost_right: std::sync::Mutex<crate::nx2::Nx2ProBoostState>,
+}
+
+impl RenHdcEngine {
+    pub(crate) fn new_in(
+        is_bluetooth: bool,
+        is_pro_controller: bool,
+        base_dir: Option<&std::path::Path>,
+    ) -> Self {
+        let kind = if is_pro_controller { "pro" } else { "joycon" };
+        Self {
+            inner: std::sync::Mutex::new(NintendoHdEngine::new(is_bluetooth, is_pro_controller)),
+            trace: crate::trace::RumbleTrace::open_in(kind, base_dir).map(std::sync::Mutex::new),
+            nx2_boost_left: std::sync::Mutex::new(crate::nx2::Nx2ProBoostState::default()),
+            nx2_boost_right: std::sync::Mutex::new(crate::nx2::Nx2ProBoostState::default()),
+        }
+    }
 }
 
 pub struct RenHdcDualSenseDsp {
@@ -687,6 +706,19 @@ pub struct RenHdcDualSenseDsp {
     pub(crate) bt_packer: std::sync::Mutex<DualSenseBtPacker>,
     /// Crisp notes on the Bluetooth path (report 0x32), a setting apart from the wired one
     pub(crate) bt_crisp_notes: bool,
+    pub(crate) trace: Option<std::sync::Mutex<crate::trace::RumbleTrace>>,
+}
+
+impl RenHdcDualSenseDsp {
+    /// Its set_target doors carry no timestamp, so trace lines use time since the trace opened.
+    fn trace_half(&self, is_right: bool, al: f32, fl: f32, ah: f32, fh: f32) {
+        if let Some(trace) = &self.trace {
+            if let Ok(mut t) = trace.lock() {
+                let now = t.elapsed_us();
+                t.log_sample(now, is_right, al, fl, ah, fh);
+            }
+        }
+    }
 }
 
 #[no_mangle]
@@ -695,9 +727,11 @@ pub extern "C" fn renhdrum_engine_create(
     is_pro_controller: bool,
 ) -> *mut RenHdcEngine {
     crate::ipc::note_controller(is_bluetooth, is_pro_controller);
-    Box::into_raw(Box::new(RenHdcEngine {
-        inner: std::sync::Mutex::new(NintendoHdEngine::new(is_bluetooth, is_pro_controller)),
-    }))
+    Box::into_raw(Box::new(RenHdcEngine::new_in(
+        is_bluetooth,
+        is_pro_controller,
+        None,
+    )))
 }
 
 #[no_mangle]
@@ -728,22 +762,39 @@ pub unsafe extern "C" fn renhdrum_engine_apply_settings(
 pub unsafe extern "C" fn renhdrum_engine_push_sample(
     engine: *mut RenHdcEngine,
     now_us: i64,
-    left_al: f32,
+    mut left_al: f32,
     left_fl: f32,
-    left_ah: f32,
+    mut left_ah: f32,
     left_fh: f32,
-    right_al: f32,
+    mut right_al: f32,
     right_fl: f32,
-    right_ah: f32,
+    mut right_ah: f32,
     right_fh: f32,
 ) -> i32 {
     if engine.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
     }
+    let u_now = now_us.max(0) as u64;
+    if let Ok(mut b) = (*engine).nx2_boost_left.lock() {
+        let (al, ah) = b.apply_pro_nx2(left_al, left_fl, left_ah, left_fh, u_now);
+        left_al = al;
+        left_ah = ah;
+    }
+    if let Ok(mut b) = (*engine).nx2_boost_right.lock() {
+        let (al, ah) = b.apply_pro_nx2(right_al, right_fl, right_ah, right_fh, u_now);
+        right_al = al;
+        right_ah = ah;
+    }
     if let Ok(mut guard) = (*engine).inner.lock() {
         guard.push_sample(
             now_us, left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
         );
+        if let Some(trace) = &(*engine).trace {
+            if let Ok(mut t) = trace.lock() {
+                t.log_sample(now_us, false, left_al, left_fl, left_ah, left_fh);
+                t.log_sample(now_us, true, right_al, right_fl, right_ah, right_fh);
+            }
+        }
         RENHDRUM_OK
     } else {
         RENHDRUM_ERR_INVALID_ARG
@@ -755,17 +806,33 @@ pub unsafe extern "C" fn renhdrum_engine_push_half_sample(
     engine: *mut RenHdcEngine,
     now_us: i64,
     is_right: bool,
-    al: f32,
+    mut al: f32,
     fl: f32,
-    ah: f32,
+    mut ah: f32,
     fh: f32,
 ) -> i32 {
     if engine.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
     }
+    let u_now = now_us.max(0) as u64;
+    let boost_lock = if is_right {
+        (*engine).nx2_boost_right.lock()
+    } else {
+        (*engine).nx2_boost_left.lock()
+    };
+    if let Ok(mut b) = boost_lock {
+        let (out_al, out_ah) = b.apply_pro_nx2(al, fl, ah, fh, u_now);
+        al = out_al;
+        ah = out_ah;
+    }
     if let Ok(mut guard) = (*engine).inner.lock() {
         guard.push_half_sample(now_us, is_right, al, fl, ah, fh);
-        crate::ipc::note_sample(now_us.max(0) as u64, al, fl, ah, fh);
+        if let Some(trace) = &(*engine).trace {
+            if let Ok(mut t) = trace.lock() {
+                t.log_sample(now_us, is_right, al, fl, ah, fh);
+            }
+        }
+        crate::ipc::note_sample(u_now, al, fl, ah, fh);
         RENHDRUM_OK
     } else {
         RENHDRUM_ERR_INVALID_ARG
@@ -817,6 +884,7 @@ pub extern "C" fn renhdrum_dualsense_dsp_create(
         inner: std::sync::Mutex::new(DualSenseHapticsDsp::new(vol, crisp)),
         bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
         bt_crisp_notes: bt_crisp,
+        trace: crate::trace::RumbleTrace::open_in("dualsense", None).map(std::sync::Mutex::new),
     }))
 }
 
@@ -830,22 +898,31 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_destroy(dsp: *mut RenHdcDualSens
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_target(
     dsp: *mut RenHdcDualSenseDsp,
-    left_al: f32,
+    mut left_al: f32,
     left_fl: f32,
-    left_ah: f32,
+    mut left_ah: f32,
     left_fh: f32,
-    right_al: f32,
+    mut right_al: f32,
     right_fl: f32,
-    right_ah: f32,
+    mut right_ah: f32,
     right_fh: f32,
 ) -> i32 {
     if dsp.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
     }
+    let (l_al, l_ah) = crate::nx2::apply_dualsense_nx2(left_al, left_ah);
+    left_al = l_al;
+    left_ah = l_ah;
+    let (r_al, r_ah) = crate::nx2::apply_dualsense_nx2(right_al, right_ah);
+    right_al = r_al;
+    right_ah = r_ah;
+
     if let Ok(mut guard) = (*dsp).inner.lock() {
         guard.set_target(
             left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
         );
+        (*dsp).trace_half(false, left_al, left_fl, left_ah, left_fh);
+        (*dsp).trace_half(true, right_al, right_fl, right_ah, right_fh);
         RENHDRUM_OK
     } else {
         RENHDRUM_ERR_INVALID_ARG
@@ -856,20 +933,30 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_target(
 pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_half_target(
     dsp: *mut RenHdcDualSenseDsp,
     is_right: bool,
-    al: f32,
+    mut al: f32,
     fl: f32,
-    ah: f32,
+    mut ah: f32,
     fh: f32,
 ) -> i32 {
     if dsp.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
     }
+    let (out_al, out_ah) = crate::nx2::apply_dualsense_nx2(al, ah);
+    al = out_al;
+    ah = out_ah;
+
     if let Ok(mut guard) = (*dsp).inner.lock() {
         guard.set_half_target(is_right, al, fl, ah, fh);
+        (*dsp).trace_half(is_right, al, fl, ah, fh);
         RENHDRUM_OK
     } else {
         RENHDRUM_ERR_INVALID_ARG
     }
+}
+
+#[no_mangle]
+pub extern "C" fn renhdrum_set_nx2_mode(mode: i32) {
+    crate::nx2::set_nx2_mode(mode);
 }
 
 pub struct RenHdcXboxRumble {
@@ -1042,7 +1129,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000201);
+        assert_eq!(renhdrum_version(), 0x000300);
     }
 
     #[test]
@@ -1336,5 +1423,90 @@ mod tests {
                 RENHDRUM_ERR_NULL_PTR
             );
         }
+    }
+
+    fn trace_csvs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "csv"))
+            .collect()
+    }
+
+    #[test]
+    fn pro_engine_trace_writes_k_and_g_lines() {
+        let _nx2_guard = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::nx2::set_nx2_mode(0);
+        let dir = std::env::temp_dir().join(format!("pro-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::trace::TRACE_FLAG_FILE), "1").unwrap();
+        {
+            let mut engine = RenHdcEngine::new_in(false, true, Some(&dir));
+            unsafe {
+                assert_eq!(
+                    renhdrum_engine_push_half_sample(
+                        &mut engine,
+                        2_000,
+                        true,
+                        0.25,
+                        160.0,
+                        0.5,
+                        320.0
+                    ),
+                    RENHDRUM_OK
+                );
+            }
+        }
+        let csvs = trace_csvs(&dir);
+        assert_eq!(csvs.len(), 1);
+        let name = csvs[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("hdrumble_trace-pro-"), "{name}");
+        let csv = std::fs::read_to_string(&csvs[0]).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines, ["K,pro", "G,2000,R,0.25,160,0.5,320"]);
+    }
+
+    #[test]
+    fn dualsense_trace_uses_legacy_flag_and_writes_two_lines_per_target() {
+        let _nx2_guard = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::nx2::set_nx2_mode(0);
+        let dir = std::env::temp_dir().join(format!("ds-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::trace::TRACE_FLAG_FILE_LEGACY), "1").unwrap();
+        {
+            let trace = crate::trace::RumbleTrace::open_in("dualsense", Some(&dir))
+                .map(std::sync::Mutex::new);
+            let dsp = RenHdcDualSenseDsp {
+                inner: std::sync::Mutex::new(DualSenseHapticsDsp::new(100, false)),
+                bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
+                bt_crisp_notes: false,
+                trace,
+            };
+            let ptr = &dsp as *const RenHdcDualSenseDsp as *mut RenHdcDualSenseDsp;
+            unsafe {
+                assert_eq!(
+                    renhdrum_dualsense_dsp_set_target(
+                        ptr, 0.1, 160.0, 0.2, 320.0, 0.3, 170.0, 0.4, 330.0
+                    ),
+                    RENHDRUM_OK
+                );
+            }
+        }
+        let csvs = trace_csvs(&dir);
+        assert_eq!(csvs.len(), 1);
+        let csv = std::fs::read_to_string(&csvs[0]).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "K,dualsense");
+        assert!(lines[1].ends_with(",L,0.1,160,0.2,320"), "{}", lines[1]);
+        assert!(lines[2].ends_with(",R,0.3,170,0.4,330"), "{}", lines[2]);
     }
 }

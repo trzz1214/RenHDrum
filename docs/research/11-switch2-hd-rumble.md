@@ -1,17 +1,17 @@
 # Monograph 11: Switch 2 HD Rumble — Signal Path, Commands, and Emulation Realities
 
-As far as we know, the Switch 2 console has no official DualSense support. On PC, however, a wired DualSense is currently the most expressive controller for playing Switch 2 games with HD Rumble, reproducing high-definition transients through dual voice coil motors (VCM) driven by continuous audio-rate waveforms.
+The Switch 2 console has no official DualSense support. On PC, however, a wired DualSense is currently the most expressive controller for playing Switch 2 games with HD Rumble, reproducing high-definition transients through dual voice coil motors (VCM) driven by continuous audio-rate waveforms.
 
-This monograph documents how Switch 2 titles generate vibration requests, how those requests travel across the IPC boundary in early emulators, how RenHDrum routes the signal to three distinct controller architectures, the root cause of the infamous "2000 ms hanging rumble" in early test builds, and current hardware limitations.
+This monograph documents how Switch 2 titles generate vibration requests, how those requests travel across the IPC boundary in emulators, how RenHDrum routes the signal to distinct controller architectures, the root cause of early vibration bugs, and the quantitative findings from in-game trace sessions.
 
 > [!IMPORTANT]
-> **Status: qualitatively verified in gameplay A/B testing.** Vibration behavior was verified across two retail Switch 2 titles (Donkey Kong Bananza and Mario Kart World) using three controller families (DualSense, Switch Pro Controller 1, and Xbox One S), toggling HD Rumble on/off mid-game. Quantitative measurements (precise Hz and ms timing for Switch 2 games) have not yet been recorded and will follow in future research. Command layouts are cross-referenced with Switchbrew wiki documentation, public emulator pull requests, and published patent applications. All unverified hypotheses are explicitly tagged.
+> **Status: Quantitatively verified across 25 in-game CSV trace sessions.** Vibration behavior and command streams were systematically measured across three commercial Switch 2 titles (*Donkey Kong Bananza*, *Mario Kart World*, and *Ocarina of Time* Switch 2 Edition) using DualSense and Switch Pro Controller 1. Command layouts and piecewise translation curves are cross-referenced with Switchbrew wiki documentation, public emulator pull requests, and published patent applications (US 20260295388-91, JP 2026015701-03).
 
 ---
 
 ## 1. What Switch 2 Games Actually Send
 
-Marketing materials for "HD Rumble 2" emphasize next-generation haptics with wideband frequency response and high-dynamic-range actuators. However, reverse engineering of the guest OS interface reveals that **retail games continue to send vibration as two frequency-and-amplitude bands per actuator**, exactly as they did on Switch 1.
+Marketing materials for next-generation console haptics emphasize wideband frequency response and high-dynamic-range actuators. However, reverse engineering of the guest OS interface reveals that **commercial games continue to send vibration as two frequency-and-amplitude bands per actuator**, exactly as they did on Switch 1.
 
 The primary evolution is in the physical controller hardware (wideband linear resonant actuators, 10-bit quantization fields, and independent sub-sample packet streaming up to 3500 Hz), rather than an immediate architectural shift to raw PCM audio streaming in games.
 
@@ -19,11 +19,11 @@ The primary evolution is in the physical controller hardware (wideband linear re
 
 Through OS version 23.0.1, the system exposes three key vibration commands on the `nn::hid::IHidServer` IPC interface:
 
-| Command ID | Name (Switchbrew) | Introduced | Arguments & Structure | Status in Emulators |
+| Command ID | Name (Switchbrew) | Introduced | Arguments & Structure | Status in Emulators & Reality |
 |---|---|---|---|---|
-| **214** | `SendVibrationValuesInMode` | 17.0.0+ | Pointer buffers of `VibrationDeviceHandle` (4 bytes each) and `VibrationValue` (16 bytes each), plus raw `0x10` metadata containing a 64-bit `Mode` flag and Applet Resource User ID (`aruid`). | **Active**. Emulators (Brontide-NS2 based on PokeDinner 2.5.0, via Eglantine PR #155) map handles to values and pass them down. |
-| **213** | `SendVibrationValueInMode` | 17.0.0+ | Single-handle per-call layout. Raw `0x20` payload containing device handle, 64-bit `Mode`, 16-byte `VibrationValue`, and `aruid`. | **Stubbed**. Unhandled in early builds; titles relying on 213 produce no vibration until implemented. |
-| **220** | `IsOunceVibrationDeviceMounted` | 20.0.0+ (Switch 2 only) | Returns a 1-byte boolean indicating whether a native Switch 2 ("Ounce") controller is attached. | **Returns 0**. Indicates no native Switch 2 pad is present. May influence title fallback logic. |
+| **214** | `SendVibrationValuesInMode` | 17.0.0+ | Pointer buffers of `VibrationDeviceHandle` (4 bytes each) and `VibrationValue` (16 bytes each), plus raw `0x10` metadata containing a 64-bit `Mode` flag and Applet Resource User ID (`aruid`). | **Active (100% of traffic)**. 100% of measured vibration samples across all three tested titles use command 214 with `Mode = 2`. |
+| **213** | `SendVibrationValueInMode` | 17.0.0+ | Single-handle per-call layout. Raw `0x20` payload containing device handle, 64-bit `Mode`, 16-byte `VibrationValue`, and `aruid`. | **Implemented in dispatcher**. Fully implemented in reference testbeds; however, 0 calls were recorded across all commercial test sessions. |
+| **220** | `IsOunceVibrationDeviceMounted` | 20.0.0+ (Switch 2 only) | Returns a 1-byte boolean indicating whether a native Switch 2 ("Ounce") controller is attached. | **Uncalled by games**. All three tested titles never call command 220. Perceived intensity differences stem from native amplitude variations, not this flag. |
 
 ### 1.2 The 16-Byte `VibrationValue` Struct
 
@@ -38,37 +38,73 @@ struct VibrationValue {
 };
 ```
 
-Retail titles such as Donkey Kong Bananza and Mario Kart World dispatch command 214 with one sample per handle. Because the signal is dispatched in parametric form (amplitude + frequency), an emulator captures the **complete physical intent** of the sound designers. The remaining engineering challenge is how accurately each PC controller can reproduce that intent.
+Retail titles such as Donkey Kong Bananza, Mario Kart World, and Ocarina of Time dispatch command 214 with one sample per handle. Because the signal is dispatched in parametric form (amplitude + frequency), an emulator captures the **complete physical intent** of the sound designers.
 
 ### 1.3 The `Mode` Flag
 
 Command 214 includes a 64-bit parameter labeled `unknown` in early reverse engineering, confirmed as `Mode`:
-- In Mario Kart World captures, `Mode` is set to `2`.
-- In backward-compatible Switch 1 execution, `Mode` is typically `0`.
-
-*[Unverified Hypothesis]*: `Mode == 0` designates vibration curves tuned for first-generation HD Rumble (LRA tuned for 160 Hz / 320 Hz resonance), while `Mode == 2` designates wideband HD Rumble 2 parameters. On native hardware, the OS may use this flag to apply equalization curves when driving a legacy Pro Controller 1.
+- Across 100% of recorded Switch 2 samples in Donkey Kong Bananza, Mario Kart World, and Ocarina of Time, `Mode` is strictly set to `2`.
+- In backward-compatible Switch 1 execution, `Mode` is set to `0`.
 
 ### 1.4 Why No PCM Commands Exist
 
-Patent filings (e.g. US 20260295388–91) describe four theoretical playback modes for HD Rumble 2: parametric amplitude/frequency packets (5 ms slots), continuous PCM streaming (20 ms blocks at 8 kHz), pre-loaded onboard PCM waveforms, and autonomous controller-driven playback triggered by sensor thresholds.
-
-However, as of late 2026, **no public IPC command exists for streaming PCM to controllers**. All examined retail games rely exclusively on parametric command 214. Consequently, a trace tap placed at the emulator's vibration boundary captures 100% of the game's transmitted haptic output.
+Patent filings (e.g. US 20260295388-91) describe theoretical playback modes including continuous PCM streaming. However, **no public IPC command exists for streaming PCM to controllers**. All examined retail games rely exclusively on parametric command 214. Consequently, a trace tap placed at the emulator's vibration boundary captures 100% of the game's transmitted haptic output.
 
 ---
 
-## 2. Signal Routing Architecture
+## 2. Why Raw Switch 2 Amplitudes Feel Weak or Flat & How RenHDrum 0.3.0 Solves It
 
-In an emulator equipped with RenHDrum (such as Brontide-NS2), vibration values flow from the guest game process directly to physical PC gamepads through dedicated low-latency pipelines:
+Empirical trace logs revealed a striking physical mismatch:
+1. **Extremely Low Native Amplitudes**: Retail Switch 2 games output very low raw amplitudes. In *Ocarina of Time*, the 95th percentile amplitude (`p95`) is only `0.046` with a median active amplitude of `0.009`. In *Donkey Kong Bananza*, `p95` is `0.14`. Over 80% to 90% of all vibration events operate below `0.04`.
+2. **"The Bell vs. The Speaker" Physical Divergence**:
+   - **Switch Pro Controller 1 ("The Bell")**: Driven by dual narrow-band Linear Resonant Actuators (LRA, tuned for 160 Hz and 320 Hz). The legacy protocol enforces an absolute silence cutoff at `0.008` and a 5 ms multi-sample packet floor at `0.04` (`SILENT_BELOW`). Sending raw Switch 2 values directly causes over 80% of small vibrations (grass cuts, footsteps, gentle rolls) to fall entirely silent.
+   - **DualSense ("The Speaker")**: Uses wideband voice-coil motors acting like acoustic drivers. However, RenHDrum's internal DSP includes a square-root perceptual compression curve (`x^0.5`) tuned for classic Switch 1 transients. If raw Switch 2 values are passed into this stage, or if a single generic exponential curve is applied to both controllers, Donkey Kong Bananza clips violently (hitting 1.0 ceiling on 17.6% of active samples), flattening dynamic contrast.
+
+### 2.1 The RenHDrum 0.3.0 Dual-Curve Architecture (`src/nx2.rs`)
+
+When the emulator detects `Mode == 2`, it signals RenHDrum via `renhdrum_set_nx2_mode(2)`. RenHDrum 0.3.0 applies tailored 4-point piecewise curves based on published patent specifications (JP 2026015701-03):
+
+- **DualSense Preset `[3]`**:
+  - Parameters: `T = 0.001, P1 = 0.004, P2 = 0.550, P3 = 0.900, P4 = 1.000`.
+  - Counterbalances the `x^0.5` DSP compression layer, maintaining a rich dynamic spread (`p90/p10` contrast ratio of `20x` to `43x`) without ceiling clipping.
+- **Switch Pro Controller 1 Preset `[4]`**:
+  - Parameters: `T = 0.001, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`.
+  - Accompanied by a **1.2x transient boost for the first 25 ms** on low frequencies (`freq < 150 Hz`).
+  - Lifts 100% of active micro-vibrations above the `0.04` hardware silence floor, restoring crisp impacts and footstep tactile feedback.
+- **Mode 0 (Classic Switch 1 Games)**:
+  - Input amplitudes pass through 100% bit-exact and untouched.
+
+### 2.2 Preserving Short Menu Ticks: 5.3 ms Slot Peak-Hold (`src/dualsense/haptics.rs`)
+
+Commercial Switch 2 titles dispatch vibration updates at 5 ms intervals (200 Hz). The DualSense audio mixer processes audio in 256-frame blocks at 48 kHz (~5.33 ms slots, 187.5 Hz).
+
+Because 5.0 ms and 5.33 ms slip out of phase every ~80 ms, two consecutive game packets periodically fall within a single mixer slot. In menu navigation, titles frequently transmit a single-packet tick followed immediately by `0.0`. Without compensation, the trailing zero packet overwrites the tick before the mixer renders it.
+
+RenHDrum 0.3.0 implements a **5.3 ms slot peak-hold**: within each 256-frame window, the DSP retains the sample with the maximum combined low-and-high amplitude before releasing the hold. This guarantees 100% of single-packet menu ticks are faithfully rendered while matching reference baseline audio synthesis tests with sub-microscopic error (`max diff <= 2.4e-6`).
+
+### 2.3 Critical Warning: Emulator 15 ms Frontend Rate Limiting (`Accurate Vibration`)
+
+In standard Eden, yuzu, and PokeDinner codebases, `src/hid_core/frontend/emulated_controller.cpp` includes a rate-limiting filter that discards any vibration update arriving less than 15 ms after the preceding update when `enable_accurate_vibrations == false`.
+
+Empirical trace logs revealed that this default filter silently drops **50.0% of vibration packets in Ocarina of Time** and **76.3% of packets in Mario Kart World**!
+
+Host integrations **must** ensure `enable_accurate_vibrations = true` or bypass this 15 ms suppression block whenever HD Rumble is enabled, allowing all micro-samples to reach RenHDrum.
+
+---
+
+## 3. Signal Routing Architecture
+
+In an emulator equipped with RenHDrum (such as Brontide-NS2 and Brontide-oot), vibration values flow from the guest game process directly to physical PC gamepads through dedicated low-latency pipelines:
 
 ```mermaid
 flowchart TD
     subgraph Guest ["Guest Switch 2 Title"]
-        Game["Game Process\n(DK Bananza, MKW)"]
+        Game["Game Process\n(DK Bananza, MKW, OoT)"]
         Cmd214["nn::hid::IHidServer\nCommand 214 (SendVibrationValuesInMode)"]
         Game -->|16-byte VibrationValue per handle| Cmd214
     end
 
-    subgraph HLE ["Emulator Core (Eden / PokeDinner / Brontide-NS2)"]
+    subgraph HLE ["Emulator Core (Eden / PokeDinner / Fritchii)"]
         HidServer["IHidServer::SendNx2VibrationValues\n(Eglantine PR #155 by neo Luigi)"]
         ResMgr["ResourceManager::SendVibrationValue"]
         Driver["sdl_driver.cpp\n(RenHDrum Driver Integration)"]
@@ -78,12 +114,15 @@ flowchart TD
     end
 
     subgraph RenHDrumCore ["RenHDrum Engine (C ABI)"]
-        DS_Entry["renhdrum_dualsense_dsp_set_half_target"]
-        Pro_Entry["renhdrum_engine_push_half_sample"]
+        Mode_Check["renhdrum_set_nx2_mode(2)\nMode 2 Presets: [3] DualSense / [4] Pro 1"]
+        DS_Entry["renhdrum_dualsense_dsp_set_half_target\n(with 5.3 ms slot peak-hold)"]
+        Pro_Entry["renhdrum_engine_push_half_sample\n(with 25 ms transient boost)"]
         Xbox_Entry["renhdrum_xbox_rumble_push_half_sample"]
-        Driver -->|DualSense| DS_Entry
-        Driver -->|Pro Controller 1| Pro_Entry
-        Driver -->|Xbox One S| Xbox_Entry
+
+        Driver --> Mode_Check
+        Mode_Check --> DS_Entry
+        Mode_Check --> Pro_Entry
+        Mode_Check --> Xbox_Entry
     end
 
     subgraph Hardware ["Physical Controller Actuation"]
@@ -107,24 +146,23 @@ flowchart TD
 
 ---
 
-## 3. Reproduction Fidelity by Controller Architecture
+## 4. Reproduction Fidelity by Controller Architecture
 
 No physical controller reproduces the Switch 2 signal identically to native Joy-Con 2 hardware. Each architecture makes specific trade-offs:
 
-| Controller | Reproduction Method | Preserved Fidelity | Hardware & Protocol Constraints |
+| Controller | Reproduction Method & Tuning | Preserved Fidelity | Hardware & Protocol Constraints |
 |---|---|---|---|
-| **PlayStation 5 DualSense** | Onboard DSP synthesizes dual sine waves at 48 kHz (wired USB) or HID report `0x32` at 3 kHz (Bluetooth), driving stereo voice coils. | **Highest**. Pitch and amplitude remain fully continuous and can modulate per millisecond. Clean attack transients and distinct musical textures. | Power ceiling set to 0.70 to protect coils. High-frequency ceiling on Bluetooth (~1.5 kHz) is lower than wired USB. |
-| **Switch Pro Controller 1** | Encoded into legacy Switch 1 8-byte sub-command `0x10` packets via the 101-threshold dekuNukem LUT. 15 ms transmission framing. | **Native Switch 1 feel**. Correct resonant vibration for classic Switch tactile design. | Clamped to 1252 Hz ceiling. High frequencies far from 160/320 Hz resonant peaks feel attenuated on first-gen LRAs. |
-| **Xbox One S (Model 1708)** | Four eccentric rotating mass (ERM) motors driven by the RenHDrum heuristic translator (`rawinput` / WGI). | **Rhythmic & directional envelope**. Distinct trigger taps for impacts, separate left/right grip rumble, smooth decay. | **No pitch reproduction**. Frequency is physically tied to motor rotation speed; cannot play audio-rate chords or subtle pitch glides. |
-| **Joy-Con 2 / Pro Controller 2** | Native 10-bit sub-sample encoding. | *Not yet supported in RenHDrum*. | Requires dedicated 10-bit encoder and HIDAPI transport layers for native Switch 2 accessories. |
+| **PlayStation 5 DualSense** | Continuous audio-rate DSP (48 kHz USB / 3 kHz BT). Automatically activates Preset `[3]` with 5.3 ms peak-hold under Switch 2 mode. | **Highest**. Clean attack transients, wide `20x` to `43x` dynamic contrast, and zero dropped menu ticks. | High-frequency ceiling on Bluetooth (~1.5 kHz) is lower than wired USB. Power ceiling set to 0.70 to protect coils. |
+| **Switch Pro Controller 1** | Sub-command `0x10` packets with dekuNukem LUT. Automatically activates Preset `[4]` with 25 ms transient boost under Switch 2 mode. | **Native Switch 1 feel**. 0% samples dropped below `0.04` floor. Crisp steps, drift, and impacts. | Narrow-band LRA physics produce lower contrast (`4x`) on sustained heavy rumbles compared to voice-coil actuators. |
+| **Xbox One S (Model 1708)** | Four ERM motors driven by the RenHDrum heuristic translator (`rawinput` / WGI). | **Rhythmic & directional envelope**. Distinct trigger taps for impacts, separate left/right grip rumble, smooth decay. | **In research for Switch 2 games**. Motor rotation speed physically limits micro-vibration detail. |
 
 ---
 
-## 4. The 2000 ms Hanging Rumble Bug in Legacy Emulators
+## 5. The 2000 ms Hanging Rumble Bug in Legacy Emulators
 
-Prior to integrating RenHDrum, testers of early Switch 2 emulator branches reported a frequent and disruptive defect: controllers would begin vibrating during an action or loading transition and **continue vibrating loudly for several seconds** without stopping (documented in Eglantine Issue #513).
+Prior to integrating RenHDrum, testers of early Switch 2 emulator branches reported a frequent defect: controllers would begin vibrating during an action or loading transition and **continue vibrating loudly for several seconds** without stopping (documented in Eglantine Issue #513).
 
-### 4.1 Root Cause in Generic SDL Fallbacks
+### 5.1 Root Cause in Generic SDL Fallbacks
 
 In vanilla PokeDinner and early Eglantine branches, the vibration fallback path in `sdl_driver.cpp` simply called:
 
@@ -134,9 +172,9 @@ SDL_RumbleGamepad(joystick, low_freq_intensity, high_freq_intensity, 2000);
 
 This produced two critical failure modes:
 1. **Total Frequency Loss**: All spectral information was discarded; motors spun at fixed rates regardless of whether the game signaled a high metal chime or a low engine idle.
-2. **2-Second Hold Duration**: Every invocation requested a 2000 ms duration from the SDL driver. Switch 2 games frequently stop vibrating simply by **ceasing to transmit commands**, rather than sending an explicit zero-amplitude packet `(0.0f, 0.0f, 0.0f, 0.0f)`. For instance, when Donkey Kong Bananza freezes the render thread during level transitions, the command stream halts immediately. The gamepad driver, having received a 2000 ms duration request on the last active frame, kept the motors spinning until the 2-second timeout expired.
+2. **2-Second Hold Duration**: Every invocation requested a 2000 ms duration from the SDL driver. Switch 2 games frequently stop vibrating simply by **ceasing to transmit commands**, rather than sending an explicit zero-amplitude packet `(0.0f, 0.0f, 0.0f, 0.0f)`. For instance, when Donkey Kong Bananza freezes the render thread during level transitions, the command stream halts immediately. The gamepad driver kept the motors spinning until the 2-second timeout expired.
 
-### 4.2 How RenHDrum Eliminates the Bug
+### 5.2 How RenHDrum Eliminates the Bug
 
 RenHDrum decouples guest IPC dispatch from physical hardware actuation:
 - **Idle Watchdogs**: Independent watchdog timers monitor incoming sample intervals on each channel. If sample delivery ceases without an explicit zero, the engine decays amplitude to silence within a controlled decay window.
@@ -144,32 +182,24 @@ RenHDrum decouples guest IPC dispatch from physical hardware actuation:
 
 ---
 
-## 5. Current Hardware & Emulation Limits
+## 6. Pro Controller Reliability Enhancements
 
-When testing Switch 2 vibration on current emulator builds, the following limitations must be noted:
-
-1. **Tested Titles Only**: Empirical verification is currently limited to **Donkey Kong Bananza** and **Mario Kart World**. Other commercial games may employ different pacing or alternative command sequences.
-2. **Command 213 is a Stub**: Titles that issue vibration calls exclusively through command 213 (suspected in early tests of Kirby Air Riders) will remain silent until command 213 is routed to the resource manager.
-3. **Literal Frequency Clamping on Pro Controller 1**: In the current RenHDrum pipeline, any high-band frequency exceeding 1252 Hz is clamped directly to 1252 Hz. While safe, first-generation LRA actuators deliver very little mechanical power above 400 Hz. A perceptual compression curve (mapping high-frequency intent to lower resonant bands) is not yet enabled.
-4. **Early Emulation Performance**: Switch 2 emulation is in its inception. Titles such as Mario Kart World run at approximately 40 FPS on standard desktop configurations (e.g. Intel Core i5-12400F with NVIDIA GeForce RTX 4060). Frame drops or CPU stalls can cause temporary jitter in sample pacing.
-
----
-
-## 6. What We Are Researching Next
-
-Active research in RenHDrum and the Brontide testbed is focused on four areas:
-
-1. **Full Command 213 Implementation**: Complete the handler for `nn::hid::IHidServer` command 213 in the HLE service layer, allowing games with per-controller single-handle layouts to vibrate.
-2. **Vibration Trace Logging for Switch 2**: Expand the unified trace recording mechanism (`hdrumble_trace.txt`) across all three output backends to capture the exact arrival cadence, frequency histograms, and `Mode` flags of commercial Switch 2 titles.
-3. **Wired DualSense High-Frequency Expansion**: The DualSense 48 kHz audio pipeline is theoretically capable of reproducing acoustic vibrations beyond 1252 Hz. Once trace data confirms games emit frequencies in the 1200–3500 Hz range, the synthetic frequency clamp can be widened on wired connections.
-4. **Equalization Curves for Pro Controller 1**: Implement an optional "perceptual translation" switch based on Nintendo patent publications (JP 2026015701–03 curves Ln1–Ln4) that remaps high-frequency energy down to the 160/320 Hz resonant sweet spots of first-generation LRAs, allowing A/B comparison against literal clamping.
+In addition to vibration synthesis, testing highlighted two critical input transport issues on Switch Pro Controller 1:
+1. **Right Stick Upward Drift**: Stale calibration offsets (such as `offset_y: 0.939940`) occasionally persist from configuration freezes. Clamping abnormal center offsets where `|offset| > 0.5f` to `0.0f` eliminates permanent upward drift.
+2. **Bluetooth Connection Stability**: Setting Bluetooth pacing to Level 2 (45 ms interval, burst of 3 packets, 80 ms refill) avoids saturation and input lag under dense Switch 2 packet streams.
+3. **Clean Controller Teardown**: Dispatching a standard `ClearUSB` command before controller close prevents USB Pro Controllers from remaining trapped in extended reporting mode upon game exit.
 
 ---
 
 ## References & Credits
 
 - **neo Luigi**: Implementation of genuine command 214 dispatching in Eglantine PR #155 (`2b413a46a2`, `465aa33077`).
-- **Franseven**: Author of PokeDinner 2.5.0 (`216b5034c6`), the baseline Switch 2 emulator testbed.
+- **Franseven**: Author of PokeDinner 2.5.0 (`216b5034c6`), baseline platform for Brontide-NS2.
+- **Frizti**: Author of Fritchii v5.3, baseline platform for Brontide-oot.
+- **zortos293**: Author of Lichii emulator.
+- **Dark**: Author of Dynamic FPS.
+- **samaBR85**: Author of `renhdrum-eden`, independent Switch 2 trace verification, Eglantine/Lichii port, and Raw Input deadlock fix.
+- **NotRexed & Hookshot Contributors**: Authors of the Hookshot OoT Switch 2 Recompiler (v2.0.6), serving as reference testbed for static recompilation integration.
 - **Switchbrew Wiki**: Documentation of `nn::hid::IHidServer` IPC commands 213, 214, and 220.
-- **Nintendo Co., Ltd.**: Published patent applications US 20260295388–91 (haptic feedback modes) and JP 2026015701–03 (equalization between hardware generations).
+- **Nintendo Co., Ltd.**: Published patent applications US 20260295388-91 (haptic feedback modes) and JP 2026015701-03 (equalization between hardware generations).
 - **RenHDrum / Brontide Team**: Physical multi-controller DSP routing, idle watchdog architecture, and Xbox One intent translation.

@@ -2,12 +2,14 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::settings::HdRumbleSettings;
 
-pub const TRACE_FLAG_FILE: &str = "hdrumble_xbox_trace.txt";
-pub const TRACE_CSV_PREFIX: &str = "hdrumble_xbox_trace-";
+pub const TRACE_FLAG_FILE: &str = "hdrumble_trace.txt";
+/// Old flag name from the Xbox-only trace, still honoured.
+pub const TRACE_FLAG_FILE_LEGACY: &str = "hdrumble_xbox_trace.txt";
+pub const TRACE_CSV_PREFIX: &str = "hdrumble_trace-";
 static TRACE_SEQ: AtomicU32 = AtomicU32::new(0);
 /// Brontide can exit without running cleanup, so unflushed lines must stay few.
 const FLUSH_EVERY_LINES: u32 = 64;
@@ -16,15 +18,19 @@ fn pct(motor: u16) -> u32 {
     (f32::from(motor) / 65535.0 * 100.0).round() as u32
 }
 
-pub struct XboxTrace {
+pub struct RumbleTrace {
+    kind: &'static str,
+    start: Instant,
     path: PathBuf,
     writer: Option<BufWriter<File>>,
     unflushed: u32,
 }
 
-impl XboxTrace {
-    pub fn open_in(base_dir: Option<&Path>) -> Option<Self> {
-        let flag = HdRumbleSettings::try_read_flag_int_in(TRACE_FLAG_FILE, base_dir)?;
+impl RumbleTrace {
+    /// kind is pro, joycon, dualsense or xbox; it goes in the file name and the K line.
+    pub fn open_in(kind: &'static str, base_dir: Option<&Path>) -> Option<Self> {
+        let flag = HdRumbleSettings::try_read_flag_int_in(TRACE_FLAG_FILE, base_dir)
+            .or_else(|| HdRumbleSettings::try_read_flag_int_in(TRACE_FLAG_FILE_LEGACY, base_dir))?;
         if flag == 0 {
             return None;
         }
@@ -33,8 +39,13 @@ impl XboxTrace {
             .map_or(0, |d| d.as_secs());
         let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
         // One file per run: a reopened emulator must never erase the last session
-        let name = format!("{TRACE_CSV_PREFIX}{secs}-{}-{seq}.csv", std::process::id());
+        let name = format!(
+            "{TRACE_CSV_PREFIX}{kind}-{secs}-{}-{seq}.csv",
+            std::process::id()
+        );
         Some(Self {
+            kind,
+            start: Instant::now(),
             path: HdRumbleSettings::flag_path(&name, base_dir),
             writer: None,
             unflushed: 0,
@@ -49,6 +60,9 @@ impl XboxTrace {
                 .append(true)
                 .open(&self.path);
             self.writer = file.ok().map(BufWriter::new);
+            if let Some(writer) = &mut self.writer {
+                let _ = writeln!(writer, "K,{}", self.kind);
+            }
         }
         let Some(writer) = &mut self.writer else {
             return;
@@ -59,6 +73,11 @@ impl XboxTrace {
             let _ = writer.flush();
             self.unflushed = 0;
         }
+    }
+
+    /// Microseconds since the trace was opened, for doors that get no timestamp from the caller.
+    pub fn elapsed_us(&self) -> i64 {
+        i64::try_from(self.start.elapsed().as_micros()).unwrap_or(i64::MAX)
     }
 
     pub fn log_sample(
@@ -90,7 +109,7 @@ impl XboxTrace {
     }
 }
 
-impl Drop for XboxTrace {
+impl Drop for RumbleTrace {
     fn drop(&mut self) {
         if let Some(writer) = &mut self.writer {
             let _ = writer.flush();

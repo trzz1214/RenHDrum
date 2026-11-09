@@ -2,6 +2,13 @@
 
 This guide covers integrating `renhdrum.dll` into managed C# / .NET applications and emulators (such as Ryujinx forks targeting SDL3).
 
+> [!NOTE]
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+
+> [!WARNING]
+> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
+> Host emulators **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) or bypass frontend rate-limiting in controller management. If accurate vibration is disabled, the host drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+
 ---
 
 ## 1. P/Invoke & Marshalling Declarations
@@ -64,6 +71,9 @@ namespace MyEmulator.Input
 
         [LibraryImport(LibName)]
         public static partial int renhdrum_engine_tick(IntPtr engine, long now_us, [Out] byte[] out_packet10);
+
+        [LibraryImport(LibName)]
+        public static partial void renhdrum_set_nx2_mode(int mode);
     }
 }
 ```
