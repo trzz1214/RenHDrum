@@ -62,8 +62,8 @@ These emulator forks are personal experimental testbeds used to validate RenHDru
 
 | Project | Base & Integration Architecture | Testbed Role | Research Notes |
 |---|---|---|---|
-| **Brontide-NS2** *(1.1.0)* | PokeDinner 2.5.0 by Franseven (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation (DK Bananza, MKW) | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-ns2.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
-| **Brontide-oot** *(1.0.0)* | Fritchii v5.3 by Frizti, Lichii by zortos293, Dynamic FPS by Dark (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 *Ocarina of Time* HD Rumble validation (DLSS, water/lighting fixes) | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-oot.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
+| **Brontide-NS2** *(1.1.0)* | PokeDinner 2.5.0 by Franseven (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-ns2.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
+| **Brontide-oot** *(1.0.0)* | Fritchii v5.3 by Frizti, Lichii by zortos293, Dynamic FPS by Dark (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation (DLSS, compute fallback & water/lighting fixes) | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-oot.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
 | **Ryuhdr** | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | Reference baseline & golden waveform source | [Lab Notes →](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
 | **Brontide** | Eden (C++ / Patched SDL3, `renhdrum.dll` thin hook, built-in HD Rumble Studio) | Pure C ABI validation & DualSense BT testbed | [Lab Notes →](https://ryuhdr.threedola.workers.dev/brontide.html) |
 | **Ryu-HDRum** | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | SDL3 C# interop & modern runtime testbed | [Lab Notes →](https://ryuhdr.threedola.workers.dev/#ryu-hdrum) |
@@ -222,8 +222,8 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
     - **RenHDrum Refinement**: Informed the Switch 2 amplitude scaling investigation and empirical calibration for per-controller piecewise response curves (`src/nx2.rs`).
 
 12. **Frizti ([`Fritchii`](https://github.com/frizti)), zortos293 ([`Lichii`](https://github.com/zortos293/Lichii)), Dark ([`Dynamic FPS`](https://github.com/darkxex/dynamic-fps))**
-    - **Foundation**: Created Fritchii v5.3, Lichii, and Dynamic FPS, providing specialized rendering and timing fixes for *Ocarina of Time* (Switch 2 Edition).
-    - **RenHDrum Refinement**: Serves as the host emulator platform for validating RenHDrum HD Rumble in *Ocarina of Time* (Switch 2 Edition) via Brontide-oot 1.0.0.
+    - **Foundation**: Created Fritchii v5.3, Lichii, and Dynamic FPS, providing specialized rendering and timing fixes for Switch 2 titles.
+    - **RenHDrum Refinement**: Serves as the host emulator platform for validating RenHDrum HD Rumble in Switch 2 titles via Brontide-oot 1.0.0.
 
 ### Copied · Referenced · Built in this project
 
