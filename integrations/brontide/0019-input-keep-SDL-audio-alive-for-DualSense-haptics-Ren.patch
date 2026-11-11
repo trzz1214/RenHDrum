@@ -1,0 +1,60 @@
+From 8fb64825ff49834751ed9d59eb50b35ce95039d5 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 10:06:18 +0700
+Subject: [PATCH] input: keep SDL audio alive for DualSense haptics
+ (RenHDrum#4, fix by iafx)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/sdl_driver.cpp | 30 ++++++++++++++++---------
+ 1 file changed, 19 insertions(+), 11 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 0af6b60632..ae228b9fa0 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -145,2 +145,18 @@ static bool SDLEventWatcher(void* user_data, SDL_Event* event) {
+ 
++// SDL audio for DualSense USB haptics: initialized once, never quit while the emulator runs.
++// Quitting it on unplug ran SDL's queued "device lost" work on freed state (RenHDrum#4, fix by iafx).
++static bool EnsureAudioForHaptics() {
++    static std::mutex audio_mutex;
++    static bool audio_ready = false;
++    std::scoped_lock lock{audio_mutex};
++    if (audio_ready) {
++        return true;
++    }
++    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
++        return false;
++    }
++    audio_ready = true;
++    return true;
++}
++
+ class SDLJoystick {
+@@ -804,8 +820,5 @@ private:
+         }
+-        if (!SDL_WasInit(SDL_INIT_AUDIO)) {
+-            if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+-                LOG_WARNING(Input, "DualSense haptics: SDL audio init failed: {}", SDL_GetError());
+-                return;
+-            }
+-            ds_audio_inited = true;
++        if (!EnsureAudioForHaptics()) {
++            LOG_WARNING(Input, "DualSense haptics: SDL audio init failed: {}", SDL_GetError());
++            return;
+         }
+@@ -979,6 +992,2 @@ private:
+         }
+-        if (ds_audio_inited) {
+-            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+-            ds_audio_inited = false;
+-        }
+         ds_audio_attempts = 0;
+@@ -1043,3 +1052,2 @@ private:
+     int64_t ds_audio_next_us{0};
+-    bool ds_audio_inited{false};
+     // DualSense on Bluetooth: second HID handle + sender thread for report 0x32
+-- 
+2.55.0.windows.5
+

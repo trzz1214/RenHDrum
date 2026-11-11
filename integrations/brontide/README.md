@@ -1,6 +1,6 @@
 # Brontide Reference Integration Patches
 
-This directory contains a 17-part reference patch series (0002-0018) demonstrating how to integrate `renhdrum.dll` into an Eden / Yuzu C++ SDL3 emulator codebase at base commit `989768aa46`.
+This directory contains a 18-part reference patch series (0002-0019) demonstrating how to integrate `renhdrum.dll` into an Eden / Yuzu C++ SDL3 emulator codebase at base commit `989768aa46`.
 
 For Switch 2 titles (IPC command 214) on a PokeDinner / Eglantine style base, see the separate [`../brontide-ns2/`](../brontide-ns2/) series. The in-emulator dialog source is in [`studio/`](studio/).
 
@@ -25,6 +25,7 @@ For Switch 2 titles (IPC command 214) on a PokeDinner / Eglantine style base, se
 | 0016 | `sdl3-release-a-wired-Switch-pad-back-to-the-OS-on-cl` | SDL3 patch: sends the USB clear command on close so a wired Pro Controller returns to the OS. |
 | 0017 | `Xbox-One-Rumble-page-wired-detection-from-SDL-connec` | Wired Xbox detection from SDL connection state for the status page. |
 | 0018 | `HD-Rumble-dialog-one-main-switch-controller-sidebar-` | Hook side of the single main switch, controller sidebar and apply-on-Done behaviour. |
+| 0019 | `input-keep-SDL-audio-alive-for-DualSense-haptics-Ren` | Initializes SDL audio once for DualSense haptics and never quits it, so unplugging a pad no longer crashes or mutes the game (RenHDrum#4, fix by iafx). |
 
 > [!NOTE]
 > Patches 0008, 0009, 0010 and 0018 are named `ui` but contain only their `input_common` part (`sdl_driver.cpp`, `renhdrum_pads.h`). The Qt dialog itself is not a patch: see the reference code in [`studio/`](studio/).

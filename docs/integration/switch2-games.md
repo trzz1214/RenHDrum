@@ -38,7 +38,7 @@ In `src/core/hle/service/hid/hid_server.cpp`:
 
 ### 1.2 Status of Commands 213 and 220
 
-- **Command 213 (`SendVibrationValueInMode`)**: A genuine dispatcher is implemented in reference testbeds (`Brontide-NS2 1.1.0` and `Brontide-oot 1.0.0`), unpacking the single handle and 16-byte `VibrationValue` from the raw `0x20` payload and routing it to `ResourceManager::SendVibrationValue`. Across 25 in-game trace sessions on retail titles (*Donkey Kong Bananza*, *Mario Kart World*, *Ocarina of Time* Switch 2 Edition), zero calls were observed (100% of game traffic flows through command 214).
+- **Command 213 (`SendVibrationValueInMode`)**: A genuine dispatcher is implemented in reference testbeds (`Brontide-NS2 1.1.0` and `Brontide-oot 1.0.1`), unpacking the single handle and 16-byte `VibrationValue` from the raw `0x20` payload and routing it to `ResourceManager::SendVibrationValue`. Across 25 in-game trace sessions on retail titles (*Donkey Kong Bananza*, *Mario Kart World*, *Ocarina of Time* Switch 2 Edition), zero calls were observed (100% of game traffic flows through command 214).
 - **Command 220 (`IsOunceVibrationDeviceMounted`)**: Returns a 1-byte boolean `0`. Retail titles do not invoke command 220 during gameplay.
 
 ### 1.3 Switch 2 Rumble Mode Notification (`renhdrum_set_nx2_mode`)
@@ -152,4 +152,4 @@ Instead:
 
 Two reference implementations combining command 214 dispatching with RenHDrum 0.3.0 and Profile-Guided Optimization (PGO) are available:
 1. **Brontide-NS2 1.1.0** (based on PokeDinner 2.5.0 by Franseven): Tuned for *Donkey Kong Bananza* and *Mario Kart World*.
-2. **Brontide-oot 1.0.0** (based on Fritchii v5.3 by Frizti, Lichii by zortos293, and Dynamic FPS by Dark) - tuned for Ocarina of Time (Switch 2 Edition) with ahead-of-time shader preparation, lower memory footprint, and RenHDrum 0.3.0 HD Rumble.
+2. **Brontide-oot 1.0.1** (based on Fritchii v5.5 by Frizti, Lichii by zortos293, and Dynamic FPS by Dark) - tuned for Ocarina of Time (Switch 2 Edition) with comprehensive AMD/NVIDIA ahead-of-time shader preparation (120,461 pipelines), 10 GiB disk cache allocation, DLSS presets, lower memory footprint, and RenHDrum 0.3.0 HD Rumble.

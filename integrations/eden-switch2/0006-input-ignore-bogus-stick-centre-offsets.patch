@@ -1,0 +1,76 @@
+From 6d108ad649e445604b157fccd3c544115bdbb780 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:31:55 +0700
+Subject: [PATCH 6/6] input: ignore bogus stick centre offsets
+
+---
+ src/input_common/input_poller.cpp | 24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/src/input_common/input_poller.cpp b/src/input_common/input_poller.cpp
+index 188e862..53dfb58 100644
+--- a/src/input_common/input_poller.cpp
++++ b/src/input_common/input_poller.cpp
+@@ -921,11 +921,19 @@ std::unique_ptr<Common::Input::InputDevice> InputFactory::CreateStickDevice(
+     };
+ 
+     const auto axis_x = params.Get("axis_x", 0);
++    float offset_x = params.Get("offset_x", 0.0f);
++    float offset_y = params.Get("offset_y", 0.0f);
++    if (std::abs(offset_x) > 0.5f) {
++        offset_x = 0.0f;
++    }
++    if (std::abs(offset_y) > 0.5f) {
++        offset_y = 0.0f;
++    }
+     const Common::Input::AnalogProperties properties_x = {
+         .deadzone = deadzone,
+         .range = range,
+         .threshold = threshold,
+-        .offset = std::clamp(params.Get("offset_x", 0.0f), -1.0f, 1.0f),
++        .offset = std::clamp(offset_x, -1.0f, 1.0f),
+         .inverted = params.Get("invert_x", "+") == "-",
+     };
+ 
+@@ -934,7 +942,7 @@ std::unique_ptr<Common::Input::InputDevice> InputFactory::CreateStickDevice(
+         .deadzone = deadzone,
+         .range = range,
+         .threshold = threshold,
+-        .offset = std::clamp(params.Get("offset_y", 0.0f), -1.0f, 1.0f),
++        .offset = std::clamp(offset_y, -1.0f, 1.0f),
+         .inverted = params.Get("invert_y", "+") != "+",
+     };
+     input_engine->PreSetController(identifier);
+@@ -1080,11 +1088,19 @@ std::unique_ptr<Common::Input::InputDevice> InputFactory::CreateMotionDevice(
+     const auto threshold = std::clamp(params.Get("threshold", 0.5f), 0.0f, 1.0f);
+ 
+     const auto axis_x = params.Get("axis_x", 0);
++    float offset_x = params.Get("offset_x", 0.0f);
++    float offset_y = params.Get("offset_y", 0.0f);
++    if (std::abs(offset_x) > 0.5f) {
++        offset_x = 0.0f;
++    }
++    if (std::abs(offset_y) > 0.5f) {
++        offset_y = 0.0f;
++    }
+     const Common::Input::AnalogProperties properties_x = {
+         .deadzone = deadzone,
+         .range = range,
+         .threshold = threshold,
+-        .offset = std::clamp(params.Get("offset_x", 0.0f), -1.0f, 1.0f),
++        .offset = std::clamp(offset_x, -1.0f, 1.0f),
+         .inverted = params.Get("invert_x", "+") == "-",
+     };
+ 
+@@ -1093,7 +1109,7 @@ std::unique_ptr<Common::Input::InputDevice> InputFactory::CreateMotionDevice(
+         .deadzone = deadzone,
+         .range = range,
+         .threshold = threshold,
+-        .offset = std::clamp(params.Get("offset_y", 0.0f), -1.0f, 1.0f),
++        .offset = std::clamp(offset_y, -1.0f, 1.0f),
+         .inverted = params.Get("invert_y", "+") != "+",
+     };
+ 
+-- 
+2.55.0.windows.5
+

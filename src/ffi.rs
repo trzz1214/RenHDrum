@@ -15,7 +15,7 @@ use crate::preset::{HdRumblePreset, HdRumblePresetKind};
 use crate::settings::{HdRumbleSettings, RumbleConfigController};
 use crate::xbox::{XboxRumbleMapper, XboxRumbleTuning};
 
-pub const RENHDRUM_VERSION: u32 = 0x000300; // 0.3.0
+pub const RENHDRUM_VERSION: u32 = 0x000301; // 0.3.1
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
@@ -763,16 +763,40 @@ pub unsafe extern "C" fn renhdrum_engine_push_sample(
     engine: *mut RenHdcEngine,
     now_us: i64,
     mut left_al: f32,
-    left_fl: f32,
+    mut left_fl: f32,
     mut left_ah: f32,
-    left_fh: f32,
+    mut left_fh: f32,
     mut right_al: f32,
-    right_fl: f32,
+    mut right_fl: f32,
     mut right_ah: f32,
-    right_fh: f32,
+    mut right_fh: f32,
 ) -> i32 {
     if engine.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
+    }
+    if !left_al.is_finite() {
+        left_al = 0.0;
+    }
+    if !left_ah.is_finite() {
+        left_ah = 0.0;
+    }
+    if !left_fl.is_finite() {
+        left_fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
+    }
+    if !left_fh.is_finite() {
+        left_fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
+    }
+    if !right_al.is_finite() {
+        right_al = 0.0;
+    }
+    if !right_ah.is_finite() {
+        right_ah = 0.0;
+    }
+    if !right_fl.is_finite() {
+        right_fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
+    }
+    if !right_fh.is_finite() {
+        right_fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
     }
     let u_now = now_us.max(0) as u64;
     if let Ok(mut b) = (*engine).nx2_boost_left.lock() {
@@ -807,12 +831,24 @@ pub unsafe extern "C" fn renhdrum_engine_push_half_sample(
     now_us: i64,
     is_right: bool,
     mut al: f32,
-    fl: f32,
+    mut fl: f32,
     mut ah: f32,
-    fh: f32,
+    mut fh: f32,
 ) -> i32 {
     if engine.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
+    }
+    if !al.is_finite() {
+        al = 0.0;
+    }
+    if !ah.is_finite() {
+        ah = 0.0;
+    }
+    if !fl.is_finite() {
+        fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
+    }
+    if !fh.is_finite() {
+        fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
     }
     let u_now = now_us.max(0) as u64;
     let boost_lock = if is_right {
@@ -991,6 +1027,9 @@ pub unsafe extern "C" fn renhdrum_xbox_rumble_push_half_sample(
     if rumble.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
     }
+    let low_amp = if low_amp.is_finite() { low_amp } else { 0.0 };
+    let high_amp = if high_amp.is_finite() { high_amp } else { 0.0 };
+    let (low_amp, high_amp) = crate::nx2::apply_xbox_nx2(low_amp, high_amp);
     if let Ok(mut guard) = (*rumble).inner.lock() {
         guard.push_half_sample(now_us, is_right, low_amp, low_freq, high_amp, high_freq);
         RENHDRUM_OK
@@ -1129,7 +1168,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000300);
+        assert_eq!(renhdrum_version(), 0x000301);
     }
 
     #[test]
@@ -1508,5 +1547,123 @@ mod tests {
         assert_eq!(lines[0], "K,dualsense");
         assert!(lines[1].ends_with(",L,0.1,160,0.2,320"), "{}", lines[1]);
         assert!(lines[2].ends_with(",R,0.3,170,0.4,330"), "{}", lines[2]);
+    }
+
+    #[test]
+    fn engine_handles_nan_gracefully_in_mode_2_and_mode_0() {
+        let _nx2_guard = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            // 1. Mode 2: amp_low = NaN, 140 Hz in first 25 ms -> yields silence, not 1.0 full rumble
+            crate::nx2::set_nx2_mode(2);
+            let engine2 = renhdrum_engine_create(false, true);
+            assert!(!engine2.is_null());
+            assert_eq!(
+                renhdrum_engine_push_half_sample(
+                    engine2,
+                    5_000,
+                    false, // Left
+                    f32::NAN,
+                    140.0,
+                    0.0,
+                    320.0,
+                ),
+                RENHDRUM_OK
+            );
+            assert_eq!(
+                renhdrum_engine_push_half_sample(
+                    engine2,
+                    5_000,
+                    true, // Right
+                    f32::NAN,
+                    140.0,
+                    0.0,
+                    320.0,
+                ),
+                RENHDRUM_OK
+            );
+
+            let mut packet = [0u8; 10];
+            let res = renhdrum_engine_tick(engine2, 5_000, packet.as_mut_ptr());
+            assert_eq!(res, 1);
+            // Both left and right should be silent / neutral
+            assert_eq!(&packet[2..6], &[0x00, 0x01, 0x40, 0x40]);
+            assert_eq!(&packet[6..10], &[0x00, 0x01, 0x40, 0x40]);
+            renhdrum_engine_destroy(engine2);
+
+            // 2. Mode 0: NaN input -> output packet is silent
+            crate::nx2::set_nx2_mode(0);
+            let engine0 = renhdrum_engine_create(false, true);
+            assert!(!engine0.is_null());
+            assert_eq!(
+                renhdrum_engine_push_half_sample(
+                    engine0,
+                    10_000,
+                    false,
+                    f32::NAN,
+                    140.0,
+                    f32::NAN,
+                    320.0,
+                ),
+                RENHDRUM_OK
+            );
+            assert_eq!(
+                renhdrum_engine_push_half_sample(
+                    engine0,
+                    10_000,
+                    true,
+                    f32::NAN,
+                    140.0,
+                    f32::NAN,
+                    320.0,
+                ),
+                RENHDRUM_OK
+            );
+
+            let res0 = renhdrum_engine_tick(engine0, 10_000, packet.as_mut_ptr());
+            assert_eq!(res0, 1);
+            assert_eq!(&packet[2..6], &[0x00, 0x01, 0x40, 0x40]);
+            assert_eq!(&packet[6..10], &[0x00, 0x01, 0x40, 0x40]);
+            renhdrum_engine_destroy(engine0);
+        }
+        crate::nx2::set_nx2_mode(0);
+    }
+
+    /// Drives an Xbox rumble with a fixed small-amplitude input; returns the sum of all motor values.
+    fn xbox_motor_sum(mode: i32, amp: f32) -> u64 {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::nx2::set_nx2_mode(mode);
+        let mut sum = 0u64;
+        unsafe {
+            let r = renhdrum_xbox_rumble_create(false);
+            for i in 0..40i64 {
+                let now = i * 5_000;
+                for side in [false, true] {
+                    renhdrum_xbox_rumble_push_half_sample(r, now, side, amp, 160.0, amp, 320.0);
+                }
+                let mut m = [0u16; 4];
+                if renhdrum_xbox_rumble_tick(r, now, m.as_mut_ptr()) == 1 {
+                    sum += m.iter().map(|&v| v as u64).sum::<u64>();
+                }
+            }
+            renhdrum_xbox_rumble_destroy(r);
+        }
+        crate::nx2::set_nx2_mode(0);
+        sum
+    }
+
+    #[test]
+    fn xbox_mode2_curve_lifts_small_amplitudes() {
+        let m0 = xbox_motor_sum(0, 0.02);
+        let m2 = xbox_motor_sum(2, 0.02);
+        assert!(m2 > m0, "mode 2 sum {m2} must exceed mode 0 sum {m0}");
+    }
+
+    #[test]
+    fn xbox_nan_amplitude_is_silent_in_mode_0() {
+        assert_eq!(xbox_motor_sum(0, f32::NAN), 0);
     }
 }

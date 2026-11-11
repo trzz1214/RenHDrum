@@ -1,6 +1,6 @@
 # Brontide-NS2 Reference Integration Patches (Switch 2 titles)
 
-This directory contains a 5-part reference patch series that adds HD Rumble for Switch 2 titles (IPC command 214 and 213) to a PokeDinner / Eglantine style emulator and routes it into `renhdrum.dll`. It represents the hook implementation of Brontide-NS2 1.1.0.
+This directory contains a 6-part reference patch series that adds HD Rumble for Switch 2 titles (IPC command 214 and 213) to a PokeDinner / Eglantine style emulator and routes it into `renhdrum.dll`. It represents the hook implementation of Brontide-NS2 1.1.0.
 
 Background: [research/11: Switch 2 HD Rumble](../../docs/research/11-switch2-hd-rumble.md) and the walkthrough in [switch2-games.md](../../docs/integration/switch2-games.md).
 
@@ -15,6 +15,7 @@ The series applies to PokeDinner 2.5.0 + the Eglantine `nx2` fixes at commit **`
 3. **`0003-input-HD-Rumble-off-falls-back-to-emulator-rumble.patch`**: with HD Rumble switched off the emulator's own rumble path is used; applying settings takes effect live.
 4. **`0004-input-HD-Rumble-main-switch-hook.patch`**: small `sdl_driver.cpp` change for the main on/off switch.
 5. **`0005-hid-input-Switch-2-real-command-213-nx2-mode-and-Pro-fixes.patch`**: updates the integration to Brontide-NS2 1.1.0 and RenHDrum 0.3.0. Adds real command 213 unpacking and dispatching, routes the Switch 2 mode flag to `renhdrum_set_nx2_mode`, fixes Switch Pro Controller right analog drift (|offset| > 0.5f clamped to 0.0f), and synchronizes controller attach/detach handling.
+6. **`0006-input-keep-SDL-audio-alive-for-DualSense-haptics-Ren.patch`**: initializes SDL audio once for DualSense haptics and never quits it, so unplugging a pad no longer crashes or mutes the game (RenHDrum#4, fix by iafx).
 
 Only `src/hid_core`, `src/core/hle/service/hid`, `src/input_common`, `.patch/sdl3` and `cpmfile.json` are included. Left out on purpose:
 

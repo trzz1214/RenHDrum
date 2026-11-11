@@ -88,7 +88,7 @@ In standard Eden, yuzu, and PokeDinner codebases, `src/hid_core/frontend/emulate
 
 Empirical trace logs revealed that this default filter silently drops **50.0% of vibration packets in Ocarina of Time** and **76.3% of packets in Mario Kart World**!
 
-Host integrations **must** ensure `enable_accurate_vibrations = true` or bypass this 15 ms suppression block whenever HD Rumble is enabled, allowing all micro-samples to reach RenHDrum.
+Host integrations **must** ensure `enable_accurate_vibrations = true` or bypass this 15 ms suppression block whenever HD Rumble is enabled, allowing all micro-samples to reach RenHDrum. This applies to the upstream forks; Brontide builds no longer drop packets when this option is off.
 
 ---
 
@@ -195,7 +195,7 @@ In addition to vibration synthesis, testing highlighted two critical input trans
 
 - **neo Luigi**: Implementation of genuine command 214 dispatching in Eglantine PR #155 (`2b413a46a2`, `465aa33077`).
 - **Franseven**: Author of PokeDinner 2.5.0 (`216b5034c6`), baseline platform for Brontide-NS2.
-- **Frizti**: Author of Fritchii v5.3, baseline platform for Brontide-oot.
+- **Frizti**: Author of Fritchii v5.5, baseline platform for Brontide-oot.
 - **zortos293**: Author of Lichii emulator.
 - **Dark**: Author of Dynamic FPS.
 - **samaBR85**: Author of `renhdrum-eden`, independent Switch 2 trace verification, Eglantine/Lichii port, and Raw Input deadlock fix.

@@ -4,6 +4,8 @@ A port of the [Brontide reference patches](../brontide/) to current Eden-based S
 
 **[samaBR85/renhdrum-eden](https://github.com/samaBR85/renhdrum-eden)**
 
+An extended six-patch series (adds Switch 2 Mode, DualSense unplug fix, stick centre filter) is in [../eden-switch2/](../eden-switch2/).
+
 It is a two-part `git am` series:
 
 | Patch | Contents |

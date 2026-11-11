@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RENHDRUM_VERSION 0x000300
+#define RENHDRUM_VERSION 0x000301
 
 #define RENHDRUM_OK 0
 #define RENHDRUM_ERR_NULL_PTR -1
@@ -200,6 +200,7 @@ typedef struct RenHdcEngine RenHdcEngine;
 typedef struct RenHdcDualSenseDsp RenHdcDualSenseDsp;
 typedef struct RenHdcXboxRumble RenHdcXboxRumble;
 
+/* Thread safety: never call a handle's destroy in parallel with any other call on the same handle. */
 RenHdcEngine *renhdrum_engine_create(bool is_bluetooth, bool is_pro_controller);
 void renhdrum_engine_destroy(RenHdcEngine *engine);
 int32_t renhdrum_engine_apply_settings(RenHdcEngine *engine, const RenHdcSettings *settings);
@@ -247,6 +248,7 @@ int32_t renhdrum_dualsense_dsp_set_half_target(
     float ah,
     float fh
 );
+/* out_interleaved_4ch must hold frame_count * 4 floats. */
 int32_t renhdrum_dualsense_dsp_fill_f32(
     RenHdcDualSenseDsp *dsp,
     float *out_interleaved_4ch,
@@ -257,6 +259,7 @@ int32_t renhdrum_dualsense_dsp_fill_f32(
 #define RENHDRUM_DS5_BT_REPORT_SIZE 142
 #define RENHDRUM_DS5_BT_PERIOD_NS 10666666ULL
 #define RENHDRUM_DS5_BT_BUFFER_LENGTH_DEFAULT 0xFF
+/* out_report142 must be a buffer of at least 142 bytes (RENHDRUM_DS5_BT_REPORT_SIZE). */
 int32_t renhdrum_dualsense_dsp_build_bt_report(
     RenHdcDualSenseDsp *dsp,
     uint8_t buffer_length,

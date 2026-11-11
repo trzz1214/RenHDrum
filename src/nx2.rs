@@ -16,6 +16,9 @@ pub fn get_nx2_mode() -> i32 {
 /// Piecewise linear curve matching MapPiecewise / ApplyNx2MapExplicit:
 /// (t, p1) -> (0.10, p2) -> (0.50, p3) -> (1.00, p4)
 pub fn map_piecewise(amp: f32, t: f32, p1: f32, p2: f32, p3: f32, p4: f32) -> f32 {
+    if !amp.is_finite() {
+        return 0.0;
+    }
     if amp <= t {
         return 0.0;
     }
@@ -46,6 +49,19 @@ pub fn apply_dualsense_nx2(amp_low: f32, amp_high: f32) -> (f32, f32) {
     (
         map_piecewise(amp_low, 0.001, 0.004, 0.550, 0.900, 1.000),
         map_piecewise(amp_high, 0.001, 0.004, 0.550, 0.900, 1.000),
+    )
+}
+
+/// Xbox One S Switch 2 Mode 2 mapping, first version: the Pro preset [4] curve without the
+/// onset boost (the Xbox mapper has its own kick). When nx2_mode != 2, returns inputs verbatim.
+pub fn apply_xbox_nx2(amp_low: f32, amp_high: f32) -> (f32, f32) {
+    if get_nx2_mode() != 2 {
+        return (amp_low, amp_high);
+    }
+    // ponytail: reuses Pro preset [4]; Xbox gets its own preset after hand tuning
+    (
+        map_piecewise(amp_low, 0.001, 0.048, 0.240, 0.640, 0.950),
+        map_piecewise(amp_high, 0.001, 0.048, 0.240, 0.640, 0.950),
     )
 }
 
@@ -193,5 +209,132 @@ mod tests {
 
         // Reset back to 0
         set_nx2_mode(0);
+    }
+
+    #[test]
+    fn nx2_mode_2_nan_amplitude_returns_zero_and_no_boost() {
+        let _guard = NX2_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_nx2_mode(2);
+        let mut state = Nx2ProBoostState::default();
+
+        // Mode 2, amp_low = NaN, 140 Hz in first 25 ms -> returns 0.0 (previously was 1.0 due to (NaN * 1.2).min(1.0))
+        let (out_l, out_h) = state.apply_pro_nx2(f32::NAN, 140.0, 0.0, 320.0, 10_000);
+        assert_eq!(out_l, 0.0);
+        assert_eq!(out_h, 0.0);
+
+        set_nx2_mode(0);
+    }
+
+    #[test]
+    fn nx2_mode_2_curve_table_and_behavior() {
+        let _guard = NX2_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_nx2_mode(2);
+
+        // 1. Table check (tolerance 0.001):
+        // raw | Pro [4] (no boost: freq >= 150) | DualSense [3]
+        let points = [
+            (0.05f32, 0.1430f32, 0.2742f32),
+            (0.30f32, 0.4400f32, 0.7250f32),
+            (0.75f32, 0.7950f32, 0.9500f32),
+        ];
+
+        for &(raw, expected_pro, expected_ds) in &points {
+            let (ds_l, ds_h) = apply_dualsense_nx2(raw, raw);
+            assert!(
+                (ds_l - expected_ds).abs() < 0.001,
+                "DS raw {raw}: expected {expected_ds}, got {ds_l}"
+            );
+            assert!(
+                (ds_h - expected_ds).abs() < 0.001,
+                "DS high raw {raw}: expected {expected_ds}, got {ds_h}"
+            );
+
+            // Pro unboosted (using freq 200.0 >= 150.0)
+            let mut state = Nx2ProBoostState::default();
+            let (pro_l, pro_h) = state.apply_pro_nx2(raw, 200.0, raw, 200.0, 10_000);
+            assert!(
+                (pro_l - expected_pro).abs() < 0.001,
+                "Pro raw {raw}: expected {expected_pro}, got {pro_l}"
+            );
+            assert!(
+                (pro_h - expected_pro).abs() < 0.001,
+                "Pro high raw {raw}: expected {expected_pro}, got {pro_h}"
+            );
+        }
+
+        // (a) DualSense 2 different bands: low 0.05 / high 0.3 -> 0.2742 / 0.7250 (independent)
+        let (ds_a_l, ds_a_h) = apply_dualsense_nx2(0.05, 0.30);
+        assert!(
+            (ds_a_l - 0.2742).abs() < 0.001,
+            "DS low band: expected 0.2742, got {ds_a_l}"
+        );
+        assert!(
+            (ds_a_h - 0.7250).abs() < 0.001,
+            "DS high band: expected 0.7250, got {ds_a_h}"
+        );
+
+        // (b) Pro boost: 140 Hz, raw 0.3 -> at 24 ms gives 0.528, at 26 ms gives 0.440
+        let mut pro_state = Nx2ProBoostState::default();
+        let t0 = 100_000u64;
+        let (pro_b1, _) = pro_state.apply_pro_nx2(0.30, 140.0, 0.0, 320.0, t0);
+        assert!(
+            (pro_b1 - 0.528).abs() < 0.001,
+            "Pro at start: expected 0.528, got {pro_b1}"
+        );
+        let (pro_b24, _) = pro_state.apply_pro_nx2(0.30, 140.0, 0.0, 320.0, t0 + 24_000);
+        assert!(
+            (pro_b24 - 0.528).abs() < 0.001,
+            "Pro at 24 ms: expected 0.528, got {pro_b24}"
+        );
+        let (pro_b26, _) = pro_state.apply_pro_nx2(0.30, 140.0, 0.0, 320.0, t0 + 26_000);
+        assert!(
+            (pro_b26 - 0.440).abs() < 0.001,
+            "Pro at 26 ms: expected 0.440, got {pro_b26}"
+        );
+
+        // (c) 149 Hz is boosted, 151 Hz is not
+        let mut state_149 = Nx2ProBoostState::default();
+        let (pro_149, _) = state_149.apply_pro_nx2(0.30, 149.0, 0.0, 320.0, t0);
+        assert!(
+            (pro_149 - 0.528).abs() < 0.001,
+            "149 Hz should be boosted to 0.528, got {pro_149}"
+        );
+
+        let mut state_151 = Nx2ProBoostState::default();
+        let (pro_151, _) = state_151.apply_pro_nx2(0.30, 151.0, 0.0, 320.0, t0);
+        assert!(
+            (pro_151 - 0.440).abs() < 0.001,
+            "151 Hz should not be boosted (0.440), got {pro_151}"
+        );
+
+        // (d) Off then on: send 0.0 then 0.3 -> re-triggered boost
+        let mut state_retrigger = Nx2ProBoostState::default();
+        let (on1, _) = state_retrigger.apply_pro_nx2(0.30, 140.0, 0.0, 320.0, t0);
+        assert!((on1 - 0.528).abs() < 0.001);
+        // Advance past boost window
+        let (expired, _) = state_retrigger.apply_pro_nx2(0.30, 140.0, 0.0, 320.0, t0 + 30_000);
+        assert!((expired - 0.440).abs() < 0.001);
+        // Send 0.0 (turn off)
+        let (off, _) = state_retrigger.apply_pro_nx2(0.0, 140.0, 0.0, 320.0, t0 + 35_000);
+        assert_eq!(off, 0.0);
+        // Send 0.3 again (turn on) -> should be boosted again!
+        let (on2, _) = state_retrigger.apply_pro_nx2(0.30, 140.0, 0.0, 320.0, t0 + 40_000);
+        assert!(
+            (on2 - 0.528).abs() < 0.001,
+            "Retriggered note should get boost 0.528, got {on2}"
+        );
+
+        set_nx2_mode(0);
+    }
+
+    #[test]
+    fn xbox_nx2_curve_and_mode0_passthrough() {
+        let _guard = NX2_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_nx2_mode(2);
+        let (lo, hi) = apply_xbox_nx2(0.05, 0.3);
+        set_nx2_mode(0);
+        assert!((lo - 0.1430).abs() < 0.001, "{lo}");
+        assert!((hi - 0.4400).abs() < 0.001, "{hi}");
+        assert_eq!(apply_xbox_nx2(0.05, 0.3), (0.05, 0.3));
     }
 }

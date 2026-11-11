@@ -192,7 +192,10 @@ impl DualSenseHapticsDsp {
         let raw = HdSideSample::new(al, fl, ah, fh);
         self.latest_left = side;
         self.latest_raw_left = raw;
-        if !self.slot_dirty_left || Self::raw_amp_sum(&raw) >= Self::raw_amp_sum(&self.raw_left) {
+        if !self.slot_dirty_left
+            || crate::nx2::get_nx2_mode() != 2
+            || Self::raw_amp_sum(&raw) >= Self::raw_amp_sum(&self.raw_left)
+        {
             self.target_left = side;
             self.raw_left = raw;
         }
@@ -204,7 +207,10 @@ impl DualSenseHapticsDsp {
         let raw = HdSideSample::new(al, fl, ah, fh);
         self.latest_right = side;
         self.latest_raw_right = raw;
-        if !self.slot_dirty_right || Self::raw_amp_sum(&raw) >= Self::raw_amp_sum(&self.raw_right) {
+        if !self.slot_dirty_right
+            || crate::nx2::get_nx2_mode() != 2
+            || Self::raw_amp_sum(&raw) >= Self::raw_amp_sum(&self.raw_right)
+        {
             self.target_right = side;
             self.raw_right = raw;
         }
@@ -521,6 +527,10 @@ mod tests {
 
     #[test]
     fn test_peak_hold_in_slot_preserves_short_menu_tick_then_releases() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::nx2::set_nx2_mode(2);
         let mut dsp = DualSenseHapticsDsp::new(100, false);
         let mut buf = [0.0f32; DUALSENSE_BUFFER_FRAMES * DUALSENSE_CHANNELS];
         dsp.fill_interleaved_f32(&mut buf);
@@ -545,5 +555,29 @@ mod tests {
         dsp.fill_interleaved_f32(&mut buf);
         assert_eq!(dsp.slot_left.amp_low, 0.0);
         assert_eq!(dsp.slot_right.amp_low, 0.0);
+        crate::nx2::set_nx2_mode(0);
+    }
+
+    fn slot_after_tick_then_zero(mode: i32) -> (f32, f32) {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::nx2::set_nx2_mode(mode);
+        let mut dsp = DualSenseHapticsDsp::new(100, false);
+        let mut buf = [0.0f32; DUALSENSE_BUFFER_FRAMES * DUALSENSE_CHANNELS];
+        dsp.fill_interleaved_f32(&mut buf);
+        dsp.set_target(0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+        dsp.set_target(0.0, 160.0, 0.0, 320.0, 0.0, 160.0, 0.0, 320.0);
+        dsp.fill_interleaved_f32(&mut buf);
+        crate::nx2::set_nx2_mode(0);
+        (dsp.slot_left.amp_low, dsp.slot_right.amp_low)
+    }
+
+    #[test]
+    fn test_peak_hold_only_in_switch2_mode() {
+        let (l0, r0) = slot_after_tick_then_zero(0);
+        assert_eq!((l0, r0), (0.0, 0.0), "mode 0: last write wins like Ryuhdr");
+        let (l2, r2) = slot_after_tick_then_zero(2);
+        assert!(l2 > 0.5 && r2 > 0.5, "mode 2 holds the peak: {l2} {r2}");
     }
 }

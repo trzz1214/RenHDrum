@@ -1,0 +1,193 @@
+From b1d1d101d1bf0812afda7b50bded33ff0a0c0a61 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 21:06:10 +0700
+Subject: [PATCH 4/6] hid: real command 213, Switch 2 mode to RenHDrum
+
+Replace Unknown213 with SendVibrationValueInMode and record the guest Mode
+(commands 213 / 214) in Settings::values.nx2_active_mode. RenHDrumPad passes
+it to renhdrum_set_nx2_mode when it changes; the symbol is optional, so an
+older renhdrum.dll keeps working. Based on Brontide-NS2 patch 0005.
+---
+ src/common/settings.h                     |  5 ++++
+ src/core/hle/service/hid/hid_server.cpp   | 35 +++++++++++++++++++----
+ src/core/hle/service/hid/hid_server.h     | 10 ++++---
+ src/input_common/drivers/renhdrum_pad.cpp | 13 +++++++++
+ 4 files changed, 53 insertions(+), 10 deletions(-)
+
+diff --git a/src/common/settings.h b/src/common/settings.h
+index aea2cf6..656494d 100644
+--- a/src/common/settings.h
++++ b/src/common/settings.h
+@@ -8,6 +8,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <map>
+ #include <memory>
+ #include <optional>
+@@ -923,6 +924,10 @@ struct Values {
+     SwitchableSetting<bool> enable_accurate_vibrations{linkage, false, "enable_accurate_vibrations",
+                                                        Category::Controls};
+ 
++    // Switch 2 rumble Mode last sent by the guest (command 213 / 214): 2 = Mode 2, else 0. Written by
++    // the HID service, read by the RenHDrum pad driver. Not a user setting.
++    std::atomic<int> nx2_active_mode{0};
++
+     // RenHDrum HD Rumble (Switch Pro Controller / Joy-Con) and DualSense haptics. Defaults are
+     // Ryuhdr 0.2.6's recommended mode. Read by the SDL driver on every vibration, so a change in
+     // the HD Rumble dialog applies to connected controllers right away.
+diff --git a/src/core/hle/service/hid/hid_server.cpp b/src/core/hle/service/hid/hid_server.cpp
+index 232f38c..6928633 100644
+--- a/src/core/hle/service/hid/hid_server.cpp
++++ b/src/core/hle/service/hid/hid_server.cpp
+@@ -148,7 +148,7 @@ IHidServer::IHidServer(Core::System& system_, std::shared_ptr<ResourceManager> r
+         {210, C<&IHidServer::EndPermitVibrationSession>, "EndPermitVibrationSession"},
+         {211, C<&IHidServer::IsVibrationDeviceMounted>, "IsVibrationDeviceMounted"},
+         {212, C<&IHidServer::SendVibrationValueInBool>, "SendVibrationValueInBool"},
+-        {213, C<&IHidServer::Unknown213>, "Unknown213"},
++        {213, C<&IHidServer::SendVibrationValueInMode>, "SendVibrationValueInMode (guessed)"},
+         {214, C<&IHidServer::SendNx2VibrationValues>, "SendNx2VibrationValues (guessed)"},
+         {220, C<&IHidServer::Unknown220>, "Unknown220"},
+         {300, C<&IHidServer::ActivateConsoleSixAxisSensor>, "ActivateConsoleSixAxisSensor"},
+@@ -963,6 +963,7 @@ Result IHidServer::SendVibrationValue(Core::HID::VibrationDeviceHandle vibration
+               vibration_device_handle.npad_type, vibration_device_handle.npad_id,
+               vibration_device_handle.device_index, aruid.pid);
+ 
++    Settings::values.nx2_active_mode.store(0, std::memory_order_relaxed);
+     GetResourceManager()->SendVibrationValue(aruid.pid, vibration_device_handle, vibration_value);
+     R_SUCCEED()
+ }
+@@ -1028,6 +1029,8 @@ Result IHidServer::SendVibrationValues(
+ 
+     R_UNLESS(vibration_handles.size() == vibration_values.size(), ResultVibrationArraySizeMismatch);
+ 
++    // Switch 1 style vibration: no Switch 2 Mode in effect
++    Settings::values.nx2_active_mode.store(0, std::memory_order_relaxed);
+     for (std::size_t i = 0; i < vibration_handles.size(); i++) {
+         R_TRY(GetResourceManager()->SendVibrationValue(aruid.pid, vibration_handles[i],
+                                                        vibration_values[i]));
+@@ -1194,10 +1197,13 @@ private:
+ } // namespace
+ 
+ Result IHidServer::SendNx2VibrationValues(
+-    u64 unknown, AppletResourceUserId aruid,
++    u64 mode, AppletResourceUserId aruid,
+     InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
+     InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values) {
+-    LOG_DEBUG(Service_HID, "called, unknown={}, applet_resource_user_id={}", unknown, aruid.pid);
++    LOG_DEBUG(Service_HID, "called, mode={}, applet_resource_user_id={}", mode, aruid.pid);
++
++    // The guest Mode reaches RenHDrum through the pad driver (RenHDrumPad reads this on each sample)
++    Settings::values.nx2_active_mode.store(mode == 2 ? 2 : 0, std::memory_order_relaxed);
+ 
+     // Unlike 206 this never fails: rumble is best effort and the command is only known from
+     // captures, so an unexpected handle or layout shouldn't return an error a game may treat as
+@@ -1206,7 +1212,7 @@ Result IHidServer::SendNx2VibrationValues(
+     auto& trace = Nx2VibrationTrace::Instance();
+     for (std::size_t i = 0; i < count; i++) {
+         if (trace.Enabled()) {
+-            trace.Record(unknown, vibration_handles[i], vibration_values[i]);
++            trace.Record(mode, vibration_handles[i], vibration_values[i]);
+         }
+         const auto result = GetResourceManager()->SendVibrationValue(
+             aruid.pid, vibration_handles[i], vibration_values[i]);
+@@ -1218,8 +1224,25 @@ Result IHidServer::SendNx2VibrationValues(
+     R_SUCCEED();
+ }
+ 
+-Result IHidServer::Unknown213() {
+-    LOG_DEBUG(Service_HID, "(STUBBED) called");
++Result IHidServer::SendVibrationValueInMode(Core::HID::VibrationDeviceHandle vibration_device_handle,
++                                            u32 mode, Core::HID::VibrationValue vibration_value,
++                                            ClientAppletResourceUserId aruid) {
++    LOG_DEBUG(Service_HID,
++              "called, npad_type={}, npad_id={}, device_index={}, mode={}, "
++              "applet_resource_user_id={}",
++              vibration_device_handle.npad_type, vibration_device_handle.npad_id,
++              vibration_device_handle.device_index, mode, aruid.pid);
++
++    // Mode 2 is the only Switch 2 mode RenHDrum translates; anything else plays as Switch 1.
++    Settings::values.nx2_active_mode.store(mode == 2 ? 2 : 0, std::memory_order_relaxed);
++
++    // Never an error: rumble is best effort and the layout (handle 4, mode 4, value 16, aruid 8)
++    // is only known from captures.
++    const auto result =
++        GetResourceManager()->SendVibrationValue(aruid.pid, vibration_device_handle, vibration_value);
++    if (result.IsError()) {
++        LOG_DEBUG(Service_HID, "failed to send vibration 213, result={:#x}", result.raw);
++    }
+     R_SUCCEED();
+ }
+ 
+diff --git a/src/core/hle/service/hid/hid_server.h b/src/core/hle/service/hid/hid_server.h
+index 9bb62fa..dc2ec6d 100644
+--- a/src/core/hle/service/hid/hid_server.h
++++ b/src/core/hle/service/hid/hid_server.h
+@@ -192,12 +192,14 @@ private:
+     // Switch 2 sends vibration every frame with 214: pointer buffers of device handles and values
+     // like 206, but the aruid is raw data after an unknown u64 instead of a sent process id.
+     Result SendNx2VibrationValues(
+-        u64 unknown, AppletResourceUserId aruid,
++        u64 mode, AppletResourceUserId aruid,
+         InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
+         InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values);
+-    // 213 (32 bytes, aruid): sent per controller every frame by Kirby Air Riders (tens of
+-    // thousands of auto stub log lines a run); no reply data. Accepted and dropped.
+-    Result Unknown213();
++    // 213 (32 bytes, aruid): sent per controller every frame by Kirby Air Riders. Guessed layout:
++    // handle 4, mode 4, value 16, aruid 8. Forwarded like 201 and never fails.
++    Result SendVibrationValueInMode(Core::HID::VibrationDeviceHandle vibration_device_handle,
++                                    u32 mode, Core::HID::VibrationValue vibration_value,
++                                    ClientAppletResourceUserId aruid);
+     // 220 (16 bytes, aruid): replies one byte (meaning unknown); answer 0 instead of leaving it to
+     // the message buffer's leftovers.
+     Result Unknown220(Out<u8> out);
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 4367ca6..485e219 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -56,6 +56,8 @@ struct RenHDrumApi {
+     decltype(&renhdrum_xbox_rumble_push_half_sample) xbox_push_half_sample{};
+     decltype(&renhdrum_xbox_rumble_tick) xbox_tick{};
+     decltype(&renhdrum_xbox_rumble_resend) xbox_resend{};
++    // Optional (RenHDrum 0.3.0+): Switch 2 rumble Mode. An older library keeps Switch 1 behaviour.
++    decltype(&renhdrum_set_nx2_mode) set_nx2_mode{};
+     bool HasXbox() const {
+         return xbox_create && xbox_destroy && xbox_push_half_sample && xbox_tick && xbox_resend;
+     }
+@@ -101,6 +103,7 @@ const RenHDrumApi& Api() {
+                                       &a.xbox_push_half_sample);
+             (void)a.library.GetSymbol("renhdrum_xbox_rumble_tick", &a.xbox_tick);
+             (void)a.library.GetSymbol("renhdrum_xbox_rumble_resend", &a.xbox_resend);
++            (void)a.library.GetSymbol("renhdrum_set_nx2_mode", &a.set_nx2_mode);
+             LOG_INFO(Input, "RenHDrum: loaded {}", name);
+         } else {
+             LOG_WARNING(Input, "RenHDrum: {} is missing functions, using the standard rumble", name);
+@@ -110,6 +113,15 @@ const RenHDrumApi& Api() {
+     return api;
+ }
+ 
++/// Hands the guest's Switch 2 Mode (set by HID commands 213 / 214) to RenHDrum when it changes.
++void ApplyNx2Mode(const RenHDrumApi& api) {
++    static std::atomic<int> applied{0};
++    const int mode = Settings::values.nx2_active_mode.load(std::memory_order_relaxed);
++    if (applied.exchange(mode, std::memory_order_relaxed) != mode && api.set_nx2_mode) {
++        api.set_nx2_mode(mode);
++    }
++}
++
+ constexpr Uint16 NintendoVendorId = 0x057E;
+ constexpr Uint16 SonyVendorId = 0x054C;
+ constexpr Uint16 MicrosoftVendorId = 0x045E;
+@@ -841,6 +853,7 @@ bool RenHDrumPad::Vibrate(std::int64_t now_us, bool is_right,
+         change = impl->RefreshUserSettings();
+         const auto& u = impl->user;
+         const auto& api = Api();
++        ApplyNx2Mode(api);
+         if (impl->xbox && u.hd_enabled && u.xbox_enabled && u.xbox_direct) {
+             // Both halves share one pad: each motor follows the stronger side
+             const std::size_t side = is_right ? 1 : 0;
+-- 
+2.55.0.windows.5
+

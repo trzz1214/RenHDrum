@@ -70,12 +70,12 @@ Reference platforms validating pure C ABI integration, 5 ms AM/FM micro-timing, 
 ### 2. Switch 2 Emulators (Experimental Research)
 
 > [!NOTE]
-> **Switch 2 Experimental Testbeds**: Experimental builds for trying HD Rumble in Switch 2 games, based on PokeDinner 2.5.0 by Franseven and Fritchii v5.3 / Lichii. I don't encourage downloading them; they exist so people can feel the results. Bring your own legally dumped games and keys. Read the [technical research](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html).
+> **Switch 2 Experimental Testbeds**: Experimental builds for trying HD Rumble in Switch 2 games, based on PokeDinner 2.5.0 by Franseven and Fritchii v5.5 / Lichii. I don't encourage downloading them; they exist so people can feel the results. Bring your own legally dumped games and keys. Read the [technical research](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html).
 
 | Project | Base & Integration Architecture | Testbed Role | Research Notes |
 |---|---|---|---|
 | **Brontide-NS2** *(1.1.0)* | PokeDinner 2.5.0 by Franseven (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-ns2.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
-| **Brontide-oot** *(1.0.0)* | Fritchii v5.3 by Frizti, Lichii by zortos293, Dynamic FPS by Dark (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation (DLSS, compute fallback & water/lighting fixes) | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-oot.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
+| **Brontide-oot** *(1.0.1)* | Fritchii v5.5 by Frizti, Lichii by zortos293, Dynamic FPS by Dark (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation (120k shader prep for AMD/NVIDIA, DLSS, compute fallback & water/lighting fixes) | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-oot.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
 
 ### 3. Static Recompilation (Native PC Ports)
 
@@ -240,11 +240,11 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
     - **RenHDrum Refinement**: Informed the Switch 2 amplitude scaling investigation and empirical calibration for per-controller piecewise response curves (`src/nx2.rs`).
 
 12. **Frizti ([`Fritchii`](https://github.com/frizti)), zortos293 ([`Lichii`](https://github.com/zortos293/Lichii)), Dark ([`Dynamic FPS`](https://github.com/darkxex/dynamic-fps))**
-    - **Foundation**: Created Fritchii v5.3, Lichii, and Dynamic FPS, providing specialized rendering and timing fixes for Switch 2 titles.
-    - **RenHDrum Refinement**: Serves as the host emulator platform for validating RenHDrum HD Rumble in Switch 2 titles via Brontide-oot 1.0.0.
+    - **Foundation**: Created Fritchii v5.5, Lichii, and Dynamic FPS, providing specialized rendering and timing fixes for Switch 2 titles.
+    - **RenHDrum Refinement**: Serves as the host emulator platform for validating RenHDrum HD Rumble in Switch 2 titles via Brontide-oot 1.0.1.
 
 13. **NotRexed ([`Hookshot`](https://github.com/NotRexed/Hookshot))**
-    - **Foundation**: Created the Hookshot static recompiler for *The Legend of Zelda: Ocarina of Time* (Switch 2 Edition).
+    - **Foundation**: Created the Hookshot static recompiler for *Ocarina of Time* (Switch 2 Edition).
     - **RenHDrum Refinement**: Serves as the reference testbed for validating the Generic Recomp C Kit (`integrations/recomp-c/`), enabling turnkey zero-lag HD Rumble synthesis in native PC static recompilations.
 
 ### Copied · Referenced · Built in this project

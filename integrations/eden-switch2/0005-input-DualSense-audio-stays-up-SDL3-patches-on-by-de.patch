@@ -1,0 +1,123 @@
+From 824fb7a01bcceb38339fd92a3e4c7fe7d853f38a Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 21:06:33 +0700
+Subject: [PATCH 5/6] input: DualSense audio stays up; SDL3 patches on by
+ default
+
+SDL audio is initialized once and never quit on unplug (RenHDrum#4, fix by
+iafx; same approach as Brontide-NS2 patch 0006). RENHDRUM_SDL_PATCHES now
+defaults to ON when ENABLE_RENHDRUM is on.
+---
+ CMakeLists.txt                            |  2 +-
+ src/input_common/drivers/renhdrum_pad.cpp | 32 ++++++++++++++---------
+ 2 files changed, 20 insertions(+), 14 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c42a181..49bccdb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -254,7 +254,7 @@ option(YUZU_USE_BUNDLED_SDL3 "Download bundled SDL3 build" ${EXT_DEFAULT})
+ option(ENABLE_RENHDRUM "Play controller vibration through RenHDrum when renhdrum.dll is present" ON)
+ option(RENHDRUM_DOWNLOAD "Download the prebuilt renhdrum.dll next to the executable (Windows x64)" OFF)
+ cmake_dependent_option(RENHDRUM_SDL_PATCHES
+-    "Build SDL3 from source with RenHDrum's HD Rumble transport patches" OFF "ENABLE_RENHDRUM" OFF)
++    "Build SDL3 from source with RenHDrum's HD Rumble transport patches" ON "ENABLE_RENHDRUM" OFF)
+ if (RENHDRUM_SDL_PATCHES AND YUZU_USE_BUNDLED_SDL3)
+     message(STATUS "RENHDRUM_SDL_PATCHES: building SDL3 from source instead of the bundled build")
+     set(YUZU_USE_BUNDLED_SDL3 OFF)
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 485e219..a3e3629 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -10,6 +10,7 @@
+ #include <atomic>
+ #include <cmath>
+ #include <cstring>
++#include <mutex>
+ #include <string>
+ #include <thread>
+ 
+@@ -113,6 +114,23 @@ const RenHDrumApi& Api() {
+     return api;
+ }
+ 
++/// SDL audio for DualSense USB haptics: initialized once and never quit while the emulator runs.
++/// Quitting it on unplug ran SDL's queued "device lost" work on freed state (RenHDrum#4, fix by
++/// iafx). Every pad shares this one reference.
++bool EnsureAudioForHaptics() {
++    static std::mutex audio_mutex;
++    static bool audio_ready = false;
++    std::scoped_lock lock{audio_mutex};
++    if (audio_ready) {
++        return true;
++    }
++    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
++        return false;
++    }
++    audio_ready = true;
++    return true;
++}
++
+ /// Hands the guest's Switch 2 Mode (set by HID commands 213 / 214) to RenHDrum when it changes.
+ void ApplyNx2Mode(const RenHDrumApi& api) {
+     static std::atomic<int> applied{0};
+@@ -257,7 +275,6 @@ struct RenHDrumPad::Impl {
+     RenHdcEngine* engine{};
+     RenHdcDualSenseDsp* dsp{};
+     SDL_AudioStream* audio_stream{};
+-    bool audio_inited{};
+     bool audio_opening{};
+     int audio_attempts{};
+     std::int64_t audio_next_us{};
+@@ -430,10 +447,8 @@ struct RenHDrumPad::Impl {
+             StartDualSenseBluetooth(js, gp);
+             return;
+         }
+-        // SDL counts subsystem references: every pad with a stream holds one, so one pad going
+-        // away does not stop another's audio.
+         SDL_AudioStream* stream = nullptr;
+-        const bool inited = SDL_InitSubSystem(SDL_INIT_AUDIO);
++        const bool inited = EnsureAudioForHaptics();
+         if (inited) {
+             stream = OpenDualSenseAudioStream(js);
+         } else {
+@@ -445,7 +460,6 @@ struct RenHDrumPad::Impl {
+             audio_opening = false;
+             if (stream && joystick && dsp && !audio_stream) {
+                 audio_stream = stream;
+-                audio_inited = true;
+                 opened = true;
+                 // Start only once published: from here on, the DSP is replaced or freed only
+                 // under SDL_LockAudioStream or after SDL_DestroyAudioStream. The callback never
+@@ -456,7 +470,6 @@ struct RenHDrumPad::Impl {
+                     LOG_WARNING(Input, "RenHDrum: DualSense audio did not start: {}",
+                                 SDL_GetError());
+                     audio_stream = nullptr;
+-                    audio_inited = false;
+                     opened = false;
+                 }
+             }
+@@ -466,9 +479,6 @@ struct RenHDrumPad::Impl {
+             if (stream) {
+                 SDL_DestroyAudioStream(stream);
+             }
+-            if (inited) {
+-                SDL_QuitSubSystem(SDL_INIT_AUDIO);
+-            }
+         }
+         if (opened) {
+             // Stop SDL's HID rumble once so the pad plays the audio haptics
+@@ -654,10 +664,6 @@ struct RenHDrumPad::Impl {
+             SDL_DestroyAudioStream(audio_stream);
+             audio_stream = nullptr;
+         }
+-        if (audio_inited) {
+-            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+-            audio_inited = false;
+-        }
+         if (xbox) {
+             api.xbox_destroy(xbox);
+             xbox = nullptr;
+-- 
+2.55.0.windows.5
+
