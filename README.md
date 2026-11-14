@@ -54,38 +54,18 @@ Please don't open issues for research controllers yet.
 
 ---
 
-## Reference Testbeds & Implementations
+## Prebuilt Test Builds
 
-These reference platforms and testbeds are personal environments used to validate RenHDrum in actual games and verify physical haptic fidelity across three target architectures:
+If you want to feel RenHDrum without building anything, I keep a few personal test builds with RenHDrum already integrated. They are experiments, not official releases of any emulator project. Downloads, setup notes and checksums are on the website only; this repository ships no emulator binaries, games or keys. Bring your own legally dumped games and keys.
 
-### 1. Switch 1 Emulators (Production Baseline)
+| Build | For | Details & download |
+|---|---|---|
+| **Brontide** | Switch 1 games, with HD Rumble Studio | [Website →](https://ryuhdr.threedola.workers.dev/brontide.html) |
+| **Ryuhdr** | The reference build RenHDrum is checked against | [Website →](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
+| **Brontide-NS2** | Switch 2 games (experimental) | [Website →](https://ryuhdr.threedola.workers.dev/brontide-ns2.html) |
+| **Brontide-oot** | Ocarina of Time, Switch 2 Edition (experimental) | [Website →](https://ryuhdr.threedola.workers.dev/brontide-oot.html) |
 
-Reference platforms validating pure C ABI integration, 5 ms AM/FM micro-timing, and DualSense DSP against the golden reference:
-
-| Project | Base & Integration Architecture | Testbed Role | Research Notes |
-|---|---|---|---|
-| **Brontide** *(1.2.1)* | Eden (C++ / Patched SDL3, `renhdrum.dll` thin hook, built-in HD Rumble Studio) | Pure C ABI validation & DualSense BT testbed | [Lab Notes →](https://ryuhdr.threedola.workers.dev/brontide.html) |
-| **Ryuhdr** *(0.5.1)* | Ryujinx 1.1.1403 (C# / Deep-Patched SDL2, embedded engine) | Reference baseline & golden waveform source | [Lab Notes →](https://ryuhdr.threedola.workers.dev/#ryuhdr) |
-| **Ryu-HDRum** *(1.0.0)* | Ryubing (C# / Patched SDL3, `renhdrum.dll` embedded, modern system support) | SDL3 C# interop & modern runtime testbed | [Lab Notes →](https://ryuhdr.threedola.workers.dev/#ryu-hdrum) |
-
-### 2. Switch 2 Emulators (Experimental Research)
-
-> [!NOTE]
-> **Switch 2 Experimental Testbeds**: Experimental builds for trying HD Rumble in Switch 2 games, based on PokeDinner 2.5.0 by Franseven and Fritchii v5.5 / Lichii. I don't encourage downloading them; they exist so people can feel the results. Bring your own legally dumped games and keys. Read the [technical research](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html).
-
-| Project | Base & Integration Architecture | Testbed Role | Research Notes |
-|---|---|---|---|
-| **Brontide-NS2** *(1.1.1)* | PokeDinner 2.5.0 by Franseven (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-ns2.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
-| **Brontide-oot** *(1.0.1)* | Fritchii v5.5 by Frizti, Lichii by zortos293, Dynamic FPS by Dark (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation (120k shader prep for AMD/NVIDIA, DLSS, compute fallback & water/lighting fixes) | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-oot.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
-
-### 3. Static Recompilation (Native PC Ports)
-
-> [!TIP]
-> **Zero-Lag Native PC Execution**: Unlike emulators, static recompilation translates game code directly into native PC instructions with zero emulation overhead. Because game binaries cannot be distributed, users compile the game from their own legal Switch 2 dump; RenHDrum provides turnkey authentic HD Rumble with zero configuration via a drop-in C bridge.
-
-| Project | Base & Integration Architecture | Testbed Role | Research & Guide Notes |
-|---|---|---|---|
-| **Hookshot** *(v2.1.0)* | Generic Recomp C Kit (C / Patched SDL3, `renhdrum.dll` dynamic load) | Native PC port zero-lag validation & Switch 2 command 214 routing | [Web 3-Step Guide →](https://ryuhdr.threedola.workers.dev/#hookshot-recomp) · [Recomp Guide →](docs/integration/recomp-games.md) · [C Bridge Kit →](integrations/recomp-c/) |
+Recompiled PC ports can't be shipped as builds, because each player compiles the game from their own dump. See the [website guide](https://ryuhdr.threedola.workers.dev/#hookshot-recomp) and [Recomp integration guide](docs/integration/recomp-games.md).
 
 New to HD Rumble? [See how this differs from other emulators →](https://ryuhdr.threedola.workers.dev/compare.html)
 

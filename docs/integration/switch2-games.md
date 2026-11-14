@@ -149,8 +149,6 @@ Instead:
 
 ---
 
-## 4. Reference Testbeds
+## 4. Prebuilt Test Builds
 
-Two reference implementations combining command 214 dispatching with RenHDrum 0.3.0 and Profile-Guided Optimization (PGO) are available:
-1. **Brontide-NS2 1.1.0** (based on PokeDinner 2.5.0 by Franseven): Tuned for *Donkey Kong Bananza* and *Mario Kart World*.
-2. **Brontide-oot 1.0.1** (based on Fritchii v5.5 by Frizti, Lichii by zortos293, and Dynamic FPS by Dark) - tuned for Ocarina of Time (Switch 2 Edition) with comprehensive AMD/NVIDIA ahead-of-time shader preparation (120,461 pipelines), 10 GiB disk cache allocation, DLSS presets, lower memory footprint, and RenHDrum 0.3.0 HD Rumble.
+To try the result without integrating anything, see the personal test builds listed in the [README](../../README.md#prebuilt-test-builds). Downloads and notes are on the website only.
