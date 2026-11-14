@@ -21,9 +21,13 @@ pub struct HdBtLevel {
     pub high_freq: i32,
     pub low_freq: i32,
     pub stop_priority: bool,
+    /// Send the newest sample instead of the held peak (level 4).
+    pub send_latest: bool,
+    /// Re-send a still-rumbling packet after this many ms; 0 = never.
+    pub resend_ms: i32,
 }
 
-pub const HD_BT_LEVELS: [HdBtLevel; 3] = [
+pub const HD_BT_LEVELS: [HdBtLevel; 4] = [
     HdBtLevel {
         level: 1,
         name: "Stable",
@@ -34,6 +38,8 @@ pub const HD_BT_LEVELS: [HdBtLevel; 3] = [
         high_freq: 16,
         low_freq: 4,
         stop_priority: false,
+        send_latest: false,
+        resend_ms: 0,
     },
     HdBtLevel {
         level: 2,
@@ -45,6 +51,8 @@ pub const HD_BT_LEVELS: [HdBtLevel; 3] = [
         high_freq: 8,
         low_freq: 2,
         stop_priority: true,
+        send_latest: false,
+        resend_ms: 0,
     },
     HdBtLevel {
         level: 3,
@@ -56,6 +64,22 @@ pub const HD_BT_LEVELS: [HdBtLevel; 3] = [
         high_freq: 4,
         low_freq: 1,
         stop_priority: true,
+        send_latest: false,
+        resend_ms: 0,
+    },
+    // amp_steps / freq 0: any change counts as real (hd_is_small_change only skips diffs <= these).
+    HdBtLevel {
+        level: 4,
+        name: "Compatible",
+        spacing_ms: 32,
+        burst: 1.0,
+        refill_ms: 32.0,
+        amp_steps: 0,
+        high_freq: 0,
+        low_freq: 0,
+        stop_priority: true,
+        send_latest: true,
+        resend_ms: 40,
     },
 ];
 

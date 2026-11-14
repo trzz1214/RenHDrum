@@ -45,6 +45,22 @@ pub fn curve(amplitude: f32) -> f32 {
     }
 }
 
+/// DualSense Switch 2 Mode 2 amplitude law (plan 104 L1): `a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`.
+#[inline]
+pub(crate) fn mode2_amp(a: f32) -> f32 {
+    if a <= 0.001 {
+        0.0
+    } else {
+        (3.5 * (a as f64).powf(0.75)).min(1.0) as f32
+    }
+}
+
+/// One-pole smoothing coefficient for a time constant in ms.
+#[inline]
+pub fn smoothing_coef(ms: f64) -> f32 {
+    (1.0 - (-1000.0 / (DUALSENSE_SAMPLE_RATE as f64 * ms)).exp()) as f32
+}
+
 /// Builds one side's targets from the game's values.
 pub fn make_side(
     mut amp_low: f32,
@@ -52,13 +68,28 @@ pub fn make_side(
     mut amp_high: f32,
     freq_high: f32,
 ) -> DualSenseSide {
+    let shape: fn(f32) -> f32 = if crate::nx2::get_nx2_mode() == 2 {
+        mode2_amp
+    } else {
+        curve
+    };
+    let freq_low = if freq_low > 0.0 {
+        freq_low.clamp(DUALSENSE_MIN_FREQUENCY, DUALSENSE_MAX_FREQUENCY)
+    } else {
+        DUALSENSE_DEFAULT_LOW_FREQUENCY
+    };
+    let freq_high = if freq_high > 0.0 {
+        freq_high.clamp(DUALSENSE_MIN_FREQUENCY, DUALSENSE_MAX_FREQUENCY)
+    } else {
+        DUALSENSE_DEFAULT_HIGH_FREQUENCY
+    };
     amp_low = if amp_low.is_finite() {
-        curve(amp_low.clamp(0.0, 1.0))
+        shape(amp_low.clamp(0.0, 1.0))
     } else {
         0.0
     };
     amp_high = if amp_high.is_finite() {
-        curve(amp_high.clamp(0.0, 1.0))
+        shape(amp_high.clamp(0.0, 1.0))
     } else {
         0.0
     };
@@ -72,16 +103,8 @@ pub fn make_side(
     DualSenseSide {
         amp_low,
         amp_high,
-        freq_low: if freq_low > 0.0 {
-            freq_low.clamp(DUALSENSE_MIN_FREQUENCY, DUALSENSE_MAX_FREQUENCY)
-        } else {
-            DUALSENSE_DEFAULT_LOW_FREQUENCY
-        },
-        freq_high: if freq_high > 0.0 {
-            freq_high.clamp(DUALSENSE_MIN_FREQUENCY, DUALSENSE_MAX_FREQUENCY)
-        } else {
-            DUALSENSE_DEFAULT_HIGH_FREQUENCY
-        },
+        freq_low,
+        freq_high,
     }
 }
 
@@ -100,6 +123,8 @@ pub fn crisp_side(slots_since_onset: &mut i32, raw: &HdSideSample) -> DualSenseS
 pub struct DualSenseHapticsDsp {
     pub volume_percent: i32,
     pub crisp_notes: bool,
+    /// Valve grip profile: per-band gain after the amplitude law (see `valve::grip_gain`).
+    grip: bool,
     gain: f32,
     smoothing: f32,
 
@@ -128,10 +153,9 @@ impl DualSenseHapticsDsp {
         let mut dsp = Self {
             volume_percent: 100,
             crisp_notes,
+            grip: false,
             gain: DUALSENSE_OUTPUT_CEILING,
-            smoothing: (1.0
-                - (-1000.0 / (DUALSENSE_SAMPLE_RATE as f64 * DUALSENSE_SMOOTHING_MS)).exp())
-                as f32,
+            smoothing: smoothing_coef(DUALSENSE_SMOOTHING_MS),
             target_left: DualSenseSide::default(),
             target_right: DualSenseSide::default(),
             latest_left: DualSenseSide::default(),
@@ -159,6 +183,13 @@ impl DualSenseHapticsDsp {
             slot_frames_left: 0,
         };
         dsp.set_volume(volume_percent);
+        dsp
+    }
+
+    /// Same synthesizer with the Valve grip profile (Steam Controller 2026).
+    pub fn new_grip(volume_percent: i32, crisp_notes: bool) -> Self {
+        let mut dsp = Self::new(volume_percent, crisp_notes);
+        dsp.grip = true;
         dsp
     }
 
@@ -276,6 +307,12 @@ impl DualSenseHapticsDsp {
             self.slot_left = self.target_left;
             self.slot_right = self.target_right;
         }
+        if self.grip {
+            for side in [&mut self.slot_left, &mut self.slot_right] {
+                side.amp_low *= crate::valve::grip_gain(side.freq_low);
+                side.amp_high *= crate::valve::grip_gain(side.freq_high);
+            }
+        }
         self.target_left = self.latest_left;
         self.target_right = self.latest_right;
         self.raw_left = self.latest_raw_left;
@@ -325,6 +362,9 @@ mod tests {
 
     #[test]
     fn test_curve_is_square_root() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cases = [
             (0.0f32, 0.0f32),
             (0.04f32, 0.2f32),
@@ -348,11 +388,17 @@ mod tests {
 
     #[test]
     fn test_curve_of_negative_is_zero() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         assert_eq!(curve(-0.5), 0.0);
     }
 
     #[test]
     fn test_curve_never_weakens_and_keeps_order() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut previous = 0.0f32;
 
         for i in 1..=100 {
@@ -369,6 +415,9 @@ mod tests {
 
     #[test]
     fn test_side_applies_curve_to_both_bands() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let side = make_side(0.16, 160.0, 0.09, 320.0);
         assert!((side.amp_low - 0.4).abs() < TOLERANCE);
         assert!((side.amp_high - 0.3).abs() < TOLERANCE);
@@ -378,6 +427,9 @@ mod tests {
 
     #[test]
     fn test_side_clamps_bands_after_curve() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // 0.25 + 0.25 -> 0.5 + 0.5 = exactly full scale
         let full = make_side(0.25, 160.0, 0.25, 320.0);
         assert!((full.amp_low - 0.5).abs() < TOLERANCE);
@@ -397,6 +449,9 @@ mod tests {
 
     #[test]
     fn test_side_clamps_invalid_amplitudes() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let big = make_side(5.0, 160.0, 0.0, 320.0);
         assert!((big.amp_low - 1.0).abs() < TOLERANCE);
         assert_eq!(big.amp_high, 0.0);
@@ -412,6 +467,9 @@ mod tests {
 
     #[test]
     fn test_side_frequency_defaults_and_limits() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Missing frequency: 160 Hz low / 320 Hz high
         let missing = make_side(0.25, 0.0, 0.25, f32::NAN);
         assert_eq!(missing.freq_low, 160.0);
@@ -425,6 +483,9 @@ mod tests {
 
     #[test]
     fn test_crisp_side_follows_the_card8_envelope() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut slots = -1;
         let note = HdSideSample::new(0.25, 160.0, 0.0, 320.0);
 
@@ -464,6 +525,9 @@ mod tests {
 
     #[test]
     fn test_frequency_glides_like_ryuhdr() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Voice starts silent at 160 Hz; target 0.25 (curve -> 0.5) at 320 Hz, crisp off, volume 100 (gain 0.8).
         let mut dsp = DualSenseHapticsDsp::new(100, false);
         dsp.set_target(0.25, 320.0, 0.0, 320.0, 0.25, 320.0, 0.0, 320.0);
@@ -479,6 +543,9 @@ mod tests {
 
     #[test]
     fn test_dualsense_haptics_dsp_fills_pcm() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut dsp = DualSenseHapticsDsp::new(100, false);
         dsp.set_target(0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
 
@@ -498,6 +565,9 @@ mod tests {
 
     #[test]
     fn test_output_does_not_depend_on_host_chunk_size() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let run = |chunk: usize| {
             let mut dsp = DualSenseHapticsDsp::new(100, true);
             dsp.set_target(0.25, 160.0, 0.1, 320.0, 0.3, 180.0, 0.0, 320.0);
@@ -515,6 +585,9 @@ mod tests {
 
     #[test]
     fn test_crisp_accent_lasts_two_ryuhdr_slots_with_small_chunks() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Ryuhdr: accent = 2 callbacks of 256 frames (~10.7 ms). 8 host calls of 64 frames = 512 frames = 2 slots.
         let mut dsp = DualSenseHapticsDsp::new(100, true);
         dsp.set_target(0.25, 160.0, 0.0, 320.0, 0.0, 160.0, 0.0, 320.0);
@@ -542,8 +615,8 @@ mod tests {
 
         // Call fill_interleaved_f32 for exactly 1 slot (256 frames):
         dsp.fill_interleaved_f32(&mut buf);
-        assert!((dsp.slot_left.amp_low - 0.5).abs() < TOLERANCE);
-        assert!((dsp.slot_right.amp_low - 0.5).abs() < TOLERANCE);
+        assert!((dsp.slot_left.amp_low - 1.0).abs() < TOLERANCE);
+        assert!((dsp.slot_right.amp_low - 1.0).abs() < TOLERANCE);
         let has_signal = buf
             .iter()
             .skip(DUALSENSE_LEFT_CHANNEL)
@@ -556,6 +629,28 @@ mod tests {
         assert_eq!(dsp.slot_left.amp_low, 0.0);
         assert_eq!(dsp.slot_right.amp_low, 0.0);
         crate::nx2::set_nx2_mode(0);
+    }
+
+    #[test]
+    fn test_mode2_law() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(mode2_amp(0.001), 0.0);
+        assert!((mode2_amp(0.01) - 3.5 * 0.01f32.powf(0.75)).abs() < TOLERANCE);
+        assert!((mode2_amp(0.01) - 0.111).abs() < 0.001);
+        assert_eq!(mode2_amp(0.3), 1.0);
+    }
+
+    #[test]
+    fn test_make_side_mode0_is_sqrt() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::nx2::set_nx2_mode(0);
+        let s = make_side(0.16, 50.0, 0.09, 320.0);
+        assert!((s.amp_low - 0.4).abs() < TOLERANCE);
+        assert!((s.amp_high - 0.3).abs() < TOLERANCE);
     }
 
     fn slot_after_tick_then_zero(mode: i32) -> (f32, f32) {

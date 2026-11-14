@@ -1,11 +1,11 @@
 # Switch 2 Games HD Rumble Integration
 
-This guide describes how to integrate RenHDrum into an Eden-family (or PokeDinner / yuzu derived) emulator to enable authentic HD Rumble in Switch 2 titles across DualSense, Switch Pro Controller 1, and Xbox One gamepads.
+This guide describes how to integrate RenHDrum into an Eden-family (or PokeDinner / yuzu derived) emulator to enable authentic HD Rumble in Switch 2 titles across DualSense, Switch Pro Controller 1, Xbox One, and experimental Steam Controller (2026) gamepads.
 
-Background and physical analysis: [research/11: Switch 2 HD Rumble](../research/11-switch2-hd-rumble.md).
+Background and physical analysis: [research/11: Switch 2 HD Rumble](../research/11-switch2-hd-rumble.md). Before shipping, go through the [integration checklist](recomp-games.md#integration-checklist).
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 > [!WARNING]
 > **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
@@ -59,8 +59,9 @@ renhdrum_set_nx2_mode(0);
 
 #### How RenHDrum Handles Modes:
 - **`mode == 2` (Switch 2 Active)**:
-  - **Sony DualSense**: Automatically passes vibration amplitudes through piecewise response curve Preset `[3]` (`T = 0.001, P1 = 0.004, P2 = 0.550, P3 = 0.900, P4 = 1.000`) before DSP synthesis, matching physical voice-coil dynamics.
-  - **Nintendo Switch Pro Controller 1**: Automatically maps amplitudes through piecewise response curve Preset `[4]` (`T = 0.001, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`) and applies a 1.2x transient boost for the first 25 ms on low frequencies below 150 Hz.
+  - **Sony DualSense**: Automatically passes vibration amplitudes through the fixed Mode 2 law (`a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`, no EQ) before DSP synthesis, matching physical voice-coil dynamics.
+  - **Nintendo Switch Pro Controller 1**: Automatically maps amplitudes through the Pro curve `PRO_DEFAULT` (`T = 0.004, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`), silencing micro-vibrations at or below `0.004` instead of lifting them, and applies a 1.2x onset boost for the first 25 ms on low frequencies below 150 Hz.
+  - **Microsoft Xbox One S**: Maps amplitudes through the same Pro curve (`PRO_DEFAULT`, `T = 0.004`, without the 1.2x boost), then passes them to the Switch 1 four-motor converter.
 - **`mode == 0` (Classic Switch 1)**:
   - Input amplitudes pass through 100% bit-exact and untouched.
 

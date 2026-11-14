@@ -5,7 +5,7 @@ This guide shows how to drive a Microsoft Xbox One controller (`0x045E`, tested 
 Background and measurements: [research/10: Xbox One Rumble](../research/10-xbox-one-rumble.md).
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 > [!WARNING]
 > **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
@@ -94,6 +94,6 @@ Each call takes an internal lock, so the functions are safe to call from differe
 
 ## 7. Supported Controllers
 
-`🔬 Xbox One S (research)`
+`✅ Xbox One S`
 
-Built and tested on the Xbox One S controller. Other Microsoft Xbox One and Series X|S controllers share the same four-motor design and should work too, but they have not been tested yet.
+Built and tested on the Xbox One S controller (Switch 1 games, and Switch 2 games via the Pro curve followed by the four-motor converter—confirmed in *Ocarina of Time*, *Donkey Kong Bananza*, and *Mario Kart World*). Other Microsoft Xbox One and Series X|S controllers share the same four-motor design and should work too, but they have not been tested yet.

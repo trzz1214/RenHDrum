@@ -90,8 +90,15 @@ Attributions & Third-Party Credits
     Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
 
 14. NotRexed & Hookshot Contributors (Hookshot)
-    Authors of Hookshot (OoT Switch 2 Recompiler, commit fa43939, tag v2.0.6),
+    Authors of Hookshot (OoT Switch 2 Recompiler, tag v2.1.0, synced to commit fa734ed),
     providing the reference static recompilation testbed for integrations/recomp-c/
     (see integrations/recomp-c/reference/).
     Licensed under the GNU General Public License, version 3 (GPL-3.0).
     https://github.com/NotRexed/Hookshot
+
+15. iafx, LiveHaptics, and hckrman101 (Hookshot PR #1213)
+    Steam Controller (2026) grip HID report 0x86 / 0x88 protocol and hardware
+    measurements by iafx (RenHDrum#5, iafx/Lichii); PCM stream format discovery
+    by LiveHaptics (MIT); Bluetooth newest-sample fallback pacing idea from
+    Hookshot PR #1213 by hckrman101 (GPL-3.0).
+    Referenced only; no code copied.

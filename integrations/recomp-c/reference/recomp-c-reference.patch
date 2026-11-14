@@ -1,5 +1,5 @@
 diff --git a/.gitignore b/.gitignore
-index 67c26d1..b360365 100644
+index 736ed96..84b04f6 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -17,7 +17,10 @@ gamefile/
@@ -14,7 +14,7 @@ index 67c26d1..b360365 100644
  *.pyc
  *.o
 diff --git a/host/nn_hid.c b/host/nn_hid.c
-index 87fa52d..aef3e3c 100644
+index 4688954..c3d7910 100644
 --- a/host/nn_hid.c
 +++ b/host/nn_hid.c
 @@ -26,6 +26,7 @@
@@ -25,17 +25,17 @@ index 87fa52d..aef3e3c 100644
  #include <math.h>
  #include <stdio.h>
  #include <stdlib.h>
-@@ -876,6 +877,9 @@ static void vibration_send(uint64_t handle, uint64_t value) {
+@@ -1076,6 +1077,9 @@ static void vibration_send(uint64_t handle, uint64_t value) {
      float v[4];
      memcpy(v, GP(value), sizeof v);
      const int dev = (G32(handle) >> 16) & 1;
 +    if (rh_vibration(dev, v[0], v[1], v[2], v[3])) {
 +        return;   /* Handled by authentic HD rumble through renhdrum.dll */
 +    }
-     amp[dev][0] = rumble_motor(v[0], v[1], 140.0f, 400.0f);
-     amp[dev][1] = rumble_motor(v[2], v[3], 200.0f, 700.0f);
+     rumble_map(v, amp[dev]);
      {   /* (hookshot, issue 263) what the game asks for: the first values, then a count now and then */
-@@ -894,7 +898,10 @@ static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low,
+         static long long n, strong;
+@@ -1095,7 +1099,10 @@ static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low,
      float idle[4] = {0.0f, 160.0f, 0.0f, 320.0f};
      memcpy(GP(v), idle, sizeof idle);
  }
@@ -47,19 +47,28 @@ index 87fa52d..aef3e3c 100644
  HLE(_ZN2nn3hid6detail20IsVibrationPermittedEPb) { *(uint8_t *)GP(ARG(0)) = 1; RET(0); }
  HLE(_ZN2nn3hid6detail27BeginPermitVibrationSessionEv) { RET(0); }
  HLE(_ZN2nn3hid6detail25EndPermitVibrationSessionEv) { RET(0); }
+@@ -1124,6 +1131,8 @@ HLE(_ZN2nn3hid6detail30GetActualVibrationGcErmCommandEPNS0_21VibrationGcErmComma
+     RET(0);
+ }
+ HLE(_ZN2nn3hid6detail24IsVibrationDeviceMountedEPbRKNS0_21VibrationDeviceHandleE) { *(uint8_t *)GP(ARG(0)) = 1; RET(0); }
++HLE(_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE) { RET(1); }
++HLE(_ZN2nn3hid6detail29IsOunceVibrationDeviceMountedEPbRKNS0_21VibrationDeviceHandleE) { *(uint8_t *)GP(ARG(0)) = 1; RET(0); }
+ HLE(_ZN2nn3hid6detail21EnqueueVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE) {
+     vibration_send(ARG(0), ARG(1));
+     RET(0);
 diff --git a/host/pad_sdl.c b/host/pad_sdl.c
-index 69bd788..4563789 100644
+index 7fd8d55..2bbcca0 100644
 --- a/host/pad_sdl.c
 +++ b/host/pad_sdl.c
-@@ -14,6 +14,7 @@
- #define WIN32_LEAN_AND_MEAN
- #include <windows.h>
+@@ -22,6 +22,7 @@
  #include "hos_sdl.h"
+ #include "hd_rumble.h"
+ #include "hos_motion.h"
 +#include "rh_bridge.h"
  #include "../gpu/vk/vk_api.h"   /* (HOS_PAD_*) */
  
  void hos_host_thread_register_self(const char *name);   /* hos_prof.c */
-@@ -38,6 +39,17 @@ static int32_t stick_value(int16_t v, int flip) {
+@@ -82,6 +83,18 @@ static int32_t stick_value(int16_t v, int flip, int zone) {
  }
  
  /* SDL's controller support started; 0 when it could not be */
@@ -67,6 +76,7 @@ index 69bd788..4563789 100644
 +    for (int i = 0; i < MAX_PADS; i++) {
 +        if (pads[i].gc) {
 +            rh_detach(pads[i].gc);
++            hos_sdl_pad_rumble(pads[i].gc, 0, 0, 0);
 +            hos_sdl_pad_close(pads[i].gc);
 +            pads[i].gc = NULL;
 +        }
@@ -77,7 +87,7 @@ index 69bd788..4563789 100644
  static int pads_start(void) {
      /* poll in the background, whatever window is in front (nn_hid.c decides when input counts) */
      hos_sdl_hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
-@@ -55,6 +67,7 @@ static int pads_start(void) {
+@@ -99,6 +112,7 @@ static int pads_start(void) {
          hos_log("hid: SDL could not start its controller support: %s", hos_sdl_error());
          return 0;
      }
@@ -85,7 +95,7 @@ index 69bd788..4563789 100644
      hos_log("hid: SDL controller support ready (DualSense, DualShock 4, Switch Pro, Xbox and others)");
      return 1;
  }
-@@ -77,6 +90,7 @@ static void pads_poll(void) {
+@@ -284,6 +298,7 @@ static void pads_poll(void) {
              for (int i = 0; i < MAX_PADS; i++)
                  if (pads[i].gc && !hos_sdl_pad_connected(pads[i].gc)) {
                      hos_log("hid: controller \"%s\" disconnected (SDL)", hos_sdl_pad_name(pads[i].gc));
@@ -93,31 +103,28 @@ index 69bd788..4563789 100644
                      hos_sdl_pad_close(pads[i].gc);
                      pads[i].gc = NULL;
                      pads[i].rumble_lo = pads[i].rumble_hi = 0;
-@@ -100,6 +114,7 @@ static void pads_poll(void) {
-                 pads[slot].rumble_lo = pads[slot].rumble_hi = 0;
-                 pads[slot].rumble_ns = 0;
-                 hos_log("hid: controller \"%s\" connected (SDL)", hos_sdl_pad_name(gc));
+@@ -318,6 +333,7 @@ static void pads_poll(void) {
+                 pads[slot].has_bias = 0;
+                 hos_log("hid: controller \"%s\" connected (SDL)%s", hos_sdl_pad_name(gc),
+                         pads[slot].motion ? ", with a gyroscope" : "");
 +                rh_attach(gc);
              }
          }
          uint64_t b = 0;
-@@ -122,7 +137,9 @@ static void pads_poll(void) {
-             for (int k = 0; k < 4; k++)
-                 if ((v[k] < 0 ? -v[k] : v[k]) > (s[k] < 0 ? -s[k] : s[k])) s[k] = v[k];
+@@ -379,6 +395,7 @@ static void pads_poll(void) {
+                 for (int k = 0; k < 4; k++) sig |= (uint64_t)(v[k] > 0 ? 1 : v[k] < 0 ? 2 : 0) << (32 + 2 * k);
+                 if (sig != pads[i].input_sig) pads[i].input_sig = sig, pads[i].used_ns = now;
+             }
++            if (rh_pad_claimed(i)) continue;
+             if (hd_poll(i, side, now)) continue;
              if (rumble_due(lo, hi, pads[i].rumble_lo, pads[i].rumble_hi, now, pads[i].rumble_ns)) {
--                hos_sdl_pad_rumble(gc, lo, hi, lo || hi ? 1000 : 0);
-+                if (!rh_is_active(gc)) {
-+                    hos_sdl_pad_rumble(gc, lo, hi, lo || hi ? 1000 : 0);
-+                }
-                 pads[i].rumble_lo = lo;
-                 pads[i].rumble_hi = hi;
-                 pads[i].rumble_ns = now;
+                 hos_sdl_pad_rumble(gc, lo, hi, lo || hi ? 1000 : 0);
 diff --git a/host/renhdrum.h b/host/renhdrum.h
 new file mode 100644
-index 0000000..ed69c4c
+index 0000000..d32dfe5
 --- /dev/null
 +++ b/host/renhdrum.h
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,325 @@
 +// Source: RenHDrum, include/renhdrum.h (MIT OR Apache-2.0). Hookshot integration.
 +#ifndef RENHDRUM_H
 +#define RENHDRUM_H
@@ -130,7 +137,7 @@ index 0000000..ed69c4c
 +extern "C" {
 +#endif
 +
-+#define RENHDRUM_VERSION 0x000300
++#define RENHDRUM_VERSION 0x000302
 +
 +#define RENHDRUM_OK 0
 +#define RENHDRUM_ERR_NULL_PTR -1
@@ -140,7 +147,7 @@ index 0000000..ed69c4c
 +typedef struct RenHdcSettings {
 +    bool enabled;
 +    int32_t usb_interval_ms;
-+    int32_t bluetooth_level;
++    int32_t bluetooth_level; /* 1-4, 4 = Compatible (default) */
 +    bool usb_auto_slow;
 +    bool sync_to_input;
 +    bool click_pulse;
@@ -209,6 +216,9 @@ index 0000000..ed69c4c
 +
 +int32_t renhdrum_settings_default(RenHdcSettings *out_settings);
 +int32_t renhdrum_settings_resolve(const RenHdcConfig *config, RenHdcSettings *out_settings);
++/* Use this when the host is not Brontide: reads no IPC and no flag files, only `config`. */
++/* NULL config gives the same result as renhdrum_settings_default. */
++int32_t renhdrum_settings_resolve_pure(const RenHdcConfig *config, RenHdcSettings *out_settings);
 +
 +int32_t renhdrum_preset_apply(int32_t kind, RenHdcConfig *config);
 +int32_t renhdrum_preset_detect(const RenHdcConfig *config, int32_t *out_kind);
@@ -221,10 +231,108 @@ index 0000000..ed69c4c
 +    uint8_t *out_bytes4
 +);
 +
++int32_t renhdrum_encode_standard_packet(
++    float left_lf,
++    float left_la,
++    float left_hf,
++    float left_ha,
++    float right_lf,
++    float right_la,
++    float right_hf,
++    float right_ha,
++    uint8_t *out_bytes8
++);
++
++int32_t renhdrum_amfm_game_amplitude(int32_t code, float *out_amp);
++int32_t renhdrum_amfm_code(float game_amp);
++int32_t renhdrum_amfm_freq7(int32_t high, float freq);
++int32_t renhdrum_amfm_amp7(float game_amplitude);
++int32_t renhdrum_amfm_preset_code(int32_t high, int32_t freq7);
++
++int32_t renhdrum_amfm_pack_three(
++    int32_t lo0,
++    int32_t hi0,
++    int32_t lo1,
++    int32_t hi1,
++    int32_t lo2,
++    int32_t hi2,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_pack_three_7bit(
++    int32_t high,
++    int32_t is_fm,
++    int32_t value7,
++    int32_t lo1,
++    int32_t hi1,
++    int32_t lo2,
++    int32_t hi2,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_pack_two_14bit(
++    int32_t high,
++    int32_t freq7,
++    int32_t amp7,
++    int32_t other0,
++    int32_t lo1,
++    int32_t hi1,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_pack_two_14bit_level(
++    int32_t high,
++    int32_t freq7,
++    float game_amplitude,
++    int32_t other0,
++    int32_t lo1,
++    int32_t hi1,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_pack_two_14bit_reach(
++    int32_t high,
++    int32_t freq7,
++    float game_amplitude,
++    int32_t reach_code,
++    float other_amplitude,
++    int32_t lo1,
++    int32_t hi1,
++    uint32_t *out_val
++);
++
++int32_t renhdrum_amfm_is_three_sample_side(const uint8_t *in_bytes4);
++
++int32_t renhdrum_click_amp4(float amplitude);
++int32_t renhdrum_click_amp7(float amplitude);
++int32_t renhdrum_click_build_packet(float amp_l, float amp_r, uint8_t *out_packet10);
++
++int32_t renhdrum_click_encode_side(const RenHdClickSide *side, uint8_t *out_bytes4);
++int32_t renhdrum_click_decode_side(const uint8_t *in_bytes4, RenHdClickSide *out_side);
++int32_t renhdrum_click_is_dual_wave_side(const uint8_t *in_bytes4);
++int32_t renhdrum_click_is_click_packet(const uint8_t *in_bytes10);
++
++float renhdrum_crisp_slot_gain(int32_t slots_since_onset);
++int32_t renhdrum_crisp_apply(
++    const RenHdSideSample *s,
++    float gain,
++    RenHdSideSample *out_sample,
++    int32_t *out_capped
++);
++int32_t renhdrum_crisp_shape_slot(
++    int32_t *slots_since_onset,
++    const RenHdSideSample *s,
++    RenHdSideSample *out_sample,
++    int32_t *out_onset,
++    int32_t *out_capped
++);
++
++/* Opaque pointer types for stateful engines */
 +typedef struct RenHdcEngine RenHdcEngine;
 +typedef struct RenHdcDualSenseDsp RenHdcDualSenseDsp;
 +typedef struct RenHdcXboxRumble RenHdcXboxRumble;
 +
++/* Thread safety: never call a handle's destroy in parallel with any other call on the same handle. */
 +RenHdcEngine *renhdrum_engine_create(bool is_bluetooth, bool is_pro_controller);
 +void renhdrum_engine_destroy(RenHdcEngine *engine);
 +int32_t renhdrum_engine_apply_settings(RenHdcEngine *engine, const RenHdcSettings *settings);
@@ -251,6 +359,10 @@ index 0000000..ed69c4c
 +);
 +int32_t renhdrum_engine_tick(RenHdcEngine *engine, int64_t now_us, uint8_t *out_packet10);
 +
++// volume_percent (clamped 10..100) is the final output gain; the core already applies it.
++// The host must NOT scale samples again before pushing them. The core exports no volume
++// setter yet: to change it, destroy and re-create the DSP object (no need to reopen the
++// audio stream). If the Brontide-App config is present in shared memory, it overrides both arguments.
 +RenHdcDualSenseDsp *renhdrum_dualsense_dsp_create(int32_t volume_percent, bool crisp_notes);
 +void renhdrum_dualsense_dsp_destroy(RenHdcDualSenseDsp *dsp);
 +int32_t renhdrum_dualsense_dsp_set_target(
@@ -272,18 +384,47 @@ index 0000000..ed69c4c
 +    float ah,
 +    float fh
 +);
++/* out_interleaved_4ch must hold frame_count * 4 floats. */
 +int32_t renhdrum_dualsense_dsp_fill_f32(
 +    RenHdcDualSenseDsp *dsp,
 +    float *out_interleaved_4ch,
 +    size_t frame_count
 +);
++/* DualSense over Bluetooth: one HID output report 0x32 every RENHDRUM_DS5_BT_PERIOD_NS.
++   Report layout from SAxense by egormanga (https://apps.sdore.me/SAxense). */
 +#define RENHDRUM_DS5_BT_REPORT_SIZE 142
 +#define RENHDRUM_DS5_BT_PERIOD_NS 10666666ULL
 +#define RENHDRUM_DS5_BT_BUFFER_LENGTH_DEFAULT 0xFF
++/* out_report142 must be a buffer of at least 142 bytes (RENHDRUM_DS5_BT_REPORT_SIZE). */
 +int32_t renhdrum_dualsense_dsp_build_bt_report(
 +    RenHdcDualSenseDsp *dsp,
 +    uint8_t buffer_length,
 +    uint8_t *out_report142
++);
++/* Experimental: Steam Controller (2026) grips, report 0x88, built from iafx's measurements (RenHDrum#5).
++   Create with renhdrum_valve_grip_dsp_create, then use renhdrum_dualsense_dsp_set_half_target and
++   renhdrum_dualsense_dsp_destroy on the handle. One report every RENHDRUM_VALVE_GRIP_PERIOD_NS_*.
++   Returns 1 when the block carries vibration, 0 when silent, < 0 on error
++   (unknown format -> RENHDRUM_ERR_INVALID_ARG). out_report64 must hold 64 bytes. */
++#define RENHDRUM_VALVE_GRIP_REPORT_SIZE 64
++#define RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K 8
++#define RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K 9
++#define RENHDRUM_VALVE_GRIP_PERIOD_NS_8K 3875000ULL
++#define RENHDRUM_VALVE_GRIP_PERIOD_NS_4K 7750000ULL
++RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create(int32_t volume_percent, bool crisp_notes);
++int32_t renhdrum_valve_grip_build_report(
++    RenHdcDualSenseDsp *dsp,
++    uint8_t format,
++    uint8_t *out_report64
++);
++int32_t renhdrum_dualsense_evaluate_triggers(
++    uint64_t title_id,
++    bool zl_held,
++    bool zr_held,
++    bool rumble_on,
++    int64_t rumble_on_ms,
++    int64_t pulse_age_ms,
++    uint8_t *out_ds5_effects47
 +);
 +
 +RenHdcXboxRumble *renhdrum_xbox_rumble_create(bool is_bluetooth);
@@ -297,6 +438,7 @@ index 0000000..ed69c4c
 +    float high_amp,
 +    float high_freq
 +);
++/* out_motors4: left grip, right grip, left trigger, right trigger. Returns 1 when they must be sent now. */
 +int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
 +int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
 +
@@ -308,13 +450,12 @@ index 0000000..ed69c4c
 +#endif
 +
 +#endif /* RENHDRUM_H */
-+
 diff --git a/host/rh_bridge.c b/host/rh_bridge.c
 new file mode 100644
-index 0000000..578ef7a
+index 0000000..01c7557
 --- /dev/null
 +++ b/host/rh_bridge.c
-@@ -0,0 +1,853 @@
+@@ -0,0 +1,1056 @@
 +/* host/rh_bridge.c - RenHDrum bridge for Hookshot
 +   Authentic HD Rumble for Nintendo Switch Pro Controller (USB & Bluetooth)
 +   and DualSense 4-channel 48 kHz audio haptics via renhdrum.dll.
@@ -329,6 +470,8 @@ index 0000000..578ef7a
 +#include <windows.h>
 +
 +#define RH_STALE_US 250000LL
++#define RH_RESEND_US 40000LL
++#define RH_MAX_PADS 8
 +#define DS_CHUNK_FRAMES 256
 +
 +#ifndef SDLCALL
@@ -346,6 +489,7 @@ index 0000000..578ef7a
 +static struct {
 +    int tried;
 +    HMODULE dll;
++    uint32_t (*version)(void);
 +    RenHdcEngine *(*create)(bool, bool);
 +    void (*destroy)(RenHdcEngine *);
 +    int32_t (*defaults)(RenHdcSettings *);
@@ -385,6 +529,7 @@ index 0000000..578ef7a
 +    void (*hid_free_enumeration)(void *);
 +
 +    /* SDL3 audio */
++    void (*pump_events)(void);
 +    uint32_t *(*get_playback_devs)(int *);
 +    const char *(*get_dev_name)(uint32_t);
 +    int (*get_dev_format)(uint32_t, void *, int *);
@@ -429,6 +574,7 @@ index 0000000..578ef7a
 +        *(FARPROC *)&sdl.hid_enumerate = GetProcAddress(m, "SDL_hid_enumerate");
 +        *(FARPROC *)&sdl.hid_free_enumeration = GetProcAddress(m, "SDL_hid_free_enumeration");
 +
++        *(FARPROC *)&sdl.pump_events = GetProcAddress(m, "SDL_PumpEvents");
 +        *(FARPROC *)&sdl.get_playback_devs = GetProcAddress(m, "SDL_GetAudioPlaybackDevices");
 +        *(FARPROC *)&sdl.get_dev_name = GetProcAddress(m, "SDL_GetAudioDeviceName");
 +        *(FARPROC *)&sdl.get_dev_format = GetProcAddress(m, "SDL_GetAudioDeviceFormat");
@@ -473,13 +619,48 @@ index 0000000..578ef7a
 +        hos_log("renhdrum: off (env)");
 +        return 0;
 +    }
-+    rh.dll = LoadLibraryA("renhdrum.dll");
++
++    WCHAR exe_path[MAX_PATH];
++    DWORD exe_len = GetModuleFileNameW(NULL, exe_path, MAX_PATH);
++    if (exe_len == 0 || exe_len >= MAX_PATH) {
++        hos_log("renhdrum: off (cannot resolve exe path)");
++        return 0;
++    }
++    const WCHAR *slash = NULL;
++    for (DWORD i = 0; i < exe_len; i++) {
++        if (exe_path[i] == L'\\' || exe_path[i] == L'/') {
++            slash = &exe_path[i];
++        }
++    }
++    if (!slash) {
++        hos_log("renhdrum: off (cannot resolve exe directory)");
++        return 0;
++    }
++    static const WCHAR dll_name[] = L"renhdrum.dll";
++    size_t dir_len = (size_t)(slash - exe_path) + 1;
++    size_t name_len = sizeof(dll_name) / sizeof(dll_name[0]); /* includes NUL */
++    if (dir_len + name_len > MAX_PATH) {
++        hos_log("renhdrum: off (dll path too long)");
++        return 0;
++    }
++    WCHAR dll_path[MAX_PATH];
++    memcpy(dll_path, exe_path, dir_len * sizeof(WCHAR));
++    memcpy(dll_path + dir_len, dll_name, name_len * sizeof(WCHAR));
++
++#ifndef LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
++#define LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR 0x00000100
++#endif
++#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
++#define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
++#endif
++    rh.dll = LoadLibraryExW(dll_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 +    if (!rh.dll) {
-+        hos_log("renhdrum: off (renhdrum.dll not found)");
++        hos_log("renhdrum: off (renhdrum.dll not found beside exe)");
 +        return 0;
 +    }
 +    const char *why = NULL;
 +#define RH_FN(field, name) *(FARPROC *)&rh.field = GetProcAddress(rh.dll, name); if (!rh.field && !why) why = name;
++    RH_FN(version, "renhdrum_version");
 +    RH_FN(create, "renhdrum_engine_create");
 +    RH_FN(destroy, "renhdrum_engine_destroy");
 +    RH_FN(defaults, "renhdrum_settings_default");
@@ -491,8 +672,17 @@ index 0000000..578ef7a
 +    if (why) {
 +        hos_log("renhdrum: off (%s missing)", why);
 +        FreeLibrary(rh.dll);
-+        rh.dll = NULL;
-+        rh.create = NULL;
++        memset(&rh, 0, sizeof(rh));
++        rh.tried = 1;
++        return 0;
++    }
++    uint32_t ver = rh.version();
++    if ((ver >> 8) != ((uint32_t)RENHDRUM_VERSION >> 8)) {
++        hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected branch 0x%04xxx)",
++                (unsigned)ver, (unsigned)((uint32_t)RENHDRUM_VERSION >> 8));
++        FreeLibrary(rh.dll);
++        memset(&rh, 0, sizeof(rh));
++        rh.tried = 1;
 +        return 0;
 +    }
 +    if (rh.set_nx2_mode) {
@@ -509,13 +699,89 @@ index 0000000..578ef7a
 +    return 1;
 +}
 +
++/* ---- Connected slot tracking (matched to pad_sdl.c MAX_PADS slots) ---- */
++static SRWLOCK rh_pads_lock = SRWLOCK_INIT;
++static void *rh_conn_pads[RH_MAX_PADS];
++static int rh_slot_claimed[RH_MAX_PADS];
++
++static void rh_pads_track(void *pad) {
++    if (!pad) return;
++    AcquireSRWLockExclusive(&rh_pads_lock);
++    int free_slot = -1;
++    for (int i = 0; i < RH_MAX_PADS; i++) {
++        if (rh_conn_pads[i] == pad) {
++            ReleaseSRWLockExclusive(&rh_pads_lock);
++            return;
++        }
++        if (!rh_conn_pads[i] && free_slot < 0) free_slot = i;
++    }
++    if (free_slot >= 0) {
++        rh_conn_pads[free_slot] = pad;
++        rh_slot_claimed[free_slot] = 0;
++    }
++    ReleaseSRWLockExclusive(&rh_pads_lock);
++}
++
++static void rh_pads_set_claimed(void *pad, int claimed) {
++    if (!pad) return;
++    AcquireSRWLockExclusive(&rh_pads_lock);
++    for (int i = 0; i < RH_MAX_PADS; i++) {
++        if (rh_conn_pads[i] == pad) {
++            rh_slot_claimed[i] = claimed ? 1 : 0;
++            break;
++        }
++    }
++    ReleaseSRWLockExclusive(&rh_pads_lock);
++}
++
++static void rh_pads_untrack(void *pad) {
++    AcquireSRWLockExclusive(&rh_pads_lock);
++    for (int i = 0; i < RH_MAX_PADS; i++) {
++        if (!pad || rh_conn_pads[i] == pad) {
++            rh_conn_pads[i] = NULL;
++            rh_slot_claimed[i] = 0;
++        }
++    }
++    ReleaseSRWLockExclusive(&rh_pads_lock);
++}
++
++int rh_pad_claimed(int i) {
++    if (i < 0 || i >= RH_MAX_PADS) return 0;
++    AcquireSRWLockShared(&rh_pads_lock);
++    int claimed = (rh_conn_pads[i] != NULL && rh_slot_claimed[i] != 0) ? 1 : 0;
++    ReleaseSRWLockShared(&rh_pads_lock);
++    return claimed;
++}
++
++static int rh_all_pads_claimed(void) {
++    AcquireSRWLockShared(&rh_pads_lock);
++    int total = 0, claimed = 0;
++    for (int i = 0; i < RH_MAX_PADS; i++) {
++        if (rh_conn_pads[i]) {
++            total++;
++            if (rh_slot_claimed[i]) claimed++;
++        }
++    }
++    ReleaseSRWLockShared(&rh_pads_lock);
++    return total > 0 && claimed == total;
++}
++
 +/* ---- Pro Controller state ---- */
 +static SRWLOCK rh_lock = SRWLOCK_INIT;
 +static RenHdcEngine *rh_engine;
 +static void *rh_active_pad;
 +static void *rh_joy;
++static int rh_is_bt;
++static uint8_t rh_last_pkt[10];
++static int rh_has_last_pkt;
++static int64_t rh_last_send_us;
 +static int64_t rh_at[2];
 +static int rh_muted[2];
++
++static int rh_pkt_is_silent(const uint8_t p[10]) {
++    static const uint8_t neutral[4] = {0x00, 0x01, 0x40, 0x40};
++    return memcmp(p + 2, neutral, 4) == 0 && memcmp(p + 6, neutral, 4) == 0;
++}
 +
 +/* ---- DualSense state ---- */
 +static SRWLOCK rh_ds_lock = SRWLOCK_INIT;
@@ -600,6 +866,9 @@ index 0000000..578ef7a
 +
 +    if (sdl.is_sdl3) {
 +        if (!sdl.get_playback_devs || !sdl.get_dev_name || !sdl.get_dev_format || !sdl.open_audio_stream) return;
++        /* The Windows build never pumps SDL events (no SDL window), and SDL3 only applies audio hotplug
++         * while pumping: without this a DualSense plugged in after start never shows up as a device. */
++        if (sdl.pump_events) sdl.pump_events();
 +        int count = 0;
 +        uint32_t *devs = sdl.get_playback_devs(&count);
 +        if (!devs) return;
@@ -632,12 +901,25 @@ index 0000000..578ef7a
 +        }
 +        if (sdl.resume_audio_stream) sdl.resume_audio_stream(st);
 +
++        int keep = 0;
++        void *pad = NULL;
 +        AcquireSRWLockExclusive(&rh_ds_lock);
-+        rh_ds_stream = st;
++        if (rh_ds_dsp != NULL && rh_ds_stream == NULL) {
++            rh_ds_stream = st;
++            pad = rh_ds_active_pad;
++            keep = 1;
++        }
 +        ReleaseSRWLockExclusive(&rh_ds_lock);
 +
-+        if (sdl.rumble_pad && rh_ds_active_pad) {
-+            sdl.rumble_pad(rh_ds_active_pad, 0, 0, 0);
++        if (!keep) {
++            if (sdl.pause_audio_stream) sdl.pause_audio_stream(st);
++            if (sdl.clear_audio_stream) sdl.clear_audio_stream(st);
++            if (sdl.destroy_audio_stream) sdl.destroy_audio_stream(st);
++            return;
++        }
++
++        if (sdl.rumble_pad && pad) {
++            sdl.rumble_pad(pad, 0, 0, 0);
 +        }
 +        hos_log("renhdrum: dualsense audio opened on \"%s\" (4 ch, 48000 Hz, attempt %d)",
 +                matched_name ? matched_name : "DualSense", rh_ds_audio_attempts);
@@ -683,12 +965,24 @@ index 0000000..578ef7a
 +        }
 +        if (sdl.pause_audio_device) sdl.pause_audio_device(dev, 0);
 +
++        int keep = 0;
++        void *pad = NULL;
 +        AcquireSRWLockExclusive(&rh_ds_lock);
-+        rh_ds_dev2 = dev;
++        if (rh_ds_dsp != NULL && rh_ds_dev2 == 0) {
++            rh_ds_dev2 = dev;
++            pad = rh_ds_active_pad;
++            keep = 1;
++        }
 +        ReleaseSRWLockExclusive(&rh_ds_lock);
 +
-+        if (sdl.rumble_pad && rh_ds_active_pad) {
-+            sdl.rumble_pad(rh_ds_active_pad, 0, 0, 0);
++        if (!keep) {
++            if (sdl.pause_audio_device) sdl.pause_audio_device(dev, 1);
++            if (sdl.close_audio_device) sdl.close_audio_device(dev);
++            return;
++        }
++
++        if (sdl.rumble_pad && pad) {
++            sdl.rumble_pad(pad, 0, 0, 0);
 +        }
 +        hos_log("renhdrum: dualsense audio opened on \"%s\" (4 ch, 48000 Hz, attempt %d, SDL2)",
 +                matched_name, rh_ds_audio_attempts);
@@ -777,10 +1071,10 @@ index 0000000..578ef7a
 +    uint8_t pkt[10];
 +    while (InterlockedCompareExchange(&rh_run, 1, 1) == 1) {
 +        int64_t now_us = hos_now_ns() / 1000;
-+        int r = 0;
++        int send_pkt = 0;
 +        void *target = NULL;
 +
-+        /* Pro Controller watchdog & tick */
++        /* Pro Controller watchdog, tick, and wired-only 40 ms resend */
 +        AcquireSRWLockExclusive(&rh_lock);
 +        if (rh_engine) {
 +            for (int s = 0; s < 2; s++) {
@@ -789,12 +1083,22 @@ index 0000000..578ef7a
 +                    rh_muted[s] = 1;
 +                }
 +            }
-+            r = rh.tick(rh_engine, now_us, pkt);
++            int r = rh.tick(rh_engine, now_us, pkt);
++            if (r == 1) {
++                memcpy(rh_last_pkt, pkt, sizeof(pkt));
++                rh_has_last_pkt = !rh_pkt_is_silent(pkt);
++                rh_last_send_us = now_us;
++                send_pkt = 1;
++            } else if (!rh_is_bt && rh_has_last_pkt && (now_us - rh_last_send_us) >= RH_RESEND_US) {
++                memcpy(pkt, rh_last_pkt, sizeof(pkt));
++                rh_last_send_us = now_us;
++                send_pkt = 1;
++            }
 +            target = rh_joy ? rh_joy : rh_active_pad;
 +        }
 +        ReleaseSRWLockExclusive(&rh_lock);
 +
-+        if (r == 1 && target && sdl.send_effect) {
++        if (send_pkt && target && sdl.send_effect) {
 +            sdl.send_effect(target, pkt, 10);
 +        }
 +
@@ -838,6 +1142,7 @@ index 0000000..578ef7a
 +
 +void rh_attach(void *pad) {
 +    if (!pad) return;
++    rh_pads_track(pad);
 +    const char *off = getenv("HOOKSHOT_RENHDRUM");
 +    if (off && !strcmp(off, "0")) return;
 +    init_sdl();
@@ -863,6 +1168,11 @@ index 0000000..578ef7a
 +    if (vid == 0x057E && pid == 0x2009) {
 +        if (!rh_load()) return;
 +
++        AcquireSRWLockExclusive(&rh_lock);
++        int pro_busy = (rh_engine != NULL);
++        ReleaseSRWLockExclusive(&rh_lock);
++        if (pro_busy) return;
++
 +        RenHdcEngine *e = rh.create(bt != 0, true);
 +        if (!e) {
 +            hos_log("renhdrum: off (engine create failed)");
@@ -875,9 +1185,9 @@ index 0000000..578ef7a
 +            return;
 +        }
 +        if (bt) {
-+            s.bluetooth_level = 2; /* Level 2 (45 ms spacing) stable, avoids button input latency */
++            s.bluetooth_level = 4; /* Level 4 (Compatible): core handles pacing & 40 ms resend */
 +            const char *env_bt = getenv("HOOKSHOT_BT_LEVEL");
-+            if (env_bt && atoi(env_bt) >= 1 && atoi(env_bt) <= 3) {
++            if (env_bt && atoi(env_bt) >= 1 && atoi(env_bt) <= 4) {
 +                s.bluetooth_level = atoi(env_bt);
 +            }
 +        }
@@ -887,13 +1197,23 @@ index 0000000..578ef7a
 +        void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
 +
 +        AcquireSRWLockExclusive(&rh_lock);
++        if (rh_engine) {
++            ReleaseSRWLockExclusive(&rh_lock);
++            rh.destroy(e);
++            return;
++        }
 +        rh_engine = e;
 +        rh_active_pad = pad;
 +        rh_joy = joy;
++        rh_is_bt = bt ? 1 : 0;
++        memset(rh_last_pkt, 0, sizeof(rh_last_pkt));
++        rh_has_last_pkt = 0;
++        rh_last_send_us = 0;
 +        rh_at[0] = rh_at[1] = 0;
 +        rh_muted[0] = rh_muted[1] = 0;
 +        ReleaseSRWLockExclusive(&rh_lock);
 +
++        rh_pads_set_claimed(pad, 1);
 +        rh_ensure_worker();
 +        if (bt) {
 +            hos_log("renhdrum: on (bluetooth level %d)", s.bluetooth_level);
@@ -910,6 +1230,11 @@ index 0000000..578ef7a
 +            hos_log("renhdrum: off (dualsense dsp functions missing in renhdrum.dll)");
 +            return;
 +        }
++
++        AcquireSRWLockExclusive(&rh_ds_lock);
++        int ds_busy = (rh_ds_dsp != NULL);
++        ReleaseSRWLockExclusive(&rh_ds_lock);
++        if (ds_busy) return;
 +
 +        if (bt) {
 +            if (!rh.ds_build_bt_report) {
@@ -990,9 +1315,11 @@ index 0000000..578ef7a
 +                InterlockedExchange(&rh_ds_bt_run, 0);
 +                hos_log("renhdrum: off (cannot create dualsense bt worker thread)");
 +                rh_detach(pad);
++                rh_pads_track(pad);
 +                return;
 +            }
 +
++            rh_pads_set_claimed(pad, 1);
 +            rh_ensure_worker();
 +            hos_log("renhdrum: on (dualsense bluetooth)");
 +            return;
@@ -1005,6 +1332,11 @@ index 0000000..578ef7a
 +        }
 +
 +        AcquireSRWLockExclusive(&rh_ds_lock);
++        if (rh_ds_dsp) {
++            ReleaseSRWLockExclusive(&rh_ds_lock);
++            if (rh.ds_destroy) rh.ds_destroy(dsp);
++            return;
++        }
 +        rh_ds_dsp = dsp;
 +        rh_ds_active_pad = pad;
 +        rh_ds_is_bt = 0;
@@ -1014,6 +1346,7 @@ index 0000000..578ef7a
 +        rh_ds_muted[0] = rh_ds_muted[1] = 0;
 +        ReleaseSRWLockExclusive(&rh_ds_lock);
 +
++        rh_pads_set_claimed(pad, 1);
 +        rh_ensure_worker();
 +        hos_log("renhdrum: on (dualsense usb)");
 +        rh_ds_try_open_audio();
@@ -1023,6 +1356,7 @@ index 0000000..578ef7a
 +
 +int rh_detach(void *pad) {
 +    int detached_any = 0;
++    rh_pads_untrack(pad);
 +
 +    /* Pro Controller detach */
 +    AcquireSRWLockExclusive(&rh_lock);
@@ -1032,6 +1366,10 @@ index 0000000..578ef7a
 +        rh_engine = NULL;
 +        rh_active_pad = NULL;
 +        rh_joy = NULL;
++        rh_is_bt = 0;
++        memset(rh_last_pkt, 0, sizeof(rh_last_pkt));
++        rh_has_last_pkt = 0;
++        rh_last_send_us = 0;
 +        ReleaseSRWLockExclusive(&rh_lock);
 +
 +        static const uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
@@ -1074,8 +1412,14 @@ index 0000000..578ef7a
 +            if (sdl.close_audio_device) sdl.close_audio_device(dev2);
 +        }
 +        if (bt_th) {
-+            WaitForSingleObject(bt_th, 2000);
++            DWORD w = WaitForSingleObject(bt_th, 2000);
 +            CloseHandle(bt_th);
++            if (w != WAIT_OBJECT_0) {
++                hos_log("renhdrum: DualSense BT worker did not stop within 2000 ms (wait=0x%lx); skipping hid_close/ds_destroy",
++                        (unsigned long)w);
++                bt_hid = NULL;
++                dsp = NULL;
++            }
 +        }
 +        if (bt_hid && sdl.hid_close) {
 +            sdl.hid_close(bt_hid);
@@ -1137,7 +1481,7 @@ index 0000000..578ef7a
 +    }
 +    ReleaseSRWLockExclusive(&rh_ds_lock);
 +
-+    return handled;
++    return (handled && rh_all_pads_claimed()) ? 1 : 0;
 +}
 +
 +void rh_permit(int on) {
@@ -1170,10 +1514,10 @@ index 0000000..578ef7a
 +}
 diff --git a/host/rh_bridge.h b/host/rh_bridge.h
 new file mode 100644
-index 0000000..9735c5e
+index 0000000..8927e42
 --- /dev/null
 +++ b/host/rh_bridge.h
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,23 @@
 +/* host/rh_bridge.h - RenHDrum bridge for Hookshot (HD Rumble on Pro Controller & DualSense)
 +   MIT OR Apache-2.0 / GPL-3.0 compatibility */
 +#pragma once
@@ -1191,16 +1535,17 @@ index 0000000..9735c5e
 +void rh_permit(int on);
 +void rh_cleanup(void);
 +int rh_is_active(void *pad);
++int rh_pad_claimed(int i);
 +int rh_ds_render_frames(float *out, int frames);
 +
 +#ifdef __cplusplus
 +}
 +#endif
 diff --git a/nx2/build.py b/nx2/build.py
-index a350b25..01647e4 100644
+index 695dc40..a9228dd 100644
 --- a/nx2/build.py
 +++ b/nx2/build.py
-@@ -860,6 +860,12 @@ def main():
+@@ -1129,6 +1129,12 @@ def main():
          if os.path.exists(sdl3) and (not os.path.exists(sdl3_dst) or os.path.getsize(sdl3_dst) != os.path.getsize(sdl3)):
              import shutil
              shutil.copyfile(sdl3, sdl3_dst)
@@ -1214,10 +1559,10 @@ index a350b25..01647e4 100644
          import shutil
          shutil.copyfile(vk_prebuilt, os.path.join(out, VK_LIB))
 diff --git a/nx2/make_game.py b/nx2/make_game.py
-index d3c26cc..6311d89 100644
+index 517926d..d070584 100644
 --- a/nx2/make_game.py
 +++ b/nx2/make_game.py
-@@ -44,7 +44,7 @@ import toolchain as _toolchain
+@@ -54,7 +54,7 @@ import disk as _disk
  LINUX, CROSS = not _toolchain.windows(), _toolchain.windows() and os.name != "nt"
  # (SDL2.dll is sdl2-compat: it loads SDL3.dll from beside the exe. Left out of bin\ since v2.0.0, it said "Failed loading SDL3
  # library" three times and no controller worked: Discord #bug-reporting, 11-08)
@@ -1228,34 +1573,81 @@ index d3c26cc..6311d89 100644
               ("pl", "Polish"), ("ru", "Russian"), ("ja", "Japanese"), ("ko", "Korean"), ("zh-Hans", "Chinese (Simplified)"),
 diff --git a/tests/test_rh_bridge.py b/tests/test_rh_bridge.py
 new file mode 100644
-index 0000000..078a1ee
+index 0000000..b568640
 --- /dev/null
 +++ b/tests/test_rh_bridge.py
-@@ -0,0 +1,125 @@
-+"""Unit tests for host/rh_bridge.c (RenHDrum bridge).
-+Checks fallback behavior when renhdrum.dll is absent, ensures no crash on attach/detach/vibration,
-+verifies that audio buffer error (< 0) branch zeroes the haptics buffer,
-+and tests repeated attach/detach cycles (unplug/replug scenarios).
+@@ -0,0 +1,466 @@
++"""Unit tests for host/rh_bridge.c (RenHDrum bridge) and Hookshot vibration hooks.
++
++Covers:
++1. Fallback behavior when renhdrum.dll is absent, attach/detach/cleanup safety, audio buffer zeroing.
++2. Step 2a: Per-pad claiming (rh_pad_claimed) + multi-pad non-silencing + hook ordering in pad_sdl.c / nn_hid.c.
++3. Step 2b/2c: Strict major.minor DLL version check and missing renhdrum_version rejection in rh_load.
++4. Step 3: Wired-only 40 ms packet resend (>= 3 repeats in 200 ms), silent packet non-resend, BT Level 4 bridge pass-through.
 +
 +Run with: python -I -B tests/test_rh_bridge.py
 +"""
 +import os
 +from pathlib import Path
++import re
++import shutil
 +import subprocess
 +import tempfile
 +import unittest
 +
 +ROOT = Path(__file__).resolve().parents[1]
 +RH_BRIDGE = ROOT / "host" / "rh_bridge.c"
++PAD_SDL = ROOT / "host" / "pad_sdl.c"
++NN_HID = ROOT / "host" / "nn_hid.c"
++REAL_DLL = ROOT / "renhdrum.dll"
 +
-+FIXTURE = r"""
++COMMON_ENV = dict(os.environ)
++if "msys64" not in COMMON_ENV.get("PATH", "").lower():
++    COMMON_ENV["PATH"] = COMMON_ENV.get("PATH", "") + r";C:\msys64\ucrt64\bin"
++CC = shutil.which(COMMON_ENV.get("CC", "gcc"), path=COMMON_ENV["PATH"]) or COMMON_ENV.get("CC", "gcc")
++
++
++def compile_and_run(tmpdir: Path, c_name: str, src: str, extra_flags=None):
++    c = tmpdir / c_name
++    c.write_text(src, encoding="utf-8")
++    exe = tmpdir / f"{c.stem}.exe"
++    cmd = [
++        CC, "-std=c11", "-Wall", "-Wextra",
++        str(c), str(RH_BRIDGE),
++        "-I", str(ROOT / "host"),
++        "-o", str(exe),
++    ]
++    if extra_flags:
++        cmd.extend(extra_flags)
++    res = subprocess.run(cmd, capture_output=True, text=True, env=COMMON_ENV)
++    if res.returncode != 0:
++        raise AssertionError(f"Compilation failed for {c_name}:\n{res.stderr}")
++    run_res = subprocess.run([str(exe)], capture_output=True, text=True, env=COMMON_ENV, cwd=str(tmpdir))
++    if run_res.returncode != 0:
++        raise AssertionError(f"Execution failed for {c_name} (rc={run_res.returncode}):\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}")
++    return run_res.stdout, run_res.stderr
++
++
++def build_dll(tmpdir: Path, c_name: str, dll_name: str, src: str):
++    c = tmpdir / c_name
++    c.write_text(src, encoding="utf-8")
++    dll = tmpdir / dll_name
++    res = subprocess.run([
++        CC, "-shared", "-std=c11", "-Wall", "-Wextra",
++        str(c), "-o", str(dll),
++    ], capture_output=True, text=True, env=COMMON_ENV)
++    if res.returncode != 0:
++        raise AssertionError(f"DLL compilation failed for {dll_name}:\n{res.stderr}")
++    return dll
++
++
++FIXTURE_NO_DLL = r"""
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <stdint.h>
 +#include <stdbool.h>
 +#include <string.h>
 +
-+/* Mock hos_log, hos_now_ns, hos_sdl_init */
 +void hos_log(const char *fmt, ...) { (void)fmt; }
 +int64_t hos_now_ns(void) { return 1000000000LL; }
 +int hos_sdl_init(uint32_t subsystems) { (void)subsystems; return 1; }
@@ -1265,55 +1657,40 @@ index 0000000..078a1ee
 +#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 +
 +int main(void) {
-+    /* Test 1: Vibration without active engine returns 0 (fallback to rumble) */
 +    CHECK(rh_vibration(0, 0.5f, 160.0f, 0.5f, 320.0f) == 0);
 +    CHECK(rh_vibration(1, 0.5f, 160.0f, 0.5f, 320.0f) == 0);
-+
-+    /* Test 2: Invalid side returns 0 */
 +    CHECK(rh_vibration(-1, 0.5f, 160.0f, 0.5f, 320.0f) == 0);
 +    CHECK(rh_vibration(2, 0.5f, 160.0f, 0.5f, 320.0f) == 0);
 +
-+    /* Test 3: Permit vibration mute pushes without crashing */
 +    rh_permit(0);
 +    rh_permit(1);
 +
-+    /* Test 4: Detach with NULL or when no active pad */
 +    CHECK(rh_detach(NULL) == 1);
-+
-+    /* Test 5: rh_is_active returns 0 when inactive */
 +    CHECK(rh_is_active(NULL) == 0);
 +    CHECK(rh_is_active((void *)0x1234) == 0);
++    CHECK(rh_pad_claimed(-1) == 0);
++    CHECK(rh_pad_claimed(0) == 0);
++    CHECK(rh_pad_claimed(8) == 0);
 +
-+    /* Test 6: Safety rule - audio render buffer error (< 0) branch zeroes output buffer */
 +    {
 +        const int frames = 128;
 +        float buf[128 * 4];
-+        /* Fill buffer with garbage values */
 +        for (int i = 0; i < frames * 4; i++) buf[i] = 42.0f;
-+
-+        /* Call rh_ds_render_frames without active DSP: returns < 0 and MUST memset to 0 */
 +        int res = rh_ds_render_frames(buf, frames);
 +        CHECK(res < 0);
-+        for (int i = 0; i < frames * 4; i++) {
-+            CHECK(buf[i] == 0.0f);
-+        }
-+
-+        /* Test NULL buffer or 0 frames */
++        for (int i = 0; i < frames * 4; i++) CHECK(buf[i] == 0.0f);
 +        CHECK(rh_ds_render_frames(NULL, frames) < 0);
 +        CHECK(rh_ds_render_frames(buf, 0) < 0);
 +    }
 +
-+    /* Test 7: Repeated connect/disconnect loop (5 times - simulate unplug/replug) */
 +    for (int cycle = 0; cycle < 5; cycle++) {
 +        void *dummy_pad = (void *)(uintptr_t)(0x1000 + cycle * 0x10);
 +        rh_attach(dummy_pad);
++        CHECK(rh_pad_claimed(0) == 0);
 +        CHECK(rh_detach(dummy_pad) == 1);
 +    }
-+
-+    /* Test 8: Cleanup without crash */
 +    rh_cleanup();
 +
-+    /* Test 9: Controller turned off / disconnected midway (detach when inactive or active) */
 +    {
 +        void *mock_bt_pad = (void *)0x2001;
 +        rh_attach(mock_bt_pad);
@@ -1322,38 +1699,347 @@ index 0000000..078a1ee
 +        CHECK(rh_is_active(mock_bt_pad) == 0);
 +    }
 +
-+    /* Test 10: Repeated detach idempotency and cleanup */
 +    CHECK(rh_detach(NULL) == 1);
 +    CHECK(rh_detach((void *)0x9999) == 1);
 +    rh_cleanup();
 +    CHECK(rh_is_active((void *)0x9999) == 0);
 +
-+    printf("PASS: rh_bridge unit test\n");
++    printf("PASS: rh_bridge fallback\n");
 +    return 0;
 +}
 +"""
 +
++MOCK_SDL3_SRC = r"""
++#include <stdint.h>
++#include <windows.h>
++
++static volatile LONG g_effect_count = 0;
++static int g_conn_state = 1; /* 1 = wired, 2 = wireless */
++
++__declspec(dllexport) uint16_t SDL_GetGamepadVendor(void *pad) {
++    uintptr_t tag = (uintptr_t)pad;
++    return (tag == 0x2001) ? 0x045E : 0x057E; /* Xbox vs Switch Pro */
++}
++__declspec(dllexport) uint16_t SDL_GetGamepadProduct(void *pad) {
++    uintptr_t tag = (uintptr_t)pad;
++    return (tag == 0x2001) ? 0x028E : 0x2009;
++}
++__declspec(dllexport) int SDL_GetGamepadConnectionState(void *pad) {
++    (void)pad;
++    return g_conn_state;
++}
++__declspec(dllexport) void *SDL_GetGamepadJoystick(void *pad) {
++    return pad;
++}
++__declspec(dllexport) int SDL_SendJoystickEffect(void *joy, const void *data, int size) {
++    (void)joy; (void)data; (void)size;
++    InterlockedIncrement(&g_effect_count);
++    return 1;
++}
++
++__declspec(dllexport) void test_sdl_set_conn(int state) { g_conn_state = state; }
++__declspec(dllexport) LONG test_sdl_get_effects(void) { return InterlockedCompareExchange(&g_effect_count, 0, 0); }
++__declspec(dllexport) void test_sdl_reset_effects(void) { InterlockedExchange(&g_effect_count, 0); }
++"""
++
++MOCK_RH_DLL_TEMPLATE = r"""
++#include <stdint.h>
++#include <stdbool.h>
++#include <string.h>
++#include <windows.h>
++
++static volatile LONG g_emit_once = 0;
++static volatile LONG g_emit_silent = 0;
++static volatile LONG g_last_bt_level = -1;
++
++{VERSION_FN}
++
++__declspec(dllexport) void *renhdrum_engine_create(bool bt, bool crisp) {{
++    (void)bt; (void)crisp;
++    return (void *)0xCAFE;
++}}
++__declspec(dllexport) void renhdrum_engine_destroy(void *e) {{ (void)e; }}
++__declspec(dllexport) int32_t renhdrum_settings_default(int32_t *out) {{
++    memset(out, 0, 64);
++    out[0] = 1;
++    out[1] = 15;
++    out[2] = 4;
++    return 0;
++}}
++__declspec(dllexport) int32_t renhdrum_engine_apply_settings(void *e, const int32_t *s) {{
++    (void)e;
++    InterlockedExchange(&g_last_bt_level, s[2]);
++    return 0;
++}}
++__declspec(dllexport) int32_t renhdrum_engine_push_half_sample(
++    void *e, int64_t now_us, bool is_right, float al, float fl, float ah, float fh) {{
++    (void)e; (void)now_us; (void)is_right; (void)fl; (void)fh;
++    InterlockedExchange(&g_emit_silent, (al == 0.0f && ah == 0.0f) ? 1 : 0);
++    InterlockedExchange(&g_emit_once, 1);
++    return 0;
++}}
++__declspec(dllexport) int32_t renhdrum_engine_tick(void *e, int64_t now_us, uint8_t *out10) {{
++    (void)e; (void)now_us;
++    if (InterlockedExchange(&g_emit_once, 0) == 1) {{
++        static const uint8_t vib[10] = {{0x10, 0x01, 0x80, 0x01, 0x40, 0x40, 0x80, 0x01, 0x40, 0x40}};
++        static const uint8_t sil[10] = {{0x10, 0x01, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40}};
++        memcpy(out10, InterlockedCompareExchange(&g_emit_silent, 0, 0) ? sil : vib, 10);
++        return 1;
++    }}
++    return 0;
++}}
++__declspec(dllexport) void renhdrum_set_nx2_mode(int32_t mode) {{ (void)mode; }}
++__declspec(dllexport) int32_t test_mock_get_bt_level(void) {{ return InterlockedCompareExchange(&g_last_bt_level, 0, 0); }}
++"""
++
++TEST_VERSION_REJECT_SRC = r"""
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <string.h>
++
++static char last_log[512];
++void hos_log(const char *fmt, ...) {
++    va_list ap;
++    va_start(ap, fmt);
++    vsnprintf(last_log, sizeof(last_log), fmt, ap);
++    va_end(ap);
++}
++int64_t hos_now_ns(void) { return 1000000000LL; }
++int hos_sdl_init(uint32_t subsystems) { (void)subsystems; return 1; }
++
++#include "rh_bridge.h"
++
++int main(void) {
++    int ok = rh_load();
++    if (ok != 0) {
++        fprintf(stderr, "FAIL: expected rh_load() == 0, got %d (log: %s)\n", ok, last_log);
++        return 1;
++    }
++    printf("PASS: %s\n", last_log);
++    return 0;
++}
++"""
++
++TEST_REAL_BRIDGE_SRC = r"""
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <stdbool.h>
++#include <string.h>
++#include <windows.h>
++
++void hos_log(const char *fmt, ...) { (void)fmt; }
++int64_t hos_now_ns(void) {
++    LARGE_INTEGER f, c;
++    QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (c.QuadPart * 1000000000LL) / f.QuadPart;
++}
++int hos_sdl_init(uint32_t subsystems) { (void)subsystems; return 1; }
++
++#include "rh_bridge.h"
++
++#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
++
++int main(void) {
++    HMODULE sdl_m = LoadLibraryA("SDL3.dll");
++    CHECK(sdl_m != NULL);
++    void (*set_conn)(int) = (void (*)(int))GetProcAddress(sdl_m, "test_sdl_set_conn");
++    LONG (*get_effects)(void) = (LONG (*)(void))GetProcAddress(sdl_m, "test_sdl_get_effects");
++    void (*reset_effects)(void) = (void (*)(void))GetProcAddress(sdl_m, "test_sdl_reset_effects");
++    CHECK(set_conn && get_effects && reset_effects);
++
++    /* Step 2a: Per-pad claim & non-silencing with real renhdrum.dll */
++    void *pro = (void *)0x1001;
++    void *xbox = (void *)0x2001;
++    set_conn(1); /* wired */
++    rh_attach(pro);
++    CHECK(rh_pad_claimed(0) == 1);
++    CHECK(rh_pad_claimed(1) == 0);
++    CHECK(rh_is_active(pro) == 1);
++    CHECK(rh_vibration(0, 0.5f, 160.0f, 0.5f, 320.0f) == 1);
++
++    /* Plug unclaimed Xbox in slot 1: rh_vibration still drives Pro, returns 0 so Xbox is not muted */
++    rh_attach(xbox);
++    CHECK(rh_pad_claimed(0) == 1);
++    CHECK(rh_pad_claimed(1) == 0);
++    reset_effects();
++    CHECK(rh_vibration(0, 0.6f, 160.0f, 0.6f, 320.0f) == 0);
++    Sleep(40);
++    CHECK(get_effects() > 0);
++
++    CHECK(rh_detach(xbox) == 1);
++    CHECK(rh_pad_claimed(0) == 1);
++    CHECK(rh_vibration(0, 0.0f, 160.0f, 0.0f, 320.0f) == 1);
++
++    /* Step 3: Wired 40 ms resend with real renhdrum.dll: 1 sample -> 200 ms later packets increase >= 3 */
++    Sleep(40);
++    reset_effects();
++    CHECK(rh_vibration(0, 0.8f, 160.0f, 0.7f, 320.0f) == 1);
++    Sleep(200);
++    LONG n_vib = get_effects();
++    CHECK(n_vib >= 4); /* >= 1 initial + >= 3 resends */
++
++    /* Silent sample does not resend */
++    CHECK(rh_vibration(0, 0.0f, 160.0f, 0.0f, 320.0f) == 1);
++    CHECK(rh_vibration(1, 0.0f, 160.0f, 0.0f, 320.0f) == 1);
++    Sleep(40);
++    reset_effects();
++    Sleep(200);
++    CHECK(get_effects() == 0);
++
++    rh_cleanup();
++    CHECK(rh_pad_claimed(0) == 0);
++    printf("PASS: real dll per-pad + wired resend (n_vib=%ld)\n", (long)n_vib);
++    return 0;
++}
++"""
++
++TEST_MOCK_RESEND_ISOLATION_SRC = r"""
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <stdbool.h>
++#include <string.h>
++#include <windows.h>
++
++void hos_log(const char *fmt, ...) { (void)fmt; }
++int64_t hos_now_ns(void) {
++    LARGE_INTEGER f, c;
++    QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (c.QuadPart * 1000000000LL) / f.QuadPart;
++}
++int hos_sdl_init(uint32_t subsystems) { (void)subsystems; return 1; }
++
++#include "rh_bridge.h"
++
++#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
++
++int main(void) {
++    HMODULE sdl_m = LoadLibraryA("SDL3.dll");
++    CHECK(sdl_m != NULL);
++    void (*set_conn)(int) = (void (*)(int))GetProcAddress(sdl_m, "test_sdl_set_conn");
++    LONG (*get_effects)(void) = (LONG (*)(void))GetProcAddress(sdl_m, "test_sdl_get_effects");
++    void (*reset_effects)(void) = (void (*)(void))GetProcAddress(sdl_m, "test_sdl_reset_effects");
++    CHECK(set_conn && get_effects && reset_effects);
++
++    /* 1. Wired Pro Controller: core emits ONCE; bridge adds >= 3 resends in 200 ms */
++    void *pro_wired = (void *)0x1001;
++    set_conn(1);
++    rh_attach(pro_wired);
++    reset_effects();
++    CHECK(rh_vibration(0, 0.7f, 160.0f, 0.7f, 320.0f) == 1);
++    Sleep(200);
++    LONG wired_cnt = get_effects();
++    CHECK(wired_cnt >= 4);
++
++    /* Silent sample clears rh_has_last_pkt and never resends */
++    CHECK(rh_vibration(0, 0.0f, 160.0f, 0.0f, 320.0f) == 1);
++    Sleep(30);
++    reset_effects();
++    Sleep(200);
++    CHECK(get_effects() == 0);
++    rh_detach(pro_wired);
++
++    /* 2. Bluetooth Compatible: default level is 4 and bridge performs 0 resends */
++    void *pro_bt = (void *)0x1002;
++    set_conn(2);
++    rh_attach(pro_bt);
++    HMODULE rh_m = GetModuleHandleW(L"renhdrum.dll");
++    CHECK(rh_m != NULL);
++    int32_t (*get_bt_level)(void) = (int32_t (*)(void))GetProcAddress(rh_m, "test_mock_get_bt_level");
++    CHECK(get_bt_level && get_bt_level() == 4);
++
++    reset_effects();
++    CHECK(rh_vibration(0, 0.7f, 160.0f, 0.7f, 320.0f) == 1);
++    Sleep(200);
++    LONG bt_cnt = get_effects();
++    CHECK(bt_cnt == 1); /* Only the single core tick; bridge did NOT resend */
++
++    rh_cleanup();
++    printf("PASS: resend isolation wired=%ld bt=%ld bt_level=%d\n", (long)wired_cnt, (long)bt_cnt, get_bt_level());
++    return 0;
++}
++"""
++
++
 +class RhBridgeTests(unittest.TestCase):
 +    def test_rh_bridge_behavior(self):
 +        with tempfile.TemporaryDirectory(prefix="rh-test-") as d:
-+            c = Path(d) / "test_main.c"
-+            c.write_text(FIXTURE, encoding="utf-8")
-+            exe = Path(d) / "test_rh.exe"
-+            cc = os.environ.get("CC", "gcc")
-+            # Ensure ucrt64 is searched if gcc not in PATH
-+            env = dict(os.environ)
-+            if "msys64" not in env.get("PATH", "").lower():
-+                env["PATH"] = r"C:\msys64\ucrt64\bin;" + env.get("PATH", "")
-+            res = subprocess.run([
-+                cc, "-std=c11", "-Wall", "-Wextra",
-+                str(c), str(RH_BRIDGE),
-+                "-I", str(ROOT / "host"),
-+                "-o", str(exe)
-+            ], capture_output=True, text=True, env=env)
-+            self.assertEqual(res.returncode, 0, f"Compilation failed: {res.stderr}")
-+            run_res = subprocess.run([str(exe)], capture_output=True, text=True, env=env)
-+            self.assertEqual(run_res.returncode, 0, f"Execution failed: {run_res.stderr}")
-+            self.assertIn("PASS: rh_bridge unit test", run_res.stdout)
++            out, _ = compile_and_run(Path(d), "test_fallback.c", FIXTURE_NO_DLL)
++            self.assertIn("PASS: rh_bridge fallback", out)
++
++    def test_hook_order_and_ounce_symbol(self):
++        pad_txt = PAD_SDL.read_text(encoding="utf-8")
++        hid_txt = NN_HID.read_text(encoding="utf-8")
++
++        m_poll = re.search(r"static void pads_poll\(void\)\s*\{", pad_txt)
++        self.assertIsNotNone(m_poll)
++        poll_body = pad_txt[m_poll.start():]
++        idx_claim = poll_body.index("if (rh_pad_claimed(i)) continue;")
++        idx_hd = poll_body.index("if (hd_poll(i, side, now)) continue;")
++        idx_due = poll_body.index("rumble_due(")
++        self.assertLess(idx_claim, idx_hd)
++        self.assertLess(idx_hd, idx_due)
++
++        m_clean = re.search(r"static void pad_exit_cleanup\(void\)\s*\{[^}]+\}", pad_txt)
++        self.assertIsNotNone(m_clean)
++        clean_body = m_clean.group(0)
++        self.assertIn("hos_sdl_pad_rumble(pads[i].gc, 0, 0, 0);", clean_body)
++        self.assertLess(
++            clean_body.index("hos_sdl_pad_rumble(pads[i].gc, 0, 0, 0);"),
++            clean_body.index("hos_sdl_pad_close(pads[i].gc);"),
++        )
++
++        self.assertIn("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", hid_txt)
++        self.assertIn("_ZN2nn3hid6detail29IsOunceVibrationDeviceMountedEPbRKNS0_21VibrationDeviceHandleE", hid_txt)
++        m_vsend = re.search(r"static void vibration_send\([^\n]+\)\s*\{", hid_txt)
++        self.assertIsNotNone(m_vsend)
++        vsend_body = hid_txt[m_vsend.start():]
++        self.assertLess(vsend_body.index("rh_vibration("), vsend_body.index("rumble_map("))
++
++    def test_dll_version_branch_mismatch_rejected(self):
++        with tempfile.TemporaryDirectory(prefix="rh-ver-bad-") as d:
++            tmp = Path(d)
++            src = MOCK_RH_DLL_TEMPLATE.format(
++                VERSION_FN="__declspec(dllexport) uint32_t renhdrum_version(void) { return 0x000200; }"
++            )
++            build_dll(tmp, "mock_rh.c", "renhdrum.dll", src)
++            out, _ = compile_and_run(tmp, "test_ver.c", TEST_VERSION_REJECT_SRC)
++            self.assertIn("incompatible", out)
++
++    def test_dll_missing_version_symbol_rejected(self):
++        with tempfile.TemporaryDirectory(prefix="rh-ver-miss-") as d:
++            tmp = Path(d)
++            src = MOCK_RH_DLL_TEMPLATE.format(VERSION_FN="")
++            build_dll(tmp, "mock_rh.c", "renhdrum.dll", src)
++            out, _ = compile_and_run(tmp, "test_miss.c", TEST_VERSION_REJECT_SRC)
++            self.assertIn("renhdrum_version missing", out)
++
++    def test_real_dll_per_pad_and_wired_resend(self):
++        if not REAL_DLL.exists():
++            self.skipTest("renhdrum.dll not built/present")
++        with tempfile.TemporaryDirectory(prefix="rh-real-") as d:
++            tmp = Path(d)
++            shutil.copy2(REAL_DLL, tmp / "renhdrum.dll")
++            build_dll(tmp, "mock_sdl3.c", "SDL3.dll", MOCK_SDL3_SRC)
++            out, _ = compile_and_run(tmp, "test_real.c", TEST_REAL_BRIDGE_SRC)
++            self.assertIn("PASS: real dll per-pad + wired resend", out)
++
++    def test_wired_vs_bt_resend_isolation(self):
++        with tempfile.TemporaryDirectory(prefix="rh-iso-") as d:
++            tmp = Path(d)
++            src = MOCK_RH_DLL_TEMPLATE.format(
++                VERSION_FN="__declspec(dllexport) uint32_t renhdrum_version(void) { return 0x000302; }"
++            )
++            build_dll(tmp, "mock_rh.c", "renhdrum.dll", src)
++            build_dll(tmp, "mock_sdl3.c", "SDL3.dll", MOCK_SDL3_SRC)
++            out, _ = compile_and_run(tmp, "test_iso.c", TEST_MOCK_RESEND_ISOLATION_SRC)
++            self.assertIn("PASS: resend isolation", out)
++
 +
 +if __name__ == "__main__":
 +    unittest.main()

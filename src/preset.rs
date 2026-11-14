@@ -165,8 +165,8 @@ mod tests {
 
         assert_eq!(
             RumbleConfigController::default().hd_rumble_bluetooth_level,
-            2,
-            "Standard = Bluetooth Level 2 (with B1 + B2)"
+            4,
+            "Standard = Bluetooth Level 4 (with B1 + B2)"
         );
     }
 }

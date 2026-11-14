@@ -98,6 +98,7 @@ pub struct NintendoHdEngine {
     dirty: bool,
 
     last_send_us: Option<i64>,
+    last_write_us: Option<i64>,
     last_packet: [u8; 10],
     has_last: bool,
     last_was_click: bool,
@@ -106,6 +107,8 @@ pub struct NintendoHdEngine {
     bt_crisp_fresh: bool,
 
     packet_counter: u8,
+    /// Sends the newest sample instead of the slot peak when enabled.
+    send_latest: bool,
 }
 
 impl NintendoHdEngine {
@@ -130,12 +133,14 @@ impl NintendoHdEngine {
             peak_r: HdSample::default(),
             dirty: false,
             last_send_us: None,
+            last_write_us: None,
             last_packet: [0; 10],
             has_last: false,
             last_was_click: false,
             bt_crisp_restore_at_us: 0,
             bt_crisp_fresh: false,
             packet_counter: 0,
+            send_latest: crate::nx2::flag_present_in(crate::nx2::LATEST_FLAG, None),
         };
         engine.apply_settings(&settings);
         engine
@@ -144,7 +149,7 @@ impl NintendoHdEngine {
     pub fn apply_settings(&mut self, settings: &HdRumbleSettings) {
         self.settings = settings.clone();
 
-        let bt_idx = (settings.bluetooth_level.clamp(1, 3) - 1) as usize;
+        let bt_idx = (settings.bluetooth_level.clamp(1, 4) - 1) as usize;
         self.bt_level = HD_BT_LEVELS[bt_idx];
         self.interval_ms = if self.is_bluetooth {
             self.bt_level.spacing_ms
@@ -178,12 +183,12 @@ impl NintendoHdEngine {
             self.short_pulses = None;
         }
 
-        // AM/FM 5 ms envelope (Ryuhdr HdApplyEnvelope): wired with card 3 on top of USB no-queue, Bluetooth with card B3.
+        // AM/FM 5 ms envelope (Ryuhdr HdApplyEnvelope): wired with card 3 on top of USB no-queue, Bluetooth with B1 at any level.
         // usb_no_queue / bt_fast mean "running in SDL": the host clears them when SDL refused the idle-gated writes
         // (eden-hdr: SDL3 patch 0002), otherwise Bluetooth would get a packet every 15 ms.
         let amfm_wanted = settings.enabled
             && if self.is_bluetooth {
-                settings.bt_fast && settings.bluetooth_level == 3
+                settings.bt_fast
             } else {
                 settings.envelope_5ms && settings.usb_no_queue
             };
@@ -217,6 +222,15 @@ impl NintendoHdEngine {
     /// USB auto slow-down (Ryuhdr HdUsbAutoSlow): off while USB no-queue runs, SDL merges the packets then.
     fn usb_auto_slow(&self) -> bool {
         !self.is_bluetooth && self.settings.usb_auto_slow && !self.settings.usb_no_queue
+    }
+
+    fn resend_due(&self, now_us: i64) -> bool {
+        let rs = self.bt_level.resend_ms as i64 * 1000;
+        self.is_bluetooth
+            && rs > 0
+            && self.has_last
+            && !hd_is_silent_packet(&self.last_packet)
+            && self.last_write_us.is_some_and(|t| now_us - t >= rs)
     }
 
     pub fn push_sample(
@@ -375,12 +389,22 @@ impl NintendoHdEngine {
                 self.has_last = true;
                 self.last_was_click = false;
                 self.last_send_us = Some(now_us);
+                self.last_write_us = Some(now_us);
                 return true;
             }
             return false;
         }
 
         if !self.dirty {
+            // Level 4: keep a still-rumbling packet alive (idea of Hookshot PR #1213, own code).
+            if self.resend_due(now_us) {
+                self.last_packet[1] = self.packet_counter;
+                self.packet_counter = (self.packet_counter + 1) & 0x0F;
+                out_packet.copy_from_slice(&self.last_packet);
+                self.last_send_us = Some(now_us);
+                self.last_write_us = Some(now_us);
+                return true;
+            }
             return false;
         }
 
@@ -417,11 +441,16 @@ impl NintendoHdEngine {
             }
         }
 
-        let send_l = self.peak_l;
-        let send_r = self.peak_r;
+        let (send_l, send_r) =
+            if self.send_latest || (self.is_bluetooth && self.bt_level.send_latest) {
+                (self.latest_l, self.latest_r)
+            } else {
+                (self.peak_l, self.peak_r)
+            };
 
         // Bluetooth crisp note hold check
         if self.settings.bt_crisp_notes
+            && !self.bt_level.send_latest
             && self.bt_crisp_restore_at_us != 0
             && !self.bt_crisp_fresh
             && now_us < self.bt_crisp_restore_at_us
@@ -462,6 +491,7 @@ impl NintendoHdEngine {
                         out_packet.copy_from_slice(&click_packet);
 
                         self.last_send_us = Some(now_us);
+                        self.last_write_us = Some(now_us);
                         if self.is_bluetooth && !self.settings.sync_bluetooth {
                             self.bt_tokens -= 1.0;
                         }
@@ -489,7 +519,11 @@ impl NintendoHdEngine {
         let mut out_r = send_r;
         let mut accented = false;
 
-        if self.settings.bt_crisp_notes && self.is_bluetooth && !self.settings.sync_bluetooth {
+        if self.settings.bt_crisp_notes
+            && !self.bt_level.send_latest
+            && self.is_bluetooth
+            && !self.settings.sync_bluetooth
+        {
             accented = self.bt_crisp_shape(&mut out_l, 2);
             accented |= self.bt_crisp_shape(&mut out_r, 6);
         }
@@ -516,9 +550,25 @@ impl NintendoHdEngine {
         candidate_packet[2..6].copy_from_slice(&side_l);
         candidate_packet[6..10].copy_from_slice(&side_r);
 
+        // Level 4 keep-alive when the game keeps pushing identical samples: wait until resend_due, then send as new.
+        let mut is_resend = false;
+        if self.is_bluetooth
+            && self.bt_level.resend_ms > 0
+            && self.has_last
+            && !self.last_was_click
+            && candidate_packet[2..10] == self.last_packet[2..10]
+            && !hd_is_silent_packet(&candidate_packet)
+        {
+            if !self.resend_due(now_us) {
+                return false;
+            }
+            is_resend = true;
+        }
+
         // Same packet, or a small change on Bluetooth: not written, but like Ryuhdr's HdSendPacket (which returns true)
         // it still uses up the spacing and the Bluetooth token.
-        let skipped = !self.last_was_click
+        let skipped = !is_resend
+            && !self.last_was_click
             && self.has_last
             && (candidate_packet[2..10] == self.last_packet[2..10]
                 || (self.is_bluetooth
@@ -531,6 +581,7 @@ impl NintendoHdEngine {
             self.last_packet.copy_from_slice(&candidate_packet);
             self.has_last = true;
             self.last_was_click = false;
+            self.last_write_us = Some(now_us);
         }
 
         self.last_send_us = Some(now_us);
@@ -611,6 +662,138 @@ mod tests {
     }
 
     #[test]
+    fn test_send_latest_knob_sends_newest_not_peak() {
+        let run = |latest: bool| {
+            let mut engine = NintendoHdEngine::new(false, true);
+            engine.send_latest = latest;
+            let mut out = [0u8; 10];
+            engine.push_sample(0, 0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+            engine.tick(0, &mut out);
+            engine.push_sample(5_000, 0.8, 160.0, 0.0, 320.0, 0.8, 160.0, 0.0, 320.0);
+            engine.push_sample(10_000, 0.2, 160.0, 0.0, 320.0, 0.2, 160.0, 0.0, 320.0);
+            assert!(engine.tick(15_000, &mut out));
+            out
+        };
+        assert_ne!(run(true), run(false));
+    }
+
+    fn level4_engine() -> NintendoHdEngine {
+        let mut settings = HdRumbleSettings::default();
+        settings.bluetooth_level = 4;
+        settings.bt_fast = false;
+        let mut engine = NintendoHdEngine::new(true, true);
+        engine.apply_settings(&settings);
+        engine
+    }
+
+    #[test]
+    fn test_level4_sends_newest_sample() {
+        let mut e = level4_engine();
+        let mut out = [0u8; 10];
+        let t0 = 1_000_000;
+        e.push_sample(t0, 0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+        assert!(e.tick(t0, &mut out));
+        e.push_sample(t0 + 5_000, 0.9, 160.0, 0.0, 320.0, 0.9, 160.0, 0.0, 320.0);
+        e.push_sample(t0 + 10_000, 0.2, 160.0, 0.0, 320.0, 0.2, 160.0, 0.0, 320.0);
+        assert!(e.tick(t0 + 32_000, &mut out));
+        let mut want = [0u8; 4];
+        hd_encode_side(&mut want, 0.2, 160.0, 0.0, 320.0);
+        assert_eq!(out[2..6], want);
+    }
+
+    #[test]
+    fn test_level4_resends_every_40ms_but_not_silence() {
+        let mut e = level4_engine();
+        let mut out = [0u8; 10];
+        let t0 = 1_000_000;
+        e.push_sample(t0, 0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+        assert!(e.tick(t0, &mut out));
+        assert!(!e.tick(t0 + 39_000, &mut out));
+        assert!(e.tick(t0 + 40_000, &mut out));
+        assert!(!hd_is_silent_packet(&out));
+        // silence goes out once, then is never re-sent
+        e.push_sample(t0 + 80_000, 0.0, 160.0, 0.0, 320.0, 0.0, 160.0, 0.0, 320.0);
+        assert!(e.tick(t0 + 80_000, &mut out));
+        assert!(hd_is_silent_packet(&out));
+        assert!(!e.tick(t0 + 200_000, &mut out));
+    }
+
+    #[test]
+    fn test_level4_blocks_sends_closer_than_32ms() {
+        let mut e = level4_engine();
+        let mut out = [0u8; 10];
+        let t0 = 1_000_000;
+        e.push_sample(t0, 0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+        assert!(e.tick(t0, &mut out));
+        e.push_sample(t0 + 10_000, 0.9, 160.0, 0.0, 320.0, 0.9, 160.0, 0.0, 320.0);
+        assert!(!e.tick(t0 + 31_000, &mut out));
+        assert!(e.tick(t0 + 32_000, &mut out));
+    }
+
+    #[test]
+    fn test_level4_resends_while_game_keeps_pushing() {
+        let mut e = level4_engine();
+        let mut out = [0u8; 10];
+        let t0 = 1_000_000;
+        let mut times = Vec::new();
+
+        for ms in 0..=400 {
+            let now = t0 + ms * 1_000;
+            if ms % 5 == 0 {
+                e.push_sample(now, 0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+            }
+            if e.tick(now, &mut out) {
+                assert!(!hd_is_silent_packet(&out));
+                times.push(ms);
+            }
+        }
+
+        assert_eq!(times.len(), 11);
+        assert_eq!(times[0], 0);
+        for w in times.windows(2) {
+            assert_eq!(w[1] - w[0], 40);
+        }
+
+        // Stop rumbling: exactly one silent packet goes out, then nothing more
+        let mut silent_sends = 0;
+        for ms in 401..=520 {
+            let now = t0 + ms * 1_000;
+            if ms % 5 == 0 {
+                e.push_sample(now, 0.0, 160.0, 0.0, 320.0, 0.0, 160.0, 0.0, 320.0);
+            }
+            if e.tick(now, &mut out) {
+                assert!(hd_is_silent_packet(&out));
+                silent_sends += 1;
+            }
+        }
+        assert_eq!(silent_sends, 1);
+    }
+
+    #[test]
+    fn test_level3_does_not_resend_while_game_keeps_pushing() {
+        let mut settings = HdRumbleSettings::default();
+        settings.bluetooth_level = 3;
+        settings.bt_fast = false;
+        let mut e = NintendoHdEngine::new(true, true);
+        e.apply_settings(&settings);
+
+        let mut out = [0u8; 10];
+        let t0 = 1_000_000;
+        let mut sent_count = 0;
+
+        for ms in 0..=400 {
+            let now = t0 + ms * 1_000;
+            if ms % 5 == 0 {
+                e.push_sample(now, 0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+            }
+            if e.tick(now, &mut out) {
+                sent_count += 1;
+            }
+        }
+        assert_eq!(sent_count, 1);
+    }
+
+    #[test]
     fn test_neutral_packet_on_silence() {
         let mut engine = NintendoHdEngine::new(false, true);
         let mut out = [0u8; 10];
@@ -665,12 +848,16 @@ mod tests {
         bt.apply_settings(&settings);
         assert!(bt.amfm_planner.is_none());
         settings.bt_fast = true;
-        settings.bluetooth_level = 2;
+        for level in [2, 4] {
+            settings.bluetooth_level = level;
+            bt.apply_settings(&settings);
+            assert!(bt.amfm_planner.is_some());
+        }
+        settings.bt_fast = false;
         bt.apply_settings(&settings);
         assert!(bt.amfm_planner.is_none());
-        settings.bluetooth_level = 3;
+        settings.bt_fast = true;
         bt.apply_settings(&settings);
-        assert!(bt.amfm_planner.is_some());
 
         let mut usb = NintendoHdEngine::new(false, true);
         usb.apply_settings(&settings);

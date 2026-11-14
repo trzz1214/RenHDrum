@@ -95,6 +95,36 @@ impl RumbleTrace {
         ));
     }
 
+    /// Like log_sample, plus the amplitudes the game sent before the Switch 2 curve (extra columns at the end).
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_sample_raw(
+        &mut self,
+        t_us: i64,
+        is_right: bool,
+        low_amp: f32,
+        low_freq: f32,
+        high_amp: f32,
+        high_freq: f32,
+        raw_low: f32,
+        raw_high: f32,
+    ) {
+        let side = if is_right { 'R' } else { 'L' };
+        self.line(format_args!(
+            "G,{t_us},{side},{low_amp},{low_freq},{high_amp},{high_freq},{raw_low},{raw_high}
+"
+        ));
+    }
+
+    /// A packet the engine really handed out: the 8 rumble bytes after header and counter.
+    pub fn log_packet(&mut self, t_us: i64, packet: &[u8; 10]) {
+        let b = &packet[2..];
+        self.line(format_args!(
+            "P,{t_us},{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}
+",
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
+        ));
+    }
+
     pub fn log_output(&mut self, t_us: i64, motors: [u16; 4], kind_low: &str, kind_high: &str) {
         let [lg, rg, lt, rt] = motors.map(pct);
         self.line(format_args!(

@@ -71,7 +71,7 @@ pub struct RumbleConfigController {
 impl RumbleConfigController {
     pub const DEFAULT_HD_RUMBLE_USB_INTERVAL_MS: i32 = 15;
     pub const DEFAULT_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 1;
-    pub const STANDARD_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 2;
+    pub const STANDARD_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 4;
     pub const OLD_DEFAULT_HD_RUMBLE_BLUETOOTH_LEVEL: i32 = 3;
     pub const DEFAULT_DUALSENSE_HAPTICS_VOLUME: i32 = 100;
     pub const OLD_DEFAULT_DUALSENSE_HAPTICS_VOLUME: i32 = 70;
@@ -129,7 +129,7 @@ impl HdRumbleSettings {
     pub const MIN_USB_INTERVAL_MS: i32 = 5;
     pub const MAX_USB_INTERVAL_MS: i32 = 100;
     pub const MIN_BLUETOOTH_LEVEL: i32 = 1;
-    pub const MAX_BLUETOOTH_LEVEL: i32 = 3;
+    pub const MAX_BLUETOOTH_LEVEL: i32 = 4;
     pub const MIN_USB_PAUSE_MS: i32 = 1;
     pub const MAX_USB_PAUSE_MS: i32 = 10;
     pub const DEFAULT_USB_PAUSE_MS: i32 = 2;
@@ -150,13 +150,23 @@ impl Default for HdRumbleSettings {
 
 impl HdRumbleSettings {
     pub fn resolve(config: Option<&RumbleConfigController>) -> Self {
-        Self::resolve_with_dir(config, None)
+        Self::resolve_with_dir(config, None, true)
     }
 
+    /// `read_flags = false`: ignore flag files, use only `config` (host-owned settings).
     pub fn resolve_with_dir(
         config: Option<&RumbleConfigController>,
         base_dir: Option<&Path>,
+        read_flags: bool,
     ) -> Self {
+        let exists = |name: &str| read_flags && Self::flag_file_exists_in(name, base_dir);
+        let read_int = |name: &str| {
+            if read_flags {
+                Self::try_read_flag_int_in(name, base_dir)
+            } else {
+                None
+            }
+        };
         let config_source = if config.is_some() {
             Self::SOURCE_CONFIG
         } else {
@@ -166,7 +176,7 @@ impl HdRumbleSettings {
         let mut enabled = config.map(|c| c.enable_hd_rumble).unwrap_or(true);
         let mut enabled_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::OFF_FLAG_FILE, base_dir) {
+        if exists(Self::OFF_FLAG_FILE) {
             enabled = false;
             enabled_source = format!("flag file {}", Self::OFF_FLAG_FILE);
         }
@@ -181,9 +191,7 @@ impl HdRumbleSettings {
             usb_source = format!("default, invalid {config_source} value");
         }
 
-        if let Some(flag_interval) =
-            Self::try_read_flag_int_in(Self::USB_INTERVAL_FLAG_FILE, base_dir)
-        {
+        if let Some(flag_interval) = read_int(Self::USB_INTERVAL_FLAG_FILE) {
             usb_interval =
                 flag_interval.clamp(Self::MIN_USB_INTERVAL_MS, Self::MAX_USB_INTERVAL_MS);
             usb_source = format!("flag file {}", Self::USB_INTERVAL_FLAG_FILE);
@@ -199,9 +207,7 @@ impl HdRumbleSettings {
             bt_source = format!("default, invalid {config_source} value");
         }
 
-        if let Some(flag_level) =
-            Self::try_read_flag_int_in(Self::BLUETOOTH_LEVEL_FLAG_FILE, base_dir)
-        {
+        if let Some(flag_level) = read_int(Self::BLUETOOTH_LEVEL_FLAG_FILE) {
             if (Self::MIN_BLUETOOTH_LEVEL..=Self::MAX_BLUETOOTH_LEVEL).contains(&flag_level) {
                 bt_level = flag_level;
                 bt_source = format!("flag file {}", Self::BLUETOOTH_LEVEL_FLAG_FILE);
@@ -219,7 +225,7 @@ impl HdRumbleSettings {
             .unwrap_or(false);
         let mut usb_no_queue_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::USB_NO_QUEUE_FLAG_FILE, base_dir) {
+        if exists(Self::USB_NO_QUEUE_FLAG_FILE) {
             usb_no_queue = true;
             usb_no_queue_source = format!("flag file {}", Self::USB_NO_QUEUE_FLAG_FILE);
         }
@@ -227,7 +233,7 @@ impl HdRumbleSettings {
         let mut usb_pause = Self::DEFAULT_USB_PAUSE_MS;
         let mut usb_pause_source = Self::SOURCE_DEFAULT.to_string();
 
-        if let Some(flag_pause) = Self::try_read_flag_int_in(Self::USB_PAUSE_FLAG_FILE, base_dir) {
+        if let Some(flag_pause) = read_int(Self::USB_PAUSE_FLAG_FILE) {
             if (Self::MIN_USB_PAUSE_MS..=Self::MAX_USB_PAUSE_MS).contains(&flag_pause) {
                 usb_pause = flag_pause;
                 usb_pause_source = format!("flag file {}", Self::USB_PAUSE_FLAG_FILE);
@@ -238,7 +244,7 @@ impl HdRumbleSettings {
                     Self::USB_PAUSE_FLAG_FILE
                 );
             }
-        } else if Self::flag_file_exists_in(Self::USB_PAUSE_FLAG_FILE, base_dir) {
+        } else if exists(Self::USB_PAUSE_FLAG_FILE) {
             usb_pause_source = format!(
                 "{}, invalid flag file {} ignored",
                 Self::SOURCE_DEFAULT,
@@ -251,7 +257,7 @@ impl HdRumbleSettings {
             .unwrap_or(false);
         let mut envelope_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::ENVELOPE_5MS_FLAG_FILE, base_dir) {
+        if exists(Self::ENVELOPE_5MS_FLAG_FILE) {
             envelope = true;
             envelope_source = format!("flag file {}", Self::ENVELOPE_5MS_FLAG_FILE);
         }
@@ -261,7 +267,7 @@ impl HdRumbleSettings {
             .unwrap_or(false);
         let mut frequency_in_packet_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::FREQUENCY_IN_PACKET_FLAG_FILE, base_dir) {
+        if exists(Self::FREQUENCY_IN_PACKET_FLAG_FILE) {
             frequency_in_packet = true;
             frequency_in_packet_source =
                 format!("flag file {}", Self::FREQUENCY_IN_PACKET_FLAG_FILE);
@@ -272,7 +278,7 @@ impl HdRumbleSettings {
             .unwrap_or(false);
         let mut frequency_both_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::FREQUENCY_BOTH_BANDS_FLAG_FILE, base_dir) {
+        if exists(Self::FREQUENCY_BOTH_BANDS_FLAG_FILE) {
             frequency_both = true;
             frequency_both_source = format!("flag file {}", Self::FREQUENCY_BOTH_BANDS_FLAG_FILE);
         }
@@ -282,7 +288,7 @@ impl HdRumbleSettings {
             .unwrap_or(false);
         let mut bt_after_input_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::BT_AFTER_INPUT_FLAG_FILE, base_dir) {
+        if exists(Self::BT_AFTER_INPUT_FLAG_FILE) {
             bt_after_input = true;
             bt_after_input_source = format!("flag file {}", Self::BT_AFTER_INPUT_FLAG_FILE);
         }
@@ -292,7 +298,7 @@ impl HdRumbleSettings {
             .unwrap_or(false);
         let mut crisp_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::CRISP_NOTES_FLAG_FILE, base_dir) {
+        if exists(Self::CRISP_NOTES_FLAG_FILE) {
             crisp = true;
             crisp_source = format!("flag file {}", Self::CRISP_NOTES_FLAG_FILE);
         }
@@ -302,7 +308,7 @@ impl HdRumbleSettings {
             .unwrap_or(false);
         let mut bt_crisp_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::BT_CRISP_NOTES_FLAG_FILE, base_dir) {
+        if exists(Self::BT_CRISP_NOTES_FLAG_FILE) {
             bt_crisp = true;
             bt_crisp_source = format!("flag file {}", Self::BT_CRISP_NOTES_FLAG_FILE);
         }
@@ -312,7 +318,7 @@ impl HdRumbleSettings {
             .unwrap_or(false);
         let mut bt_fast_source = config_source.to_string();
 
-        if Self::flag_file_exists_in(Self::BT_FAST_FLAG_FILE, base_dir) {
+        if exists(Self::BT_FAST_FLAG_FILE) {
             bt_fast = true;
             bt_fast_source = format!("flag file {}", Self::BT_FAST_FLAG_FILE);
         }
@@ -477,7 +483,7 @@ mod tests {
         }
 
         fn resolve(&self, config: Option<&RumbleConfigController>) -> HdRumbleSettings {
-            HdRumbleSettings::resolve_with_dir(config, Some(&self.path))
+            HdRumbleSettings::resolve_with_dir(config, Some(&self.path), true)
         }
 
         fn existing_flag_files(&self) -> Vec<&'static str> {
@@ -504,6 +510,21 @@ mod tests {
     }
 
     #[test]
+    fn pure_resolve_ignores_flag_files() {
+        let dir = TempFlagDir::new();
+        dir.write_flag(HdRumbleSettings::OFF_FLAG_FILE, "");
+        dir.write_flag(HdRumbleSettings::BLUETOOTH_LEVEL_FLAG_FILE, "2");
+        let cfg = RumbleConfigController::default();
+        let pure = HdRumbleSettings::resolve_with_dir(Some(&cfg), Some(&dir.path), false);
+        assert!(pure.enabled);
+        assert_eq!(pure.bluetooth_level, 4);
+        assert_eq!(pure.enabled_source, "config");
+        let flagged = HdRumbleSettings::resolve_with_dir(Some(&cfg), Some(&dir.path), true);
+        assert!(!flagged.enabled);
+        assert_eq!(flagged.bluetooth_level, 2);
+    }
+
+    #[test]
     fn built_in_defaults() {
         let dir = TempFlagDir::new();
         let settings = dir.resolve(None);
@@ -526,7 +547,7 @@ mod tests {
 
         assert!(settings.enabled);
         assert_eq!(settings.usb_interval_ms, 15);
-        assert_eq!(settings.bluetooth_level, 2);
+        assert_eq!(settings.bluetooth_level, 4);
         assert_eq!(settings.enabled_source, "config");
         assert_eq!(settings.usb_interval_source, "config");
         assert_eq!(settings.bluetooth_level_source, "config");
@@ -544,7 +565,7 @@ mod tests {
         assert!(settings.envelope_5ms);
         assert!(settings.frequency_in_packet);
         assert!(settings.frequency_both_bands);
-        assert_eq!(settings.bluetooth_level, 2);
+        assert_eq!(settings.bluetooth_level, 4);
 
         let unconfigured = dir.resolve(None);
         assert!(
@@ -586,7 +607,7 @@ mod tests {
     #[test]
     fn invalid_config_values_fall_back_to_defaults() {
         let dir = TempFlagDir::new();
-        for &(usb, bt) in &[(0, 4), (200, 7)] {
+        for &(usb, bt) in &[(0, 5), (200, 7)] {
             let mut config = RumbleConfigController::default();
             config.hd_rumble_usb_interval_ms = usb;
             config.hd_rumble_bluetooth_level = bt;
@@ -634,7 +655,7 @@ mod tests {
             settings.usb_interval_source,
             "flag file hdrumble_interval_ms.txt"
         );
-        assert_eq!(settings.bluetooth_level, 2);
+        assert_eq!(settings.bluetooth_level, 4);
     }
 
     #[test]
@@ -671,7 +692,7 @@ mod tests {
     #[test]
     fn invalid_bluetooth_level_flag_file_keeps_config() {
         let dir = TempFlagDir::new();
-        for bad in &["4", "0", "fast"] {
+        for bad in &["5", "0", "fast"] {
             dir.write_flag(HdRumbleSettings::BLUETOOTH_LEVEL_FLAG_FILE, bad);
             let mut config = RumbleConfigController::default();
             config.hd_rumble_bluetooth_level = 1;
@@ -1086,7 +1107,7 @@ mod tests {
         let on = dir.resolve(Some(&config));
         assert!(on.bt_after_input);
         assert_eq!(on.bt_after_input_source, "config");
-        assert_eq!(on.bluetooth_level, 2);
+        assert_eq!(on.bluetooth_level, 4);
         assert!(
             on.usb_no_queue && on.envelope_5ms && on.frequency_in_packet && on.frequency_both_bands
         );

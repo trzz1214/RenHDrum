@@ -51,7 +51,7 @@ pub struct DualSenseTriggerProfileConfig {
 }
 
 impl DualSenseTriggerProfileConfig {
-    pub const TOTK_TITLE_ID: u64 = 0x0100F2C0115B6000;
+    pub const BOW_DRAW_TITLE_ID: u64 = 0x0100F2C0115B6000;
 
     pub const MIN_STRENGTH: i32 = 1;
     pub const MAX_STRENGTH: i32 = 8;
@@ -59,10 +59,10 @@ impl DualSenseTriggerProfileConfig {
     pub const MIN_FREQUENCY: i32 = 1;
     pub const MAX_FREQUENCY: i32 = 255;
 
-    pub fn create_totk() -> Self {
+    pub fn create_bow_draw() -> Self {
         Self {
-            title_id: Self::TOTK_TITLE_ID,
-            name: "TOTK".to_string(),
+            title_id: Self::BOW_DRAW_TITLE_ID,
+            name: "BOW_DRAW".to_string(),
             arm_triggers: true,
             bow_enabled: true,
             bow_strength: 8,
@@ -80,8 +80,13 @@ impl DualSenseTriggerProfileConfig {
         }
     }
 
+    /// Public API alias kept for external crates (e.g. `Brontide-App`) until migrated.
+    pub fn create_totk() -> Self {
+        Self::create_bow_draw()
+    }
+
     pub fn create_defaults() -> Vec<Self> {
-        vec![Self::create_totk()]
+        vec![Self::create_bow_draw()]
     }
 }
 
@@ -288,7 +293,7 @@ pub fn pack_ds5_effects_state(left: &[u8; 11], right: &[u8; 11], out47: &mut [u8
 mod tests {
     use super::*;
 
-    const TOTK_TITLE_ID: u64 = 0x0100F2C0115B6000;
+    const BOW_DRAW_TITLE_ID: u64 = 0x0100F2C0115B6000;
 
     const OFF: [u8; 11] = [
         0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -306,9 +311,13 @@ mod tests {
         0x26, 0xFF, 0x03, 0x92, 0x24, 0x49, 0x12, 0x00, 0x00, 0x19, 0x00,
     ];
 
-    fn totk(configs: Option<&[DualSenseTriggerProfileConfig]>) -> DualSenseTriggerProfile {
+    fn bow_draw_profile(
+        configs: Option<&[DualSenseTriggerProfileConfig]>,
+    ) -> DualSenseTriggerProfile {
         let profiles = DualSenseTriggerProfile::build(configs);
-        let profile = profiles.get(&TOTK_TITLE_ID).expect("TOTK profile missing");
+        let profile = profiles
+            .get(&BOW_DRAW_TITLE_ID)
+            .expect("bow_draw profile missing");
         DualSenseTriggerProfile::new(&DualSenseTriggerProfileConfig {
             title_id: profile.title_id,
             name: profile.name.clone(),
@@ -343,19 +352,19 @@ mod tests {
     }
 
     #[test]
-    fn test_defaults_are_totk_only() {
+    fn test_defaults_are_bow_draw_only() {
         let profiles = DualSenseTriggerProfile::build(None);
         assert_eq!(profiles.len(), 1);
-        assert!(profiles.contains_key(&TOTK_TITLE_ID));
-        assert_eq!(profiles[&TOTK_TITLE_ID].name, "TOTK");
+        assert!(profiles.contains_key(&BOW_DRAW_TITLE_ID));
+        assert_eq!(profiles[&BOW_DRAW_TITLE_ID].name, "BOW_DRAW");
         assert!(!profiles.contains_key(&0x01006A800016E000));
         assert!(!profiles.contains_key(&0));
     }
 
     #[test]
     fn test_config_defaults_match_0194_values() {
-        let config = DualSenseTriggerProfileConfig::create_totk();
-        assert_eq!(config.title_id, TOTK_TITLE_ID);
+        let config = DualSenseTriggerProfileConfig::create_bow_draw();
+        assert_eq!(config.title_id, BOW_DRAW_TITLE_ID);
         assert!(config.arm_triggers);
         assert!(
             config.bow_enabled
@@ -375,8 +384,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_totk_profile_gives_0194_effects() {
-        let t = totk(None);
+    fn test_default_bow_draw_profile_gives_0194_effects() {
+        let t = bow_draw_profile(None);
         assert!(t.armed);
 
         // Nothing held: bow and shield already loaded (arm_triggers), even while game rumbles
@@ -401,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_arm_triggers_off_frees_released_triggers() {
-        let mut config = DualSenseTriggerProfileConfig::create_totk();
+        let mut config = DualSenseTriggerProfileConfig::create_bow_draw();
         config.arm_triggers = false;
         let t = DualSenseTriggerProfile::new(&config);
 
@@ -415,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_disabled_situations_fall_through() {
-        let mut config = DualSenseTriggerProfileConfig::create_totk();
+        let mut config = DualSenseTriggerProfileConfig::create_bow_draw();
         config.sustained_enabled = false;
         config.bow_enabled = false;
         let t = DualSenseTriggerProfile::new(&config);
@@ -426,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_test_button_effects() {
-        let t = totk(None);
+        let t = bow_draw_profile(None);
         let (left, right) = t.test_effects();
         assert_eq!(left.data, SHIELD);
         assert_eq!(right.data, BOW);

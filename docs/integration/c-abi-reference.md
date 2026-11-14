@@ -8,7 +8,7 @@ Library name: `renhdrum.dll` (Windows), `librenhdrum.so` (Linux), `librenhdrum.d
 > In Eden, yuzu, and PokeDinner derivatives, host configurations **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 ---
 
@@ -32,7 +32,7 @@ Host runtime configuration passed to `renhdrum_engine_apply_settings`.
 typedef struct RenHdcSettings {
     bool enabled;                  /* Global engine enable */
     int32_t usb_interval_ms;       /* USB target frame spacing (default 15 ms) */
-    int32_t bluetooth_level;       /* Token bucket tier (1=Stable 60ms, 2=Balanced 45ms, 3=Quality 35ms) */
+    int32_t bluetooth_level;       /* Token bucket tier (1=Stable 60ms, 2=Balanced 45ms, 3=Quality 35ms, 4=Compatible 32ms newest-value, default) */
     bool usb_auto_slow;            /* Auto-slowdown to 30 ms under high sample rates */
     bool sync_to_input;            /* Input synchronization */
     bool click_pulse;              /* Enable hardware click packet emulation */
@@ -62,6 +62,15 @@ typedef struct RenHdSideSample {
 
 ---
 
+## 2b. Settings Resolvers
+
+### `renhdrum_settings_resolve_pure`
+```c
+int32_t renhdrum_settings_resolve_pure(const RenHdcConfig *config, RenHdcSettings *out_settings);
+```
+Use this when the host is not Brontide. It reads no IPC shared memory and no flag files; out-of-range values fall back to defaults. A `NULL` config gives the same result as `renhdrum_settings_default`.
+`renhdrum_settings_resolve` (Brontide) additionally lets `Brontide-App` and flag files override the config.
+
 ## 3. Stateless Encoders
 
 These functions perform pure mathematical transformations and packet encoding without maintaining state or allocating memory.
@@ -78,8 +87,9 @@ void renhdrum_set_nx2_mode(int32_t mode);
 ```
 Sets the Switch 2 vibration translation mode:
 - `mode == 2`: Switch 2 translation active. Call when receiving guest Switch 2 vibration commands (e.g. `nn::hid::IHidServer` Command 214 `SendVibrationValuesInMode`).
-  - **Sony DualSense**: Automatically applies piecewise response curve preset `[3]` (`T = 0.001, P1 = 0.004, P2 = 0.550, P3 = 0.900, P4 = 1.000`) for voice-coil actuators.
-  - **Nintendo Switch Pro Controller 1**: Automatically applies piecewise response curve preset `[4]` (`T = 0.001, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`) with an initial +20% (1.2x) attack transient boost for 25 ms on low frequencies below 150 Hz.
+  - **Sony DualSense**: Automatically applies the fixed Mode 2 law (`a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`, no EQ) across all Switch 2 games before DSP synthesis (keeping the 5.3 ms slot peak-hold, 4 ms smoothing, and 0.8 output ceiling).
+  - **Nintendo Switch Pro Controller 1**: Automatically applies the Pro curve `PRO_DEFAULT` (`T = 0.004, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`), silencing micro-vibrations at or below `0.004` instead of lifting them, with an initial +20% (1.2x) onset boost for 25 ms on low frequencies below 150 Hz.
+  - **Microsoft Xbox One S**: Maps amplitudes through the same Pro curve (`PRO_DEFAULT`, `T = 0.004`, without the 1.2x boost) and then passes them to the Switch 1 four-motor converter.
 - `mode == 0`: Classic Switch 1 mode. Amplitudes pass through 100% untouched and bit-exact. Call when running classic Switch 1 games or standard vibration commands.
 
 ### `renhdrum_encode_standard_side`
@@ -211,6 +221,17 @@ Sets the vibration target for a single channel.
 int32_t renhdrum_dualsense_dsp_fill_f32(RenHdcDualSenseDsp *dsp, float *out_buffer, int32_t total_floats);
 ```
 Fills `out_buffer` with interleaved 4-channel 48 kHz float samples (Channels 0 & 1 = Audio left/right; Channels 2 & 3 = Haptics left/right). `total_floats` must be a multiple of 4.
+
+### `renhdrum_valve_grip_dsp_create` / `renhdrum_valve_grip_build_report` (experimental)
+```c
+RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create(int32_t volume_percent, bool crisp_notes);
+int32_t renhdrum_valve_grip_build_report(RenHdcDualSenseDsp *dsp, uint8_t format, uint8_t *out_report64);
+```
+Steam Controller (2026) grip haptics. Experimental: I built this from iafx's hardware measurements in RenHDrum#5; I do not own the controller.
+
+`renhdrum_valve_grip_dsp_create` returns the same handle type as the DualSense DSP, with a grip profile (per-band gain of -5 dB flat from 40 to 500 Hz, falling to -20 dB at 800 Hz, applied after the same amplitude law). Feed it with `renhdrum_dualsense_dsp_set_half_target` and free it with `renhdrum_dualsense_dsp_destroy`.
+
+`renhdrum_valve_grip_build_report` fills `out_report64` (64 bytes, `RENHDRUM_VALVE_GRIP_REPORT_SIZE`) with HID report `0x88`: byte 0 = `0x88`, byte 1 = 31 samples, bytes 2..32 = left grip, bytes 33..63 = right grip, mu-law coded. `format` 8 = mu-law 8 kHz (USB cable, call every `RENHDRUM_VALVE_GRIP_PERIOD_NS_8K`), 9 = mu-law 4 kHz (wireless dongle, Bluetooth on Windows, every `RENHDRUM_VALVE_GRIP_PERIOD_NS_4K`). Returns 1 when the block carries vibration, 0 when silent, a negative code on error (unknown format gives `RENHDRUM_ERR_INVALID_ARG`, NULL pointers give `RENHDRUM_ERR_NULL_PTR`). The host sends the report with its own HID handle and its own steady timer.
 
 ---
 

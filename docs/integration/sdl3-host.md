@@ -3,11 +3,13 @@
 This guide explains how to integrate `renhdrum.dll` into a C / C++ emulator or game engine using SDL3 (`libsdl-org/SDL`).
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 > [!WARNING]
 > **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
 > In Eden, yuzu, and PokeDinner derivatives, host configurations **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) in controller settings or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+
+Before shipping, go through the [integration checklist](recomp-games.md#integration-checklist).
 
 ---
 
@@ -145,7 +147,7 @@ When dispatching Switch 2 guest IPC command 214 (`SendNx2VibrationValues`), noti
 ```cpp
 renhdrum_set_nx2_mode(2);
 ```
-RenHDrum automatically applies calibrated piecewise response curves tailored to the active controller (Preset `[3]` for DualSense, Preset `[4]` with low-frequency transient boost for Pro Controller 1). For classic Switch 1 vibration commands, call `renhdrum_set_nx2_mode(0)` to keep amplitudes 100% bit-exact and untouched.
+RenHDrum automatically applies per-controller Switch 2 Mode 2 translation: the fixed Mode 2 law for DualSense (`a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`, no EQ), the Pro curve `PRO_DEFAULT` (`T = 0.004`) with a 25 ms 1.2x low-frequency onset boost for Pro Controller 1, and `PRO_DEFAULT` (`T = 0.004`, no 1.2x boost) followed by the four-motor converter for Xbox One S. For classic Switch 1 vibration commands, call `renhdrum_set_nx2_mode(0)` to keep amplitudes 100% bit-exact and untouched.
 
 ### Step 4: Tick the Engine at 1 ms Intervals
 In a high-resolution timer worker (e.g., using `timeBeginPeriod(1)` on Windows):
@@ -192,11 +194,11 @@ Retain standard rumble mechanisms (e.g. `SDL_RumbleJoystick`) for non-Switch har
 
 ---
 
-## 4. Known Limitation
+## 4. Settings Resolution
 
-`renhdrum_settings_resolve` still reads local flag files adjacent to the host binary and queries IPC shared memory (`Local\RenHDrum_SharedState_v1` / `%APPDATA%\RenHDrum\renhdrum-settings.txt`) managed by `Brontide-App`. 
+`renhdrum_settings_resolve` reads local flag files adjacent to the host binary and queries IPC shared memory managed by `Brontide-App`. That is intended for Brontide only.
 
-Hosts wishing to supply custom settings purely in-process without reading IPC or disk flags should directly populate `RenHdcSettings` and invoke `renhdrum_engine_apply_settings`. There is no pure C ABI configuration resolver that bypasses disk and IPC yet.
+Any other host should call `renhdrum_settings_resolve_pure(&config, &settings)`: it reads neither IPC nor flag files, and uses only the `RenHdcConfig` you pass.
 
 ---
 

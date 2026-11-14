@@ -1,0 +1,237 @@
+From 39aacd22425b3cedcf5be24e09766cd3feaaed17 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 08:57:57 +0700
+Subject: [PATCH 7/9] yuzu: HD Rumble dialog shows only the switch; tuning
+ behind hd_rumble_advanced
+
+---
+ src/common/settings.h                         |  5 +-
+ src/input_common/drivers/renhdrum_pad.cpp     | 48 +++++++++++--------
+ .../configuration/configure_hd_rumble.cpp     | 39 +++++++++++----
+ src/yuzu/configuration/configure_hd_rumble.h  |  2 +
+ 4 files changed, 64 insertions(+), 30 deletions(-)
+
+diff --git a/src/common/settings.h b/src/common/settings.h
+index 656494d..5e71a6e 100644
+--- a/src/common/settings.h
++++ b/src/common/settings.h
+@@ -932,6 +932,9 @@ struct Values {
+     // Ryuhdr 0.2.6's recommended mode. Read by the SDL driver on every vibration, so a change in
+     // the HD Rumble dialog applies to connected controllers right away.
+     Setting<bool> hd_rumble_enabled{linkage, true, "hd_rumble_enabled", Category::Controls};
++    // Off (default): the HD Rumble dialog shows only the switch and the tuning values below are
++    // ignored (built-in defaults). On: edit qt-config.ini by hand; no UI control sets it.
++    Setting<bool> hd_rumble_advanced{linkage, false, "hd_rumble_advanced", Category::Controls};
+     // Amplitude gain in percent for everything RenHDrum plays. Switchable: some Switch 2 games
+     // (Ocarina of Time) send amplitudes below 0.1 that the Joy-Con 2 still plays strongly.
+     SwitchableSetting<int> hd_rumble_gain{linkage, 100, "hd_rumble_gain", Category::Controls};
+@@ -945,7 +948,7 @@ struct Values {
+                                                 Category::Controls};
+     Setting<bool> hd_rumble_crisp_notes{linkage, true, "hd_rumble_crisp_notes",
+                                         Category::Controls};
+-    Setting<int> hd_rumble_bluetooth_level{linkage, 3, "hd_rumble_bluetooth_level", Category::Controls};
++    Setting<int> hd_rumble_bluetooth_level{linkage, 2, "hd_rumble_bluetooth_level", Category::Controls};
+     Setting<bool> hd_rumble_bt_after_input{linkage, true, "hd_rumble_bt_after_input",
+                                            Category::Controls};
+     Setting<bool> hd_rumble_bt_fast{linkage, true, "hd_rumble_bt_fast", Category::Controls};
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index a3e3629..14cc127 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -185,7 +185,7 @@ struct UserSettings {
+     bool envelope_5ms{true};
+     bool frequency_in_packet{true};
+     bool crisp_notes{true};
+-    int bluetooth_level{3};
++    int bluetooth_level{2};
+     bool bt_after_input{true};
+     bool bt_fast{true};
+     bool bt_crisp_notes{true};
+@@ -205,30 +205,36 @@ struct UserSettings {
+ 
+ UserSettings ReadUserSettings() {
+     const auto& s = Settings::values;
++    // The HD Rumble dialog only shows the master switch. Unless hd_rumble_advanced is set by hand
++    // in qt-config.ini, every tuning value is the built-in default, whatever the config or the
++    // per-game settings hold (an old config may carry values the dialog no longer shows).
++    const bool advanced = s.hd_rumble_advanced.GetValue();
++    const auto pick = [advanced](const auto& setting) {
++        return advanced ? setting.GetValue() : setting.GetDefault();
++    };
+     return {
+         .hd_enabled = s.hd_rumble_enabled.GetValue(),
+-        .usb_interval_ms = std::clamp(s.hd_rumble_usb_interval_ms.GetValue(), 5, 100),
+-        .envelope_5ms = s.hd_rumble_envelope_5ms.GetValue(),
+-        .frequency_in_packet = s.hd_rumble_frequency_in_packet.GetValue(),
+-        .crisp_notes = s.hd_rumble_crisp_notes.GetValue(),
+-        .bluetooth_level = std::clamp(s.hd_rumble_bluetooth_level.GetValue(), 1, 3),
+-        .bt_after_input = s.hd_rumble_bt_after_input.GetValue(),
+-        .bt_fast = s.hd_rumble_bt_fast.GetValue(),
+-        .bt_crisp_notes = s.hd_rumble_bt_crisp_notes.GetValue(),
+-        .dualsense_enabled = s.dualsense_haptics_enabled.GetValue(),
+-        .dualsense_volume = std::clamp(s.dualsense_haptics_volume.GetValue(), 0, 100),
+-        .dualsense_crisp_notes = s.dualsense_crisp_notes.GetValue(),
+-        .xbox_enabled = s.xbox_rumble_enabled.GetValue(),
+-        .xbox_strength = std::clamp(s.xbox_motor_strength.GetValue(), 0, 1000),
+-        .xbox_direct = s.xbox_rumble_mode.GetValue() == 1,
+-        .xbox_detail_mix = std::clamp(s.xbox_detail_mix.GetValue(), 0, 100),
+-        .xbox_hit_accents = std::clamp(s.xbox_hit_accents.GetValue(), 0, 100),
+-        .xbox_trigger_mix = std::clamp(s.xbox_trigger_mix.GetValue(), 0, 100),
+-        .gain = std::clamp(s.hd_rumble_gain.GetValue(), 25, 1000),
+-        .low_boost = std::clamp(s.hd_rumble_low_boost.GetValue(), 0, 100),
++        .usb_interval_ms = std::clamp(pick(s.hd_rumble_usb_interval_ms), 5, 100),
++        .envelope_5ms = pick(s.hd_rumble_envelope_5ms),
++        .frequency_in_packet = pick(s.hd_rumble_frequency_in_packet),
++        .crisp_notes = pick(s.hd_rumble_crisp_notes),
++        .bluetooth_level = std::clamp(pick(s.hd_rumble_bluetooth_level), 1, 3),
++        .bt_after_input = pick(s.hd_rumble_bt_after_input),
++        .bt_fast = pick(s.hd_rumble_bt_fast),
++        .bt_crisp_notes = pick(s.hd_rumble_bt_crisp_notes),
++        .dualsense_enabled = pick(s.dualsense_haptics_enabled),
++        .dualsense_volume = std::clamp(pick(s.dualsense_haptics_volume), 0, 100),
++        .dualsense_crisp_notes = pick(s.dualsense_crisp_notes),
++        .xbox_enabled = pick(s.xbox_rumble_enabled),
++        .xbox_strength = std::clamp(pick(s.xbox_motor_strength), 0, 1000),
++        .xbox_direct = pick(s.xbox_rumble_mode) == 1,
++        .xbox_detail_mix = std::clamp(pick(s.xbox_detail_mix), 0, 100),
++        .xbox_hit_accents = std::clamp(pick(s.xbox_hit_accents), 0, 100),
++        .xbox_trigger_mix = std::clamp(pick(s.xbox_trigger_mix), 0, 100),
++        .gain = std::clamp(pick(s.hd_rumble_gain), 25, 1000),
++        .low_boost = std::clamp(pick(s.hd_rumble_low_boost), 0, 100),
+     };
+ }
+-
+ // Gain, then a power curve that lifts weak vibrations more than strong ones (exponent 1.0 at
+ // boost 0 down to 0.4 at boost 100). Below a small knee the curve turns quadratic, so the
+ // near-silent values games send between hits do not become a constant buzz.
+diff --git a/src/yuzu/configuration/configure_hd_rumble.cpp b/src/yuzu/configuration/configure_hd_rumble.cpp
+index 05263e3..614d24a 100644
+--- a/src/yuzu/configuration/configure_hd_rumble.cpp
++++ b/src/yuzu/configuration/configure_hd_rumble.cpp
+@@ -35,7 +35,7 @@ QLabel* MakeNote(const QString& text) {
+ 
+ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+     setWindowTitle(tr("HD Rumble"));
+-    setMinimumSize(640, 460);
++    setMinimumSize(420, 200);
+ 
+     auto* root = new QVBoxLayout(this);
+ 
+@@ -58,6 +58,26 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+         root->addWidget(missing);
+     }
+ 
++    // Which controller is attached right now
++    const int connected = InputCommon::GetRenHDrumConnectedKind();
++    {
++        const QString kinds[] = {tr("Switch Controller"), tr("DualSense"), tr("Xbox")};
++        auto* status = new QLabel(connected >= 0 && connected < 3
++                                      ? tr("Connected controller: %1").arg(kinds[connected])
++                                      : tr("No controller connected."));
++        status->setStyleSheet(QStringLiteral("color: palette(mid);"));
++        root->addWidget(status);
++    }
++
++    // Tuning widgets: all still built, but shown only when hd_rumble_advanced is set by hand in
++    // qt-config.ini. Otherwise the driver ignores these settings (built-in defaults).
++    advanced = Settings::values.hd_rumble_advanced.GetValue();
++    auto* advanced_box = new QWidget;
++    auto* adv = new QVBoxLayout(advanced_box);
++    adv->setContentsMargins(0, 0, 0, 0);
++    advanced_box->setVisible(advanced);
++    root->addWidget(advanced_box, 1);
++
+     // Intensity: all controllers. Saved per game when the game has its own value.
+     auto* gain_row = new QHBoxLayout;
+     gain_slider = new QSlider(Qt::Horizontal);
+@@ -71,7 +91,7 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+     gain_row->addWidget(gain_slider, 1);
+     gain_row->addWidget(gain);
+     gain_row->addWidget(new QLabel(QStringLiteral("%")));
+-    root->addLayout(gain_row);
++    adv->addLayout(gain_row);
+ 
+     auto* boost_row = new QHBoxLayout;
+     boost_slider = new QSlider(Qt::Horizontal);
+@@ -87,9 +107,9 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+     boost_row->addWidget(boost_slider, 1);
+     boost_row->addWidget(boost);
+     boost_row->addWidget(new QLabel(QStringLiteral("%")));
+-    root->addLayout(boost_row);
++    adv->addLayout(boost_row);
+     const bool per_game = !Settings::values.hd_rumble_gain.UsingGlobal();
+-    root->addWidget(MakeNote(
++    adv->addWidget(MakeNote(
+         per_game ? tr("Intensity: this game has its own value, and changes here apply to it.")
+                  : tr("Intensity multiplies the game's rumble. Some Switch 2 games (Ocarina of "
+                       "Time) send very weak values that the Joy-Con 2 still plays strongly: "
+@@ -108,7 +128,6 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+     pages->addWidget(CreateXboxPage());
+     connect(page_list, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
+     // Open on the page of the controller in use, marked as connected
+-    const int connected = InputCommon::GetRenHDrumConnectedKind();
+     if (connected >= 0 && connected < page_list->count()) {
+         auto* item = page_list->item(connected);
+         item->setText(tr("%1 (connected)").arg(item->text()));
+@@ -116,9 +135,9 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+     page_list->setCurrentRow(connected >= 0 ? connected : 0);
+     body->addWidget(page_list);
+     body->addWidget(pages, 1);
+-    root->addLayout(body, 1);
++    adv->addLayout(body, 1);
+ 
+-    root->addWidget(MakeNote(
++    adv->addWidget(MakeNote(
+         tr("Changes reach connected controllers on their next vibration. To feel them now, open "
+            "the Vibration settings and hold a button on the controller.")));
+ 
+@@ -131,6 +150,7 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+     connect(buttons->button(QDialogButtonBox::RestoreDefaults), &QPushButton::clicked, this,
+             &ConfigureHdRumble::RestoreDefaults);
++    buttons->button(QDialogButtonBox::RestoreDefaults)->setVisible(advanced);
+     footer->addWidget(credit);
+     footer->addStretch();
+     footer->addWidget(buttons);
+@@ -361,7 +381,7 @@ void ConfigureHdRumble::RestoreDefaults() {
+     envelope_5ms->setChecked(true);
+     frequency_in_packet->setChecked(true);
+     crisp_notes->setChecked(true);
+-    bt_level->setCurrentIndex(2);
++    bt_level->setCurrentIndex(1);
+     bt_after_input->setChecked(true);
+     bt_fast->setChecked(true);
+     bt_crisp_notes->setChecked(true);
+@@ -403,6 +423,9 @@ void ConfigureHdRumble::ApplyConfiguration() {
+     auto& s = Settings::values;
+     const bool on = hd_enabled->isChecked();
+     s.hd_rumble_enabled.SetValue(on);
++    if (!advanced) {
++        return; // tuning values are not shown, leave them as they are
++    }
+     s.hd_rumble_gain.SetValue(gain->value());
+     s.hd_rumble_low_boost.SetValue(boost->value());
+     s.hd_rumble_usb_interval_ms.SetValue(usb_interval->value());
+diff --git a/src/yuzu/configuration/configure_hd_rumble.h b/src/yuzu/configuration/configure_hd_rumble.h
+index 5437983..fb39d13 100644
+--- a/src/yuzu/configuration/configure_hd_rumble.h
++++ b/src/yuzu/configuration/configure_hd_rumble.h
+@@ -8,6 +8,7 @@
+ class QCheckBox;
+ class QComboBox;
+ class QGroupBox;
++class QLabel;
+ class QListWidget;
+ class QSlider;
+ class QSpinBox;
+@@ -34,6 +35,7 @@ private:
+     void UpdateEnabledState();
+ 
+     QCheckBox* hd_enabled{};
++    bool advanced{};
+     QSlider* gain_slider{};
+     QSpinBox* gain{};
+     QSlider* boost_slider{};
+-- 
+2.55.0.windows.5
+

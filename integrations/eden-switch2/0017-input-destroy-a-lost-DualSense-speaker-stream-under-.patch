@@ -1,0 +1,42 @@
+From 13e4d4320d42683a80ed815b89f8f3281ed50e89 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:29:27 +0700
+Subject: [PATCH] input: destroy a lost DualSense speaker stream under the pad
+ lock
+
+---
+ src/input_common/drivers/renhdrum_pad.cpp | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 29a3315..e1a6408 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -1218,17 +1218,19 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+         }
+         SDL_free(devices);
+         if (!present) {
+-            SDL_AudioStream* lost_stream = nullptr;
++            bool lost = false;
+             {
+                 std::scoped_lock lock{impl->mutex};
+                 if (impl->audio_stream == check_audio_stream) {
+-                    lost_stream = std::exchange(impl->audio_stream, nullptr);
++                    // Destroy under `mutex` like Release(): AudioCallback reads `dsp` without
++                    // taking `mutex`.
++                    SDL_DestroyAudioStream(std::exchange(impl->audio_stream, nullptr));
++                    impl->ReleaseAudioDevice();
+                     impl->audio_attempts = DualSenseAudioMaxAttempts;
++                    lost = true;
+                 }
+             }
+-            if (lost_stream) {
+-                SDL_DestroyAudioStream(lost_stream);
+-                impl->ReleaseAudioDevice();
++            if (lost) {
+                 LOG_INFO(Input, "RenHDrum: DualSense speaker went away, standard rumble until "
+                                 "it is back");
+             }
+-- 
+2.55.0.windows.5
+

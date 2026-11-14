@@ -13,9 +13,12 @@ use crate::encoding::crisp_notes::{HdCrispNotes, HdSideSample};
 use crate::encoding::standard::{hd_encode_packet, hd_encode_side};
 use crate::preset::{HdRumblePreset, HdRumblePresetKind};
 use crate::settings::{HdRumbleSettings, RumbleConfigController};
+use crate::valve::{
+    ValveGripPacker, VALVE_GRIP_FORMAT_MULAW_4K, VALVE_GRIP_FORMAT_MULAW_8K, VALVE_GRIP_REPORT_SIZE,
+};
 use crate::xbox::{XboxRumbleMapper, XboxRumbleTuning};
 
-pub const RENHDRUM_VERSION: u32 = 0x000301; // 0.3.1
+pub const RENHDRUM_VERSION: u32 = 0x000400; // 0.4.0
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
@@ -27,6 +30,7 @@ pub const RENHDRUM_ERR_DECODE_FAILED: i32 = -3;
 pub struct RenHdcSettings {
     pub enabled: bool,
     pub usb_interval_ms: i32,
+    /// 1-4 (4 = Compatible, default).
     pub bluetooth_level: i32,
     pub usb_auto_slow: bool,
     pub sync_to_input: bool,
@@ -257,6 +261,24 @@ pub unsafe extern "C" fn renhdrum_settings_resolve(
         None
     };
     let resolved = HdRumbleSettings::resolve(c_opt.as_ref());
+    *out_settings = RenHdcSettings::from(&resolved);
+    RENHDRUM_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_settings_resolve_pure(
+    config: *const RenHdcConfig,
+    out_settings: *mut RenHdcSettings,
+) -> i32 {
+    if out_settings.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    let c_opt = if config.is_null() {
+        None
+    } else {
+        Some(RumbleConfigController::from(&*config))
+    };
+    let resolved = HdRumbleSettings::resolve_with_dir(c_opt.as_ref(), None, false);
     *out_settings = RenHdcSettings::from(&resolved);
     RENHDRUM_OK
 }
@@ -711,11 +733,21 @@ pub struct RenHdcDualSenseDsp {
 
 impl RenHdcDualSenseDsp {
     /// Its set_target doors carry no timestamp, so trace lines use time since the trace opened.
-    fn trace_half(&self, is_right: bool, al: f32, fl: f32, ah: f32, fh: f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn trace_half(
+        &self,
+        is_right: bool,
+        al: f32,
+        fl: f32,
+        ah: f32,
+        fh: f32,
+        raw_al: f32,
+        raw_ah: f32,
+    ) {
         if let Some(trace) = &self.trace {
             if let Ok(mut t) = trace.lock() {
                 let now = t.elapsed_us();
-                t.log_sample(now, is_right, al, fl, ah, fh);
+                t.log_sample_raw(now, is_right, al, fl, ah, fh, raw_al, raw_ah);
             }
         }
     }
@@ -799,6 +831,7 @@ pub unsafe extern "C" fn renhdrum_engine_push_sample(
         right_fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
     }
     let u_now = now_us.max(0) as u64;
+    let (raw_l, raw_lh, raw_r, raw_rh) = (left_al, left_ah, right_al, right_ah);
     if let Ok(mut b) = (*engine).nx2_boost_left.lock() {
         let (al, ah) = b.apply_pro_nx2(left_al, left_fl, left_ah, left_fh, u_now);
         left_al = al;
@@ -815,8 +848,12 @@ pub unsafe extern "C" fn renhdrum_engine_push_sample(
         );
         if let Some(trace) = &(*engine).trace {
             if let Ok(mut t) = trace.lock() {
-                t.log_sample(now_us, false, left_al, left_fl, left_ah, left_fh);
-                t.log_sample(now_us, true, right_al, right_fl, right_ah, right_fh);
+                t.log_sample_raw(
+                    now_us, false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh,
+                );
+                t.log_sample_raw(
+                    now_us, true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh,
+                );
             }
         }
         RENHDRUM_OK
@@ -851,6 +888,7 @@ pub unsafe extern "C" fn renhdrum_engine_push_half_sample(
         fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
     }
     let u_now = now_us.max(0) as u64;
+    let (raw_al, raw_ah) = (al, ah);
     let boost_lock = if is_right {
         (*engine).nx2_boost_right.lock()
     } else {
@@ -865,7 +903,7 @@ pub unsafe extern "C" fn renhdrum_engine_push_half_sample(
         guard.push_half_sample(now_us, is_right, al, fl, ah, fh);
         if let Some(trace) = &(*engine).trace {
             if let Ok(mut t) = trace.lock() {
-                t.log_sample(now_us, is_right, al, fl, ah, fh);
+                t.log_sample_raw(now_us, is_right, al, fl, ah, fh, raw_al, raw_ah);
             }
         }
         crate::ipc::note_sample(u_now, al, fl, ah, fh);
@@ -889,6 +927,11 @@ pub unsafe extern "C" fn renhdrum_engine_tick(
         if guard.tick(now_us, &mut packet) {
             slice::from_raw_parts_mut(out_packet10, 10).copy_from_slice(&packet);
             crate::ipc::note_packet(&packet);
+            if let Some(trace) = &(*engine).trace {
+                if let Ok(mut t) = trace.lock() {
+                    t.log_packet(now_us, &packet);
+                }
+            }
             1
         } else {
             0
@@ -898,6 +941,10 @@ pub unsafe extern "C" fn renhdrum_engine_tick(
     }
 }
 
+/// volume_percent (clamped 10..100) is the final output gain; the core already applies it.
+/// The host must NOT scale samples again before pushing them. The core exports no volume
+/// setter yet: to change it, destroy and re-create the DSP object (no need to reopen the
+/// audio stream). If the Brontide-App config is present in shared memory, it overrides both arguments.
 #[no_mangle]
 pub extern "C" fn renhdrum_dualsense_dsp_create(
     volume_percent: i32,
@@ -924,6 +971,27 @@ pub extern "C" fn renhdrum_dualsense_dsp_create(
     }))
 }
 
+/// Experimental (Steam Controller 2026 grips, built from iafx's measurements in RenHDrum#5).
+/// Same handle and arguments as `renhdrum_dualsense_dsp_create`, with the Valve grip profile.
+/// Use `renhdrum_dualsense_dsp_set_half_target` and `renhdrum_dualsense_dsp_destroy` on it.
+#[no_mangle]
+pub extern "C" fn renhdrum_valve_grip_dsp_create(
+    volume_percent: i32,
+    crisp_notes: bool,
+) -> *mut RenHdcDualSenseDsp {
+    let (vol, crisp) = if let Some(app) = crate::ipc::app_config() {
+        (app.dualsense_haptics_volume, app.dualsense_crisp_notes)
+    } else {
+        (volume_percent, crisp_notes)
+    };
+    Box::into_raw(Box::new(RenHdcDualSenseDsp {
+        inner: std::sync::Mutex::new(DualSenseHapticsDsp::new_grip(vol, crisp)),
+        bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
+        bt_crisp_notes: crisp,
+        trace: crate::trace::RumbleTrace::open_in("valve-grip", None).map(std::sync::Mutex::new),
+    }))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_dualsense_dsp_destroy(dsp: *mut RenHdcDualSenseDsp) {
     if !dsp.is_null() {
@@ -946,6 +1014,7 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_target(
     if dsp.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
     }
+    let (raw_l, raw_lh, raw_r, raw_rh) = (left_al, left_ah, right_al, right_ah);
     let (l_al, l_ah) = crate::nx2::apply_dualsense_nx2(left_al, left_ah);
     left_al = l_al;
     left_ah = l_ah;
@@ -957,8 +1026,8 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_target(
         guard.set_target(
             left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
         );
-        (*dsp).trace_half(false, left_al, left_fl, left_ah, left_fh);
-        (*dsp).trace_half(true, right_al, right_fl, right_ah, right_fh);
+        (*dsp).trace_half(false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh);
+        (*dsp).trace_half(true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh);
         RENHDRUM_OK
     } else {
         RENHDRUM_ERR_INVALID_ARG
@@ -977,13 +1046,14 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_half_target(
     if dsp.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
     }
+    let (raw_al, raw_ah) = (al, ah);
     let (out_al, out_ah) = crate::nx2::apply_dualsense_nx2(al, ah);
     al = out_al;
     ah = out_ah;
 
     if let Ok(mut guard) = (*dsp).inner.lock() {
         guard.set_half_target(is_right, al, fl, ah, fh);
-        (*dsp).trace_half(is_right, al, fl, ah, fh);
+        (*dsp).trace_half(is_right, al, fl, ah, fh, raw_al, raw_ah);
         RENHDRUM_OK
     } else {
         RENHDRUM_ERR_INVALID_ARG
@@ -1118,6 +1188,28 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt_report(
     i32::from(packer.build(&mut inner, buffer_length, out))
 }
 
+/// Experimental. Builds one Steam Controller (2026) grip report 0x88 (64 bytes) from the next
+/// 31 samples of a DSP made by `renhdrum_valve_grip_dsp_create`; format 8 = mu-law 8 kHz, 9 = 4 kHz.
+/// Returns 1 when the block carries vibration, 0 when silent, < 0 on error.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_valve_grip_build_report(
+    dsp: *mut RenHdcDualSenseDsp,
+    format: u8,
+    out_report64: *mut u8,
+) -> i32 {
+    if dsp.is_null() || out_report64.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
+        return RENHDRUM_ERR_INVALID_ARG;
+    }
+    let Ok(mut inner) = (*dsp).inner.lock() else {
+        return RENHDRUM_ERR_INVALID_ARG;
+    };
+    let out = &mut *(out_report64 as *mut [u8; VALVE_GRIP_REPORT_SIZE]);
+    i32::from(ValveGripPacker::default().build(&mut inner, format, out))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_dualsense_evaluate_triggers(
     title_id: u64,
@@ -1131,8 +1223,8 @@ pub unsafe extern "C" fn renhdrum_dualsense_evaluate_triggers(
     if out_ds5_effects47.is_null() {
         return RENHDRUM_ERR_NULL_PTR;
     }
-    let config = if title_id == DualSenseTriggerProfileConfig::TOTK_TITLE_ID {
-        DualSenseTriggerProfileConfig::create_totk()
+    let config = if title_id == DualSenseTriggerProfileConfig::BOW_DRAW_TITLE_ID {
+        DualSenseTriggerProfileConfig::create_bow_draw()
     } else {
         DualSenseTriggerProfileConfig {
             title_id,
@@ -1168,7 +1260,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000301);
+        assert_eq!(renhdrum_version(), 0x000400);
     }
 
     #[test]
@@ -1318,7 +1410,7 @@ mod tests {
             let mut effects = [0u8; 47];
             assert_eq!(
                 renhdrum_dualsense_evaluate_triggers(
-                    DualSenseTriggerProfileConfig::TOTK_TITLE_ID,
+                    DualSenseTriggerProfileConfig::BOW_DRAW_TITLE_ID,
                     false,
                     false,
                     false,
@@ -1329,6 +1421,42 @@ mod tests {
                 RENHDRUM_OK
             );
             assert_eq!(effects[0], 0x0C);
+        }
+    }
+
+    #[test]
+    fn test_valve_grip_ffi() {
+        unsafe {
+            let mut report = [0u8; VALVE_GRIP_REPORT_SIZE];
+            assert_eq!(
+                renhdrum_valve_grip_build_report(std::ptr::null_mut(), 8, report.as_mut_ptr()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            let dsp = renhdrum_valve_grip_dsp_create(100, false);
+            assert!(!dsp.is_null());
+            assert_eq!(
+                renhdrum_valve_grip_build_report(dsp, 8, std::ptr::null_mut()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            assert_eq!(
+                renhdrum_valve_grip_build_report(dsp, 7, report.as_mut_ptr()),
+                RENHDRUM_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                renhdrum_valve_grip_build_report(dsp, 9, report.as_mut_ptr()),
+                0
+            );
+            assert_eq!((report[0], report[1]), (0x88, 31));
+            assert_eq!(
+                renhdrum_dualsense_dsp_set_half_target(dsp, false, 0.5, 160.0, 0.0, 320.0),
+                RENHDRUM_OK
+            );
+            let mut loud = 0;
+            for _ in 0..8 {
+                loud |= renhdrum_valve_grip_build_report(dsp, 8, report.as_mut_ptr());
+            }
+            assert_eq!(loud, 1);
+            renhdrum_dualsense_dsp_destroy(dsp);
         }
     }
 
@@ -1506,7 +1634,7 @@ mod tests {
         let csv = std::fs::read_to_string(&csvs[0]).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines, ["K,pro", "G,2000,R,0.25,160,0.5,320"]);
+        assert_eq!(lines, ["K,pro", "G,2000,R,0.25,160,0.5,320,0.25,0.5"]);
     }
 
     #[test]
@@ -1545,8 +1673,17 @@ mod tests {
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], "K,dualsense");
-        assert!(lines[1].ends_with(",L,0.1,160,0.2,320"), "{}", lines[1]);
-        assert!(lines[2].ends_with(",R,0.3,170,0.4,330"), "{}", lines[2]);
+        // old columns first, then the raw amplitudes (equal here: Mode 0 does not change them)
+        assert!(
+            lines[1].ends_with(",L,0.1,160,0.2,320,0.1,0.2"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].ends_with(",R,0.3,170,0.4,330,0.3,0.4"),
+            "{}",
+            lines[2]
+        );
     }
 
     #[test]

@@ -925,7 +925,7 @@ impl XboxRumbleMapper {
                         [0.0, 0.0]
                     }
                 } else if c.prev_gap_us.is_some_and(|gap| gap >= FAST_PULSE_GAP_US) {
-                    // Slow regular beats (TOTK map scan): one grip follows each beat's envelope
+                    // Slow regular beats (open-world action game map scan): one grip follows each beat's envelope
                     let shape = (c.level / c.hit_peak.max(KICK_MIN)).clamp(0.4, 1.0);
                     let scale = if c.hit_peak < PROPELLER_MIN_LEVEL {
                         (c.hit_peak / PROPELLER_MIN_LEVEL).clamp(0.5, 1.0)
@@ -1846,9 +1846,9 @@ mod tests {
     }
 
     #[test]
-    fn totk_warp_rising_edge_is_single_clean_tap_and_065_is_impact() {
+    fn warp_rising_edge_is_single_clean_tap_and_065_is_impact() {
         let mut m = mapper();
-        // TOTK Warp pattern A: 0.098 at 0 us, 0.394 at 10_000 us, 0.50 at 20_017 us
+        // Open-world action game warp pattern A: 0.098 at 0 us, 0.394 at 10_000 us, 0.50 at 20_017 us
         m.push_half_sample(0, false, 0.098, 160.0, 0.0, 320.0);
         assert_eq!(m.classifiers[0].run_hits, 1);
 
@@ -1865,12 +1865,12 @@ mod tests {
         // LG is clean tap capped at 6% (t.tap * 0.75 for low pitch < 0.5)
         assert_eq!(out[0], pct_to_u16(0.06));
 
-        // 4th sample at 30_000 us drops to 0.084 (characteristic of TOTK warp drop)
+        // 4th sample at 30_000 us drops to 0.084 (characteristic of open-world action game warp drop)
         m.push_half_sample(30_000, false, 0.084, 160.0, 0.0, 320.0);
         let warp_drop = m.output(30_000);
         assert!(
             warp_drop[1] > warp_drop[0],
-            "TOTK warp drop should crossfade energy to RG (RG > LG), got LG={} RG={}",
+            "warp drop should crossfade energy to RG (RG > LG), got LG={} RG={}",
             warp_drop[0],
             warp_drop[1]
         );

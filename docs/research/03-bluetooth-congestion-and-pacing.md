@@ -1,6 +1,6 @@
 # Monograph 03: Bluetooth Congestion & Token Bucket Pacing
 
-This monograph examines the root causes of packet congestion, input lag, and wireless disconnects over Bluetooth, presenting the mathematical design of the 150 ms refresh timer, Write-After-Input gating, and the 3-tier Token Bucket scheduler.
+This monograph examines the root causes of packet congestion, input lag, and wireless disconnects over Bluetooth, presenting the 150 ms refresh timer, Write-After-Input gating, and the two Bluetooth modes now exposed by RenHDrum (**Detailed (5 ms)** and **Compatible**), alongside the legacy 3-tier Token Bucket scheduler retained in the core for Ryuhdr compatibility.
 
 ---
 
@@ -34,9 +34,9 @@ On high-quality Bluetooth controllers (e.g. Intel/Broadcom Bluetooth 5.0+ adapte
 
 ---
 
-## 3. The 3-Tier Token Bucket Scheduler (`HD_BT_LEVELS`)
+## 3. Token Bucket Tiers & Legacy Levels (`HD_BT_LEVELS`)
 
-To accommodate varying radio environments (crowded 2.4 GHz RF spectrum, USB dongle distances, and different Bluetooth stack implementations), RenHDrum provides a calibrated 3-tier Token Bucket pacing algorithm:
+To accommodate varying radio environments (crowded 2.4 GHz RF spectrum, USB dongle distances, and different Bluetooth stack implementations), `HD_BT_LEVELS` originally provided a 3-tier Token Bucket pacing algorithm (now kept as legacy tiers 1–3 for Ryuhdr compatibility, alongside level 4 **Compatible** as the fallback default):
 
 ```
 +---------------------------------------------------------------------------------------+
@@ -71,7 +71,7 @@ pub const HD_BT_LEVELS: [HdBtLevel; 3] = [
         max_high_freq_step: 4,
         stop_priority: false,
     },
-    // Level 2: Balanced - Typical desktop environments (Recommended default)
+    // Level 2: Balanced - Legacy Ryuhdr default (superseded by Level 4 Compatible outside Ryuhdr)
     HdBtLevel {
         min_interval_ms: 45,
         burst_capacity: 3.0,
@@ -99,3 +99,8 @@ pub const HD_BT_LEVELS: [HdBtLevel; 3] = [
 - **`stop_priority = true`**: When the game commands a stop (amplitude zero), the token bucket allows the stop packet to preempt regular rate limits, ensuring vibration cuts off instantly without lingering buzz.
 - **Slew Rate Clamping**: `max_amp_step`, `max_low_freq_step`, and `max_high_freq_step` restrict large instantaneous jumps, smoothing the frequency gradient across Bluetooth packets.
 - **Burst Allowance**: During brief combat explosions or note attacks, the bucket permits up to $N$ rapid bursts before enforcing the steady-state interval.
+
+### Finding 2026-11-13: the "level 3 only" lock and level 4
+
+- The old rule "5 ms envelope on Bluetooth only at level 3" (B027, 08/11) has no counterpart in Ryuhdr: `HdApplyBtFast` needs only card B1. The congestion it was meant to avoid was never measured. The core now follows Ryuhdr: `bt_fast` alone enables the envelope; the level then only matters for the fallback path.
+- Level 4 "Compatible" is the fallback (5 ms off, or SDL unpatched): newest sample instead of the held peak, one value per packet, at least 32 ms apart, a still-rumbling packet is resent every 40 ms, no note accent. Idea from Hookshot PR #1213 (idea only, own code). Outside the core, Bluetooth now exposes only two modes: **Detailed (5 ms)** (default on patched SDL) and **Compatible**; levels 1–3 remain in `HD_BT_LEVELS` only to match Ryuhdr.

@@ -1,4 +1,19 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
+
+use crate::settings::HdRumbleSettings;
+
+pub const LATEST_FLAG: &str = "hdrumble_latest.txt"; // ponytail: núm đo; plan 103 mức 4 dùng lại
+
+const PRO_DEFAULT: [f32; 5] = [0.004, 0.048, 0.240, 0.640, 0.950];
+
+pub(crate) fn flag_present_in(name: &str, dir: Option<&Path>) -> bool {
+    HdRumbleSettings::flag_path(name, dir).is_file()
+}
+
+fn map_curve(amp: f32, c: [f32; 5]) -> f32 {
+    map_piecewise(amp, c[0], c[1], c[2], c[3], c[4])
+}
 
 /// Switch 2 rumble mode state:
 /// 0 = Switch 1 default / no translation (100% untouched)
@@ -39,29 +54,29 @@ pub fn map_piecewise(amp: f32, t: f32, p1: f32, p2: f32, p3: f32, p4: f32) -> f3
     val.clamp(0.0, 1.0)
 }
 
-/// DualSense Switch 2 Mode 2 mapping:
-/// Preset [3] Argon DualSense: T = 0.001, P1 = 0.004, P2 = 0.550, P3 = 0.900, P4 = 1.000 (no boost).
+/// DualSense Switch 2 Mode 2, stage 1 of the plan 104 L1 law: noise floor only, `a <= 0.001 -> 0`,
+/// the rest passes through unchanged. The amplitude law `min(1, 3.5 * a^0.75)` is applied once,
+/// later, in `dualsense::haptics::make_side`; applying it here too doubles it (plan 105 bug).
 /// When nx2_mode != 2, returns inputs verbatim (Switch 1 remains 100% untouched).
 pub fn apply_dualsense_nx2(amp_low: f32, amp_high: f32) -> (f32, f32) {
     if get_nx2_mode() != 2 {
         return (amp_low, amp_high);
     }
-    (
-        map_piecewise(amp_low, 0.001, 0.004, 0.550, 0.900, 1.000),
-        map_piecewise(amp_high, 0.001, 0.004, 0.550, 0.900, 1.000),
-    )
+    // `!(a > T)` also zeroes NaN
+    let gate = |a: f32| if !(a > 0.001) { 0.0 } else { a };
+    (gate(amp_low), gate(amp_high))
 }
 
-/// Xbox One S Switch 2 Mode 2 mapping, first version: the Pro preset [4] curve without the
-/// onset boost (the Xbox mapper has its own kick). When nx2_mode != 2, returns inputs verbatim.
+/// Xbox One S Switch 2 Mode 2 mapping: the Xbox translates the Pro 1 score, so it uses the same
+/// Pro curve (`PRO_DEFAULT`, follows Pro tuning) and then the Switch 1 Xbox mapper. No onset
+/// boost: the Xbox mapper has its own kick. When nx2_mode != 2, returns inputs verbatim.
 pub fn apply_xbox_nx2(amp_low: f32, amp_high: f32) -> (f32, f32) {
     if get_nx2_mode() != 2 {
         return (amp_low, amp_high);
     }
-    // ponytail: reuses Pro preset [4]; Xbox gets its own preset after hand tuning
     (
-        map_piecewise(amp_low, 0.001, 0.048, 0.240, 0.640, 0.950),
-        map_piecewise(amp_high, 0.001, 0.048, 0.240, 0.640, 0.950),
+        map_curve(amp_low, PRO_DEFAULT),
+        map_curve(amp_high, PRO_DEFAULT),
     )
 }
 
@@ -75,13 +90,14 @@ pub struct Nx2ProBoostState {
 }
 
 fn apply_pro_band(amp: f32, freq: f32, now_us: u64, active: &mut bool, until_us: &mut u64) -> f32 {
-    // Preset [4] Argon Pro 1: T = 0.001, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950
-    if amp <= 0.001 {
+    // Pro 1 way B: T = 0.004, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950
+    let c = PRO_DEFAULT;
+    if amp <= c[0] {
         *active = false;
         *until_us = 0;
         return 0.0;
     }
-    let mapped = map_piecewise(amp, 0.001, 0.048, 0.240, 0.640, 0.950);
+    let mapped = map_curve(amp, c);
     if !*active {
         *active = true;
         *until_us = now_us.saturating_add(25_000);
@@ -95,7 +111,7 @@ fn apply_pro_band(amp: f32, freq: f32, now_us: u64, active: &mut bool, until_us:
 
 impl Nx2ProBoostState {
     /// Nintendo Pro 1 Switch 2 Mode 2 mapping:
-    /// Preset [4] Argon Pro 1 + 1.2x boost for 25 ms on frequencies < 150 Hz.
+    /// Pro 1 way B curve + 1.2x boost for 25 ms on frequencies < 150 Hz.
     /// When nx2_mode != 2, returns inputs verbatim (Switch 1 remains 100% untouched).
     pub fn apply_pro_nx2(
         &mut self,
@@ -156,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn nx2_mode_2_dualsense_uses_preset_3() {
+    fn nx2_mode_2_dualsense_uses_l1_law() {
         let _guard = NX2_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_nx2_mode(2);
         // T = 0.001, below threshold gives 0.0
@@ -164,14 +180,19 @@ mod tests {
         assert_eq!(zero_l, 0.0);
         assert_eq!(zero_h, 0.0);
 
-        // 0.02 maps to ~0.10878
-        let (al, ah) = apply_dualsense_nx2(0.02, 0.02);
-        assert!((al - 0.1088).abs() < 0.001, "al={al} expected ~0.1088");
-        assert!((ah - 0.1088).abs() < 0.001, "ah={ah} expected ~0.1088");
+        // Above the floor this stage passes the game's value through...
+        assert_eq!(apply_dualsense_nx2(0.01, 0.3), (0.01, 0.3));
+        assert_eq!(apply_dualsense_nx2(1.0, 0.5), (1.0, 0.5));
 
-        // 1.0 maps to p4 = 1.0
-        let (one_l, _) = apply_dualsense_nx2(1.0, 0.5);
-        assert_eq!(one_l, 1.0);
+        // ...and the whole chain (this stage + make_side, as ffi.rs runs it) applies the law ONCE:
+        // 0.01 -> 3.5 * 0.01^0.75 ~ 0.1107, not 3.5 * 0.1107^0.75 ~ 0.67.
+        let (al, ah) = apply_dualsense_nx2(0.01, 0.0);
+        let side = crate::dualsense::haptics::make_side(al, 160.0, ah, 320.0);
+        assert!(
+            (side.amp_low - 0.1107).abs() < 0.001,
+            "chain 0.01 -> {} expected ~0.1107",
+            side.amp_low
+        );
 
         // Reset back to 0 for other tests
         set_nx2_mode(0);
@@ -183,27 +204,27 @@ mod tests {
         set_nx2_mode(2);
         let mut state = Nx2ProBoostState::default();
 
-        // 0.02 unboosted is ~0.08485. With 1.2x boost under 150 Hz it becomes ~0.1018.
+        // 0.02 unboosted is ~0.0800. With 1.2x boost under 150 Hz it becomes ~0.0960.
         let now_us = 100_000;
         let (al1, ah1) = state.apply_pro_nx2(0.02, 140.0, 0.02, 200.0, now_us);
         assert!(
-            (al1 - 0.1018).abs() < 0.001,
-            "al1={al1} expected ~0.1018 with boost"
+            (al1 - 0.0960).abs() < 0.001,
+            "al1={al1} expected ~0.0960 with boost"
         );
-        // ah1 freq is 200 Hz >= 150 Hz, so no boost: ~0.08485
+        // ah1 freq is 200 Hz >= 150 Hz, so no boost: ~0.08005
         assert!(
-            (ah1 - 0.0848).abs() < 0.001,
-            "ah1={ah1} expected ~0.0848 unboosted"
+            (ah1 - 0.0800).abs() < 0.001,
+            "ah1={ah1} expected ~0.0800 unboosted"
         );
 
         // 10 ms later (now_us + 10_000): still in 25 ms boost window
         let (al2, _) = state.apply_pro_nx2(0.02, 140.0, 0.02, 200.0, now_us + 10_000);
-        assert!((al2 - 0.1018).abs() < 0.001, "al2={al2} still boosted");
+        assert!((al2 - 0.0960).abs() < 0.001, "al2={al2} still boosted");
 
-        // 30 ms later (now_us + 30_000): boost window expired (> 25 ms), drops to ~0.08485
+        // 30 ms later (now_us + 30_000): boost window expired (> 25 ms), drops to ~0.08005
         let (al3, _) = state.apply_pro_nx2(0.02, 140.0, 0.02, 200.0, now_us + 30_000);
         assert!(
-            (al3 - 0.0848).abs() < 0.001,
+            (al3 - 0.0800).abs() < 0.001,
             "al3={al3} unboosted after 25ms"
         );
 
@@ -231,11 +252,11 @@ mod tests {
         set_nx2_mode(2);
 
         // 1. Table check (tolerance 0.001):
-        // raw | Pro [4] (no boost: freq >= 150) | DualSense [3]
+        // raw | Pro [4] (no boost: freq >= 150) | DualSense stage 1 (floor only, passes through)
         let points = [
-            (0.05f32, 0.1430f32, 0.2742f32),
-            (0.30f32, 0.4400f32, 0.7250f32),
-            (0.75f32, 0.7950f32, 0.9500f32),
+            (0.05f32, 0.1400f32, 0.05f32),
+            (0.30f32, 0.4400f32, 0.30f32),
+            (0.75f32, 0.7950f32, 0.75f32),
         ];
 
         for &(raw, expected_pro, expected_ds) in &points {
@@ -262,16 +283,8 @@ mod tests {
             );
         }
 
-        // (a) DualSense 2 different bands: low 0.05 / high 0.3 -> 0.2742 / 0.7250 (independent)
-        let (ds_a_l, ds_a_h) = apply_dualsense_nx2(0.05, 0.30);
-        assert!(
-            (ds_a_l - 0.2742).abs() < 0.001,
-            "DS low band: expected 0.2742, got {ds_a_l}"
-        );
-        assert!(
-            (ds_a_h - 0.7250).abs() < 0.001,
-            "DS high band: expected 0.7250, got {ds_a_h}"
-        );
+        // (a) DualSense 2 different bands stay independent: low 0.05 / high 0.3 pass through
+        assert_eq!(apply_dualsense_nx2(0.05, 0.30), (0.05, 0.30));
 
         // (b) Pro boost: 140 Hz, raw 0.3 -> at 24 ms gives 0.528, at 26 ms gives 0.440
         let mut pro_state = Nx2ProBoostState::default();
@@ -328,12 +341,29 @@ mod tests {
     }
 
     #[test]
+    fn defaults_pro_t004_xbox_follows_pro() {
+        assert_eq!(PRO_DEFAULT, [0.004, 0.048, 0.240, 0.640, 0.950]);
+        let _guard = NX2_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_nx2_mode(2);
+        let mut state = Nx2ProBoostState::default();
+        let (pro, _) = state.apply_pro_nx2(0.003, 200.0, 0.0, 320.0, 10_000);
+        let (xbox, _) = apply_xbox_nx2(0.003, 0.0);
+        // 0.3 at 200 Hz: no Pro boost, so Pro and Xbox must agree
+        let (pro_mid, _) = state.apply_pro_nx2(0.3, 200.0, 0.0, 320.0, 50_000);
+        let (xbox_mid, _) = apply_xbox_nx2(0.3, 0.0);
+        set_nx2_mode(0);
+        assert_eq!(pro, 0.0, "Pro T 0.004 cuts 0.003");
+        assert_eq!(xbox, 0.0, "Xbox follows the Pro floor");
+        assert_eq!(pro_mid, xbox_mid);
+    }
+
+    #[test]
     fn xbox_nx2_curve_and_mode0_passthrough() {
         let _guard = NX2_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_nx2_mode(2);
         let (lo, hi) = apply_xbox_nx2(0.05, 0.3);
         set_nx2_mode(0);
-        assert!((lo - 0.1430).abs() < 0.001, "{lo}");
+        assert!((lo - 0.1400).abs() < 0.001, "{lo}");
         assert!((hi - 0.4400).abs() < 0.001, "{hi}");
         assert_eq!(apply_xbox_nx2(0.05, 0.3), (0.05, 0.3));
     }

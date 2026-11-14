@@ -1,0 +1,84 @@
+From 53e3b688e2d5d7c7a0bfbe511234134d2160e6ba Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 02:36:00 +0700
+Subject: [PATCH] input: Bluetooth HD Rumble defaults to level 3; dialog greys
+ out the 5 ms envelope below level 3
+
+Level 2 left the 5 ms envelope checked but RenHDrum only runs it at level 3,
+so Pro Controller rumble over Bluetooth went coarse (45 ms packets).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/settings.h                          | 2 +-
+ src/input_common/drivers/renhdrum_pad.cpp      | 2 +-
+ src/yuzu/configuration/configure_hd_rumble.cpp | 7 ++++++-
+ 3 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/src/common/settings.h b/src/common/settings.h
+index bc83acd..4fc9670 100644
+--- a/src/common/settings.h
++++ b/src/common/settings.h
+@@ -959,7 +959,7 @@ struct Values {
+                                                 Category::Controls};
+     Setting<bool> hd_rumble_crisp_notes{linkage, true, "hd_rumble_crisp_notes",
+                                         Category::Controls};
+-    Setting<int> hd_rumble_bluetooth_level{linkage, 2, "hd_rumble_bluetooth_level", Category::Controls};
++    Setting<int> hd_rumble_bluetooth_level{linkage, 3, "hd_rumble_bluetooth_level", Category::Controls};
+     Setting<bool> hd_rumble_bt_after_input{linkage, true, "hd_rumble_bt_after_input",
+                                            Category::Controls};
+     Setting<bool> hd_rumble_bt_fast{linkage, true, "hd_rumble_bt_fast", Category::Controls};
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 34c488c..0d4830a 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -188,7 +188,7 @@ struct UserSettings {
+     bool envelope_5ms{true};
+     bool frequency_in_packet{true};
+     bool crisp_notes{true};
+-    int bluetooth_level{2};
++    int bluetooth_level{3};
+     bool bt_after_input{true};
+     bool bt_fast{true};
+     bool bt_crisp_notes{true};
+diff --git a/src/yuzu/configuration/configure_hd_rumble.cpp b/src/yuzu/configuration/configure_hd_rumble.cpp
+index bb61d59..054082e 100644
+--- a/src/yuzu/configuration/configure_hd_rumble.cpp
++++ b/src/yuzu/configuration/configure_hd_rumble.cpp
+@@ -187,6 +187,8 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+     connect(xbox_mode, qOverload<int>(&QComboBox::currentIndexChanged), this,
+             &ConfigureHdRumble::UpdateEnabledState);
+     connect(envelope_5ms, &QCheckBox::toggled, this, &ConfigureHdRumble::UpdateEnabledState);
++    connect(bt_level, qOverload<int>(&QComboBox::currentIndexChanged), this,
++            &ConfigureHdRumble::UpdateEnabledState);
+ 
+     LoadConfiguration();
+     // The two per-controller switches in the simple view mirror the ones in the (hidden) pages
+@@ -230,6 +232,7 @@ QWidget* ConfigureHdRumble::CreateSwitchPage() {
+                             "Bluetooth link."));
+     bt_after_input = new QCheckBox(tr("Send right after an input report"));
+     bt_fast = new QCheckBox(tr("5 ms envelope while the link is idle"));
++    bt_fast->setToolTip(tr("Runs at level 3 only."));
+     bt_crisp_notes = new QCheckBox(tr("Crisp notes"));
+     bt->addRow(tr("Level"), bt_level);
+     bt->addRow(bt_after_input);
+@@ -411,7 +414,7 @@ void ConfigureHdRumble::RestoreDefaults() {
+     envelope_5ms->setChecked(true);
+     frequency_in_packet->setChecked(true);
+     crisp_notes->setChecked(true);
+-    bt_level->setCurrentIndex(1);
++    bt_level->setCurrentIndex(2);
+     bt_after_input->setChecked(true);
+     bt_fast->setChecked(true);
+     bt_crisp_notes->setChecked(true);
+@@ -436,6 +439,8 @@ void ConfigureHdRumble::UpdateEnabledState() {
+     // The extra wired cards only run on top of the 5 ms envelope
+     frequency_in_packet->setEnabled(envelope_5ms->isChecked());
+     crisp_notes->setEnabled(envelope_5ms->isChecked());
++    // RenHDrum runs the Bluetooth 5 ms envelope at level 3 only
++    bt_fast->setEnabled(bt_level->currentData().toInt() == 3);
+     ds_volume_slider->setEnabled(ds_enabled->isChecked());
+     ds_volume->setEnabled(ds_enabled->isChecked());
+     ds_crisp_notes->setEnabled(ds_enabled->isChecked());
+-- 
+2.55.0.windows.5
+

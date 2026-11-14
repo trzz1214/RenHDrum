@@ -1,7 +1,7 @@
 From 6d108ad649e445604b157fccd3c544115bdbb780 Mon Sep 17 00:00:00 2001
 From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 00:31:55 +0700
-Subject: [PATCH 6/6] input: ignore bogus stick centre offsets
+Subject: [PATCH 6/9] input: ignore bogus stick centre offsets
 
 ---
  src/input_common/input_poller.cpp | 24 ++++++++++++++++++++----

@@ -1,0 +1,138 @@
+From 09f33d659c7e7ea7ad0b83acd7d5bf024f9895d7 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 12:14:03 +0700
+Subject: [PATCH] input: Bluetooth HD Rumble has two modes: Detailed (5 ms) and
+ Compatible
+
+---
+ src/common/settings.h                         |  2 +-
+ src/input_common/drivers/renhdrum_pad.cpp     | 23 +++++++++++++------
+ .../configuration/configure_hd_rumble.cpp     | 19 +++++++--------
+ 3 files changed, 27 insertions(+), 17 deletions(-)
+
+diff --git a/src/common/settings.h b/src/common/settings.h
+index 4fc9670..16b7c7c 100644
+--- a/src/common/settings.h
++++ b/src/common/settings.h
+@@ -959,7 +959,7 @@ struct Values {
+                                                 Category::Controls};
+     Setting<bool> hd_rumble_crisp_notes{linkage, true, "hd_rumble_crisp_notes",
+                                         Category::Controls};
+-    Setting<int> hd_rumble_bluetooth_level{linkage, 3, "hd_rumble_bluetooth_level", Category::Controls};
++    Setting<int> hd_rumble_bluetooth_level{linkage, 4, "hd_rumble_bluetooth_level", Category::Controls};
+     Setting<bool> hd_rumble_bt_after_input{linkage, true, "hd_rumble_bt_after_input",
+                                            Category::Controls};
+     Setting<bool> hd_rumble_bt_fast{linkage, true, "hd_rumble_bt_fast", Category::Controls};
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 0d4830a..c2ab58c 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -188,7 +188,7 @@ struct UserSettings {
+     bool envelope_5ms{true};
+     bool frequency_in_packet{true};
+     bool crisp_notes{true};
+-    int bluetooth_level{3};
++    int bluetooth_level{4};
+     bool bt_after_input{true};
+     bool bt_fast{true};
+     bool bt_crisp_notes{true};
+@@ -221,7 +221,7 @@ UserSettings ReadUserSettings() {
+         .envelope_5ms = pick(s.hd_rumble_envelope_5ms),
+         .frequency_in_packet = pick(s.hd_rumble_frequency_in_packet),
+         .crisp_notes = pick(s.hd_rumble_crisp_notes),
+-        .bluetooth_level = std::clamp(pick(s.hd_rumble_bluetooth_level), 1, 3),
++        .bluetooth_level = std::clamp(pick(s.hd_rumble_bluetooth_level), 1, 4),
+         .bt_after_input = pick(s.hd_rumble_bt_after_input),
+         .bt_fast = pick(s.hd_rumble_bt_fast),
+         .bt_crisp_notes = pick(s.hd_rumble_bt_crisp_notes),
+@@ -382,11 +382,20 @@ struct RenHDrumPad::Impl {
+             Api().engine_apply_settings(engine, &settings);
+         }
+         if (is_bluetooth) {
+-            LOG_INFO(Input, "RenHDrum HD Rumble Bluetooth: level {}, {}{}", settings.bluetooth_level,
+-                     settings.bt_fast          ? "5 ms envelope while SDL is idle"
+-                     : settings.bt_after_input ? "written right after an input report"
+-                                               : "clock based writes",
+-                     settings.enabled && settings.bt_crisp_notes ? ", crisp notes" : "");
++            const std::string mode =
++                settings.bt_fast ? "Detailed (5 ms envelope while SDL is idle)"
++                : settings.bluetooth_level == 4
++                    ? "Compatible"
++                    : "legacy level " + std::to_string(settings.bluetooth_level);
++            LOG_INFO(Input, "RenHDrum HD Rumble Bluetooth: {}{}{}", mode,
++                     !settings.bt_fast && settings.bt_after_input
++                         ? ", written right after an input report"
++                     : !settings.bt_fast ? ", clock based writes"
++                                         : "",
++                     settings.enabled && settings.bt_crisp_notes &&
++                             (settings.bt_fast || settings.bluetooth_level != 4)
++                         ? ", crisp notes"
++                         : "");
+         } else {
+             const bool envelope = settings.usb_no_queue && settings.envelope_5ms;
+             LOG_INFO(Input, "RenHDrum HD Rumble wired: {} ms, {}{}{}", settings.usb_interval_ms,
+diff --git a/src/yuzu/configuration/configure_hd_rumble.cpp b/src/yuzu/configuration/configure_hd_rumble.cpp
+index 054082e..4e8b499 100644
+--- a/src/yuzu/configuration/configure_hd_rumble.cpp
++++ b/src/yuzu/configuration/configure_hd_rumble.cpp
+@@ -187,8 +187,6 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+     connect(xbox_mode, qOverload<int>(&QComboBox::currentIndexChanged), this,
+             &ConfigureHdRumble::UpdateEnabledState);
+     connect(envelope_5ms, &QCheckBox::toggled, this, &ConfigureHdRumble::UpdateEnabledState);
+-    connect(bt_level, qOverload<int>(&QComboBox::currentIndexChanged), this,
+-            &ConfigureHdRumble::UpdateEnabledState);
+ 
+     LoadConfiguration();
+     // The two per-controller switches in the simple view mirror the ones in the (hidden) pages
+@@ -228,13 +226,18 @@ QWidget* ConfigureHdRumble::CreateSwitchPage() {
+     bt_level->addItem(tr("1 - Stable (60 ms)"), 1);
+     bt_level->addItem(tr("2 - Balanced (45 ms)"), 2);
+     bt_level->addItem(tr("3 - Quality (35 ms)"), 3);
++    bt_level->addItem(tr("4 - Compatible (32 ms)"), 4);
+     bt_level->setToolTip(tr("Lower levels send less often, which keeps input lag down on a busy "
+                             "Bluetooth link."));
+     bt_after_input = new QCheckBox(tr("Send right after an input report"));
+-    bt_fast = new QCheckBox(tr("5 ms envelope while the link is idle"));
+-    bt_fast->setToolTip(tr("Runs at level 3 only."));
++    bt_fast = new QCheckBox(tr("Detailed Bluetooth rumble (5 ms)"));
++    bt_fast->setToolTip(
++        tr("Most detailed. When off, or when SDL cannot do it, Compatible mode is used."));
+     bt_crisp_notes = new QCheckBox(tr("Crisp notes"));
+-    bt->addRow(tr("Level"), bt_level);
++    auto* bt_level_label = new QLabel(tr("Level"));
++    bt->addRow(bt_level_label, bt_level);
++    bt_level_label->setVisible(false);
++    bt_level->setVisible(false);
+     bt->addRow(bt_after_input);
+     bt->addRow(bt_fast);
+     bt->addRow(bt_crisp_notes);
+@@ -389,7 +392,7 @@ void ConfigureHdRumble::LoadConfiguration() {
+     envelope_5ms->setChecked(s.hd_rumble_envelope_5ms.GetValue());
+     frequency_in_packet->setChecked(s.hd_rumble_frequency_in_packet.GetValue());
+     crisp_notes->setChecked(s.hd_rumble_crisp_notes.GetValue());
+-    bt_level->setCurrentIndex(std::clamp(s.hd_rumble_bluetooth_level.GetValue(), 1, 3) - 1);
++    bt_level->setCurrentIndex(std::clamp(s.hd_rumble_bluetooth_level.GetValue(), 1, 4) - 1);
+     bt_after_input->setChecked(s.hd_rumble_bt_after_input.GetValue());
+     bt_fast->setChecked(s.hd_rumble_bt_fast.GetValue());
+     bt_crisp_notes->setChecked(s.hd_rumble_bt_crisp_notes.GetValue());
+@@ -414,7 +417,7 @@ void ConfigureHdRumble::RestoreDefaults() {
+     envelope_5ms->setChecked(true);
+     frequency_in_packet->setChecked(true);
+     crisp_notes->setChecked(true);
+-    bt_level->setCurrentIndex(2);
++    bt_level->setCurrentIndex(3);
+     bt_after_input->setChecked(true);
+     bt_fast->setChecked(true);
+     bt_crisp_notes->setChecked(true);
+@@ -439,8 +442,6 @@ void ConfigureHdRumble::UpdateEnabledState() {
+     // The extra wired cards only run on top of the 5 ms envelope
+     frequency_in_packet->setEnabled(envelope_5ms->isChecked());
+     crisp_notes->setEnabled(envelope_5ms->isChecked());
+-    // RenHDrum runs the Bluetooth 5 ms envelope at level 3 only
+-    bt_fast->setEnabled(bt_level->currentData().toInt() == 3);
+     ds_volume_slider->setEnabled(ds_enabled->isChecked());
+     ds_volume->setEnabled(ds_enabled->isChecked());
+     ds_crisp_notes->setEnabled(ds_enabled->isChecked());
+-- 
+2.55.0.windows.5
+

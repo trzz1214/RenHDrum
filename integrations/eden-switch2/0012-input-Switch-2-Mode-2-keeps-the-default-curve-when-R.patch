@@ -1,0 +1,31 @@
+From 98ac7b09ab098b3b9981c7ce8e6b7e15e9f9889c Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 12:58:16 +0700
+Subject: [PATCH] input: Switch 2 Mode 2 keeps the default curve when RenHDrum
+ does not take the vibration
+
+---
+ src/input_common/drivers/sdl_driver.cpp | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index 05cb0ac..5de7cbf 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -883,8 +883,11 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+         factor = 0.5f;
+     }
+ 
+-    // Amplitude for HD rumble needs no modification
+-    if (joystick->HasHDRumble()) {
++    // Amplitude for HD rumble needs no modification, except Switch 2 Mode 2: those games send tiny
++    // raw values and rely on the console's amplifier, so the default curve stays as the fallback
++    // when RenHDrum does not take the vibration (HD Rumble off, DualSense speaker not open yet).
++    if (joystick->HasHDRumble() &&
++        Settings::values.nx2_active_mode.load(std::memory_order_relaxed) != 2) {
+         factor = 1.0f;
+     }
+ 
+-- 
+2.55.0.windows.5
+

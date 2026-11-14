@@ -1,7 +1,7 @@
 From 481e55a733d2d90f9d53856f560fe37eed0fc4d9 Mon Sep 17 00:00:00 2001
 From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 21:04:27 +0700
-Subject: [PATCH 3/6] renhdrum: header 0.3.1
+Subject: [PATCH 3/9] renhdrum: header 0.3.1
 
 ---
  externals/renhdrum/renhdrum.h | 8 +++++++-

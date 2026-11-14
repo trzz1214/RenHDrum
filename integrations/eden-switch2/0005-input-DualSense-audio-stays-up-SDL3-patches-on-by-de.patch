@@ -1,7 +1,7 @@
 From 824fb7a01bcceb38339fd92a3e4c7fe7d853f38a Mon Sep 17 00:00:00 2001
 From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 21:06:33 +0700
-Subject: [PATCH 5/6] input: DualSense audio stays up; SDL3 patches on by
+Subject: [PATCH 5/9] input: DualSense audio stays up; SDL3 patches on by
  default
 
 SDL audio is initialized once and never quit on unplug (RenHDrum#4, fix by

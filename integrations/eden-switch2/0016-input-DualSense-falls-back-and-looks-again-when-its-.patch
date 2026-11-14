@@ -1,0 +1,73 @@
+From d1f75461f0c275c82d8556ec437093326017b8e7 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 14:43:47 +0700
+Subject: [PATCH] input: DualSense falls back and looks again when its speaker
+ goes away
+
+---
+ src/input_common/drivers/renhdrum_pad.cpp | 35 +++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 980348f..29a3315 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -1116,6 +1116,8 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+     std::array<Uint8, 10> packet{};
+     SDL_Joystick* joystick = nullptr;
+     bool open_audio = false;
++    SDL_AudioStream* check_audio_stream = nullptr;
++    SDL_AudioDeviceID check_audio_device = 0;
+     bool restart_bt = false;
+     bool send = false;
+     bool send_xbox = false;
+@@ -1141,6 +1143,11 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+                 now_us +
+                 (impl->audio_attempts < DualSenseAudioMaxAttempts ? 2'000'000 : 5'000'000);
+             open_audio = true;
++        } else if (impl->dsp && !impl->is_bluetooth && impl->audio_stream &&
++                   now_us >= impl->audio_next_us) {
++            impl->audio_next_us = now_us + 5'000'000;
++            check_audio_stream = impl->audio_stream;
++            check_audio_device = impl->audio_device;
+         }
+         if (impl->dsp && impl->is_bluetooth && !impl->bt_running.load() &&
+             !impl->bt_unsupported && !impl->bt_starting && now_us >= impl->bt_next_us) {
+@@ -1199,6 +1206,34 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+     if (restart_bt) {
+         impl->RestartDualSenseBluetooth();
+     }
++    if (check_audio_stream && check_audio_device != 0) {
++        int count = 0;
++        SDL_AudioDeviceID* devices = SDL_GetAudioPlaybackDevices(&count);
++        bool present = false;
++        for (int i = 0; devices && i < count; ++i) {
++            if (devices[i] == check_audio_device) {
++                present = true;
++                break;
++            }
++        }
++        SDL_free(devices);
++        if (!present) {
++            SDL_AudioStream* lost_stream = nullptr;
++            {
++                std::scoped_lock lock{impl->mutex};
++                if (impl->audio_stream == check_audio_stream) {
++                    lost_stream = std::exchange(impl->audio_stream, nullptr);
++                    impl->audio_attempts = DualSenseAudioMaxAttempts;
++                }
++            }
++            if (lost_stream) {
++                SDL_DestroyAudioStream(lost_stream);
++                impl->ReleaseAudioDevice();
++                LOG_INFO(Input, "RenHDrum: DualSense speaker went away, standard rumble until "
++                                "it is back");
++            }
++        }
++    }
+     if (send) {
+         if (SDL_SendJoystickEffect(joystick, packet.data(), static_cast<int>(packet.size()))) {
+             impl->engine_ever_sent.store(true, std::memory_order_relaxed);
+-- 
+2.55.0.windows.5
+

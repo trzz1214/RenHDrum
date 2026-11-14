@@ -1,0 +1,137 @@
+From 346287edd96c67758d93efacb30c697fb597b4d0 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 14:42:28 +0700
+Subject: [PATCH] input: each wired DualSense takes its own speaker
+
+---
+ src/input_common/drivers/renhdrum_pad.cpp | 43 ++++++++++++++++++++++-
+ 1 file changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 8dabe1f..69a3b9d 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -13,6 +13,7 @@
+ #include <mutex>
+ #include <string>
+ #include <thread>
++#include <vector>
+ 
+ #include <renhdrum.h>
+ 
+@@ -263,6 +264,10 @@ std::atomic<int> last_connected_kind{-1};
+ std::atomic<int> xbox_trigger_pads{};
+ // Connected official (Microsoft) Xbox controllers whose trigger motors SDL does not expose
+ std::atomic<int> xbox_official_no_triggers{};
++// DualSense USB speakers currently owned by a pad. Leaf lock: only touches the vector, never
++// calls SDL and never takes `mutex` (`Release()` takes `mutex` then this lock).
++std::mutex claimed_audio_mutex;
++std::vector<SDL_AudioDeviceID> claimed_audio_devices;
+ 
+ } // namespace
+ 
+@@ -272,6 +277,9 @@ std::atomic<int> xbox_official_no_triggers{};
+ // there. The joystick pointer is copied out and used after unlocking: SDL3 validates joystick
+ // handles, so a call on one closed meanwhile only fails.
+ //
++// `claimed_audio_mutex` is a leaf lock (ordered after `mutex`): under it only
++// `claimed_audio_devices` is touched, with no SDL calls.
++//
+ // A DualSense on Bluetooth has no audio endpoint. A thread of its own sends the haptics as HID
+ // output report 0x32 on a second handle to the pad. That thread never takes `mutex`; it holds
+ // `bt_dsp_mutex` while it reads the DSP, and the DSP is replaced only under that lock too.
+@@ -289,6 +297,7 @@ struct RenHDrumPad::Impl {
+     int engine_send_fails{};
+     RenHdcDualSenseDsp* dsp{};
+     SDL_AudioStream* audio_stream{};
++    SDL_AudioDeviceID audio_device{};
+     bool audio_opening{};
+     int audio_attempts{};
+     std::int64_t audio_next_us{};
+@@ -512,6 +521,7 @@ struct RenHDrumPad::Impl {
+             if (stream) {
+                 SDL_DestroyAudioStream(stream);
+             }
++            ReleaseAudioDevice();
+             if (last_quick_attempt) {
+                 LOG_INFO(Input, "RenHDrum: DualSense speaker not found yet, standard rumble until "
+                                 "it appears");
+@@ -620,13 +630,25 @@ struct RenHDrumPad::Impl {
+         bt_running.store(false);
+     }
+ 
++    /// Releases this pad's claimed USB audio device so another DualSense can open it.
++    void ReleaseAudioDevice() {
++        std::scoped_lock lock{claimed_audio_mutex};
++        if (audio_device != 0) {
++            std::erase(claimed_audio_devices, audio_device);
++            audio_device = 0;
++        }
++    }
++
+     /// Finds the DualSense audio device and opens a stream on it, paused until it is published
+     /// in `audio_stream`, or nullptr. Called without the mutex, with the SDL audio subsystem
+     /// initialized.
+     SDL_AudioStream* OpenDualSenseAudioStream(SDL_Joystick* js) {
++        (void)js;
+         int count = 0;
+         SDL_AudioDeviceID* devices = SDL_GetAudioPlaybackDevices(&count);
+         SDL_AudioDeviceID matched = 0;
++        bool seen_dualsense = false;
++        bool second_wired = false;
+         for (int i = 0; devices && i < count; ++i) {
+             const char* name = SDL_GetAudioDeviceName(devices[i]);
+             SDL_AudioSpec spec{};
+@@ -635,15 +657,32 @@ struct RenHDrumPad::Impl {
+             if (name && channels >= 4 &&
+                 (std::strstr(name, "DualSense") != nullptr ||
+                  std::strstr(name, "Wireless Controller") != nullptr)) {
++                seen_dualsense = true;
++                std::scoped_lock lock{claimed_audio_mutex};
++                if (std::find(claimed_audio_devices.begin(), claimed_audio_devices.end(),
++                              devices[i]) != claimed_audio_devices.end()) {
++                    continue;
++                }
++                claimed_audio_devices.push_back(devices[i]);
+                 matched = devices[i];
++                audio_device = matched;
++                second_wired = claimed_audio_devices.size() == 2;
+                 break;
+             }
+         }
+         SDL_free(devices);
+         if (matched == 0) {
+-            LOG_DEBUG(Input, "RenHDrum: no DualSense audio device yet");
++            if (seen_dualsense) {
++                LOG_DEBUG(Input, "RenHDrum: DualSense audio devices are all in use");
++            } else {
++                LOG_DEBUG(Input, "RenHDrum: no DualSense audio device yet");
++            }
+             return nullptr;
+         }
++        if (second_wired) {
++            LOG_INFO(Input, "RenHDrum: two wired DualSense controllers, speakers are matched in "
++                            "the order the system lists them");
++        }
+ 
+         const SDL_AudioSpec spec{
+             .format = SDL_AUDIO_F32,
+@@ -652,6 +691,7 @@ struct RenHDrumPad::Impl {
+         };
+         SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(matched, &spec, &AudioCallback, this);
+         if (!stream) {
++            ReleaseAudioDevice();
+             LOG_WARNING(Input, "RenHDrum: could not open the DualSense audio device: {}",
+                         SDL_GetError());
+             return nullptr;
+@@ -701,6 +741,7 @@ struct RenHDrumPad::Impl {
+             SDL_DestroyAudioStream(audio_stream);
+             audio_stream = nullptr;
+         }
++        ReleaseAudioDevice();
+         if (xbox) {
+             api.xbox_destroy(xbox);
+             xbox = nullptr;
+-- 
+2.55.0.windows.5
+

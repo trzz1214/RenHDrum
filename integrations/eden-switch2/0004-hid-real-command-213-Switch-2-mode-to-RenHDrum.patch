@@ -1,7 +1,7 @@
 From b1d1d101d1bf0812afda7b50bded33ff0a0c0a61 Mon Sep 17 00:00:00 2001
 From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 21:06:10 +0700
-Subject: [PATCH 4/6] hid: real command 213, Switch 2 mode to RenHDrum
+Subject: [PATCH 4/9] hid: real command 213, Switch 2 mode to RenHDrum
 
 Replace Unknown213 with SendVibrationValueInMode and record the guest Mode
 (commands 213 / 214) in Settings::values.nx2_active_mode. RenHDrumPad passes

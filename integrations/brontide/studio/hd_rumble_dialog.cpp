@@ -54,7 +54,7 @@ namespace {
 const std::array<std::pair<const char*, const char*>, 24> SETTINGS_DEFAULTS{{
     {"enable_hd_rumble", "true"},
     {"hd_rumble_usb_interval_ms", "15"},
-    {"hd_rumble_bluetooth_level", "3"},
+    {"hd_rumble_bluetooth_level", "4"},
     {"hd_rumble_usb_auto_slow", "true"},
     {"hd_rumble_experimental_usb_no_queue", "true"},
     {"hd_rumble_experimental_envelope_5ms", "true"},
@@ -465,15 +465,17 @@ void HdRumbleDialog::BuildSwitch(QVBoxLayout* column) {
 
     auto* bluetooth = new StudioSection(tr("Bluetooth"), GlyphIcon(Glyph::Bluetooth, 18, CYAN));
     AddRecommendedRow(bluetooth, false);
-    bluetooth_level = new Segmented({{1, tr("Stable")}, {2, tr("Balanced")}, {3, tr("Fast")}});
+    bluetooth_level = new Segmented({{1, tr("Detailed (5 ms)")}, {0, tr("Compatible")}});
     bluetooth->AddRow(new StudioRow(
-        tr("Send speed"),
-        tr("How fast rumble packets are sent over Bluetooth. Higher rates feel smoother and more "
-           "responsive, while lower rates are more stable if wireless signal is weak. Recommended: "
-           "Fast. If unsure, keep the recommended setting."),
+        tr("Mode"),
+        tr("Detailed (5 ms) plays the 5 ms envelope while the Bluetooth link is idle. Compatible "
+           "sends the newest value at least 32 ms apart and resends every 40 ms while rumbling. "
+           "Recommended: Detailed (5 ms). If unsure, keep the recommended setting."),
         0, bluetooth_level));
-    connect(bluetooth_level, &Segmented::ValueChanged, this, [this](int level) {
-        SetValue("hd_rumble_bluetooth_level", QString::number(level));
+    connect(bluetooth_level, &Segmented::ValueChanged, this, [this](int detailed) {
+        SetValue("hd_rumble_experimental_bt_fast",
+                 detailed ? QStringLiteral("true") : QStringLiteral("false"));
+        SetValue("hd_rumble_bluetooth_level", QStringLiteral("4"));
         Changed();
     });
     MakeCard(switch_bluetooth, switch_cards_layout, false, bluetooth);
@@ -825,7 +827,7 @@ void HdRumbleDialog::AddRecommendedRow(StudioSection* section, bool wired, bool 
         : wired ? tr("Automatically turns on all options in Detailed settings with 15 ms interval over "
                    "USB for the most authentic experience. Recommended: On. If unsure, keep the "
                    "recommended setting.")
-              : tr("Automatically sets Fast rate and turns on all Bluetooth options in Detailed "
+              : tr("Automatically selects Detailed (5 ms) and turns on all Bluetooth options in Detailed "
                    "settings for responsive rumble without button lag. Recommended: On. If unsure, "
                    "keep the recommended setting.");
     // Only shown once the settings differ from the recommended ones (SyncWidgets)
@@ -953,7 +955,7 @@ void HdRumbleDialog::SyncWidgets() {
         QSignalBlocker blocker(toggle);
         toggle->setChecked(Flag(key.toLatin1().constData()));
     }
-    bluetooth_level->SetValue(Number("hd_rumble_bluetooth_level"));
+    bluetooth_level->SetValue(Flag("hd_rumble_experimental_bt_fast") ? 1 : 0);
     interval->SetValue(Number("hd_rumble_usb_interval_ms"));
     {
         QSignalBlocker slider_blocker(volume_slider);
@@ -1090,10 +1092,8 @@ QString HdRumbleDialog::ModeText(const InputCommon::RenHDrumPadInfo& pad) const 
         return mode.startsWith(QStringLiteral("DualSense haptics")) ? tr("Haptics") : tr("Standard rumble");
     }
     if (pad.is_bluetooth) {
-        const QString prefix = QStringLiteral("BT level ");
-        const int level = mode.startsWith(prefix) ? mode.mid(prefix.size(), 1).toInt() : 0;
-        const QString speed = level == 1 ? tr("Stable") : level == 2 ? tr("Balanced") : tr("Fast");
-        return tr("HD Rumble · %1").arg(speed);
+        const bool detailed = Flag("hd_rumble_experimental_bt_fast");
+        return tr("HD Rumble · %1").arg(detailed ? tr("Detailed (5 ms)") : tr("Compatible"));
     }
     return tr("HD Rumble");
 }
@@ -1122,7 +1122,7 @@ void HdRumbleDialog::ArrangeCards() {
     const bool switch_usb = pad_state.switch_usb;
     const bool switch_bt = pad_state.switch_bluetooth;
     Arrange(switch_cards_layout, switch_bluetooth, switch_wired, false, has_switch, switch_usb, switch_bt,
-            tr("Close to wired, no button lag. Fast is recommended."),
+            tr("Close to wired, no button lag. Detailed (5 ms) is recommended."),
             tr("The best it gets: every detail of the game's rumble."));
     Arrange(detail_cards_layout, detail_bluetooth, detail_wired, true, has_switch, switch_usb, switch_bt, QString(),
             tr("Grayed rows have no effect while a switch above them is on."));

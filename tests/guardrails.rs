@@ -36,15 +36,18 @@ fn bluetooth_pacing_unchanged() {
                 l.high_freq,
                 l.low_freq,
                 l.stop_priority,
+                l.send_latest,
+                l.resend_ms,
             )
         })
         .collect();
     assert_eq!(
         levels,
         vec![
-            (1, 60, 2.0, 100.0, 2, 16, 4, false),
-            (2, 45, 3.0, 80.0, 1, 8, 2, true),
-            (3, 35, 4.0, 65.0, 0, 4, 1, true),
+            (1, 60, 2.0, 100.0, 2, 16, 4, false, false, 0),
+            (2, 45, 3.0, 80.0, 1, 8, 2, true, false, 0),
+            (3, 35, 4.0, 65.0, 0, 4, 1, true, false, 0),
+            (4, 32, 1.0, 32.0, 0, 0, 0, true, true, 40),
         ]
     );
     assert_eq!((BT_SYNC_MIN_GAP_MS, BT_SYNC_MAX_GAP_MS), (60, 120));
@@ -70,7 +73,7 @@ fn dualsense_constants_unchanged() {
 fn default_hd_rumble_settings_guardrails() {
     assert_eq!(
         RumbleConfigController::STANDARD_HD_RUMBLE_BLUETOOTH_LEVEL,
-        2
+        4
     );
     assert!(!RumbleConfigController::default().hd_rumble_experimental_bt_fast);
 }

@@ -27,8 +27,8 @@ During early experimental development, several features were assigned internal w
    Subcommand `0x10` byte layouts, the dekuNukem 101-threshold amplitude table, and standard 4-byte channel encoding.
 2. [**02: 5 ms AM/FM Multi-Sample Envelope & Crisp Notes**](02-amfm-multisample-and-crisp-notes.md)  
    Multi-sample packet formats (`FormatThree`, `FormatThree7bit`, `FormatTwo14bit`), hardware envelope constraints, sub-5-bit floor handling, and crisp note shaping.
-3. [**03: Bluetooth Congestion & Token Bucket Pacing**](03-bluetooth-congestion-and-pacing.md)  
-   Half-duplex Bluetooth collision dynamics, the 150 ms refresh interval, Write-After-Input gating, and the 3-tier Token Bucket scheduler (`HD_BT_LEVELS`).
+3. [**03: Bluetooth Congestion & Pacing Modes**](03-bluetooth-congestion-and-pacing.md)  
+   Half-duplex Bluetooth collision dynamics, the 150 ms refresh interval, Write-After-Input gating, **Detailed (5 ms)** and **Compatible** modes, plus legacy Ryuhdr tiers in `HD_BT_LEVELS`.
 4. [**04: USB Idle-Gated Writes & Dense Rate Detection**](04-usb-idle-gated-writes.md)  
    USB 15 ms idle gating, peak energy merging (`HDSync_MergeSide`), and rolling 250 ms sample rate auto-slowdown detection (`HdDenseDetector`).
 5. [**05: DualSense 48 kHz Audio Haptics DSP**](05-dualsense-audio-haptics.md)  
@@ -37,11 +37,11 @@ During early experimental development, several features were assigned internal w
    In-depth comparative analysis of `libsdl-org/SDL` tag `release-3.4.8`, blocking delays, input report starvation, and atomic idle state tracking.
 7. [**07: Integration Lessons & Edge Cases**](07-integration-lessons.md)  
    Practical lessons from production emulator integrations: unpatched runtime degradation, disconnect safety, and audio callback reliability.
-8. [**08: Steam Controller Haptics — SDL3 Analysis & Planned Architecture**](08-steam-controller-haptics.md)  
-   *Research only (not yet implemented, beta planned)*: SDL 3.4.8 HIDAPI transport audit for 2015 (`0x8F`) and 2026 "Triton" (`0x83`) controllers, practical roadblocks, and the planned 3rd output backend.
+8. [**08: Steam Controller Haptics — SDL3 Analysis & Grip Audio**](08-steam-controller-haptics.md)  
+   *2026 grip audio: experimental (built from iafx's measurements); trackpads, Steam Deck and 2015 controller: research*: SDL 3.4.8 HIDAPI transport audit, `0x86` / `0x88` mu-law grip PCM streaming, and hardware measurements.
 9. [**09: Two Ancestors — yuzu, Ryujinx and Their Forks**](09-yuzu-and-ryujinx-lineage.md)  
    Source-checked survey: philosophies and timeline, dynarmic vs ARMeilleure, what PGO does (and does not) optimize in an emulator, PPTC vs AOT vs the 2026 recompilation wave, and how both projects ended.
 10. [**10: Xbox One Rumble — Translating HD Rumble to Four Motors**](10-xbox-one-rumble.md)  
    ERM vs LRA, which Windows APIs reach the trigger motors, force thresholds, motor roles, rotor model with overdrive, trigger gating, and replayable traces.
 11. [**11: Switch 2 HD Rumble — Signal Path, Commands, and Emulation Realities**](11-switch2-hd-rumble.md)  
-   IPC commands 213/214/220, the `Mode` flag, why retail games still send 2-band parametric vibration, signal routing from game to three controller families, the 2000 ms hanging rumble defect in generic SDL fallbacks, and next research steps.
+   IPC commands 213/214/220, the `Mode` flag, why retail games still send 2-band parametric vibration, the fixed DualSense Mode 2 law (`3.5 * a^0.75`), Pro Controller 1 `0.004` floor cut, Xbox One S translation via `PRO_DEFAULT`, and the 2000 ms hanging rumble defect.

@@ -12,7 +12,7 @@
 RenHDrum is an ultra-low-latency, real-time haptics research and synthesis engine written in safe Rust. It exports a zero-allocation C ABI (`renhdrum.dll`, `include/renhdrum.h`) with zero external crate dependencies, solving four core challenges of modern gaming haptics:
 
 1. **5 ms AM/FM Multi-Sample Envelope & Crisp Notes**: Synthesizes micro-timed 5 ms amplitude and frequency sub-packets (`3x5-bit`, `3x7-bit`, `2x14-bit`) within 15 ms transmission frames, combined with dynamic attack pre-emphasis (+3 dB onset boost and -3 dB sustain decay) for the Nintendo Switch Pro Controller.
-2. **Zero-Lag Bluetooth Pacing & Idle-Gating**: Eliminates wireless packet saturation and input report drops via 150 ms idle refresh, Write-After-Input gating, and a 3-tier Token Bucket scheduler (`HD_BT_LEVELS`).
+2. **Zero-Lag Bluetooth Pacing & Idle-Gating**: Eliminates wireless packet saturation and input report drops via 150 ms idle refresh, Write-After-Input gating, and two Bluetooth modes: **Detailed (5 ms)** with idle-gated writes and **Compatible** (32 ms spacing, newest value, 40 ms resend) on unpatched SDL (legacy Ryuhdr tiers 1–3 are kept in `HD_BT_LEVELS`).
 3. **Sony PlayStation 5 DualSense Audio Haptics Synthesizer**: Generates real-time 4-channel 48 kHz float32 audio haptics for DualSense voice coil motors (VCM) over USB, with non-linear x^0.5 perceptual scaling and a calibrated 0.8 output ceiling.
 4. **Xbox One Rumble**: Translates Switch HD Rumble into the four motors of a Microsoft Xbox One controller (two grips, two triggers), with a rotor model and overdrive for the old-style motors. See [research/10](docs/research/10-xbox-one-rumble.md) and the [integration guide](docs/integration/xbox.md).
 
@@ -20,14 +20,15 @@ RenHDrum is an ultra-low-latency, real-time haptics research and synthesis engin
 
 ## Supported Controllers
 
-`✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`
+`✅ DualSense` · `✅ Nintendo Pro` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`
 
 | Controller | Status | Connection & Capability |
 |---|---|---|
 | **Sony DualSense** (PS5) | `✅ DualSense` | USB (48 kHz stereo voice-coil PCM audio) or Bluetooth (HID report `0x32`) |
-| **Nintendo Switch Pro Controller** | `✅ Nintendo Pro Controller` | USB (15 ms framing) or Bluetooth (token-bucket level 2 pacing) |
-| **Microsoft Xbox One S** | `🔬 Xbox One S (research)` | USB or Bluetooth (translated 4-motor rumble model, active research) |
-| Switch 2 Pro Controller, Steam Controller | 🔬 Research — not playable yet | — |
+| **Nintendo Switch Pro Controller** | `✅ Nintendo Pro` | USB (15 ms framing) or Bluetooth (Detailed 5 ms envelope or Compatible mode) |
+| **Microsoft Xbox One S** | `✅ Xbox One S` | USB or Bluetooth (four-motor converter; Switch 2 games follow the Pro curve, confirmed in *Ocarina of Time*, *Donkey Kong Bananza*, and *Mario Kart World*) |
+| **Valve Steam Controller (2026)** | `🧪 Steam Controller 2026 (experimental)` | Grips only: USB (8 kHz mu-law) or dongle / Windows Bluetooth (4 kHz mu-law) via HID report `0x88` |
+| Switch 2 Pro Controller, Steam Controller (2015), Steam Deck | 🔬 Research — not playable yet | — |
 
 Built and tested on the Xbox One S controller. Other Microsoft Xbox One and Series X|S controllers share the same four-motor design and should work too, but I have not tested them yet: open an issue to report how yours feels.
 
@@ -74,7 +75,7 @@ Reference platforms validating pure C ABI integration, 5 ms AM/FM micro-timing, 
 
 | Project | Base & Integration Architecture | Testbed Role | Research Notes |
 |---|---|---|---|
-| **Brontide-NS2** *(1.1.0)* | PokeDinner 2.5.0 by Franseven (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-ns2.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
+| **Brontide-NS2** *(1.1.1)* | PokeDinner 2.5.0 by Franseven (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-ns2.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
 | **Brontide-oot** *(1.0.1)* | Fritchii v5.5 by Frizti, Lichii by zortos293, Dynamic FPS by Dark (C++ / Patched SDL3, `renhdrum.dll` thin hook) | Switch 2 games HD Rumble validation (120k shader prep for AMD/NVIDIA, DLSS, compute fallback & water/lighting fixes) | [Test Build Notes →](https://ryuhdr.threedola.workers.dev/brontide-oot.html) · [Research →](https://ryuhdr.threedola.workers.dev/switch2-hd-rumble.html) |
 
 ### 3. Static Recompilation (Native PC Ports)
@@ -84,7 +85,7 @@ Reference platforms validating pure C ABI integration, 5 ms AM/FM micro-timing, 
 
 | Project | Base & Integration Architecture | Testbed Role | Research & Guide Notes |
 |---|---|---|---|
-| **Hookshot** *(v2.0.6)* | Generic Recomp C Kit (C / Patched SDL3, `renhdrum.dll` dynamic load) | Native PC port zero-lag validation & Switch 2 command 214 routing | [Web 3-Step Guide →](https://ryuhdr.threedola.workers.dev/#hookshot-recomp) · [Recomp Guide →](docs/integration/recomp-games.md) · [C Bridge Kit →](integrations/recomp-c/) |
+| **Hookshot** *(v2.1.0)* | Generic Recomp C Kit (C / Patched SDL3, `renhdrum.dll` dynamic load) | Native PC port zero-lag validation & Switch 2 command 214 routing | [Web 3-Step Guide →](https://ryuhdr.threedola.workers.dev/#hookshot-recomp) · [Recomp Guide →](docs/integration/recomp-games.md) · [C Bridge Kit →](integrations/recomp-c/) |
 
 New to HD Rumble? [See how this differs from other emulators →](https://ryuhdr.threedola.workers.dev/compare.html)
 
@@ -100,6 +101,14 @@ It is a non-commercial, personal research journal: no ads, no sign-ups, and stri
 
 ---
 
+## Runtime requirements
+
+- RenHDrum 0.4.0 and later need no Visual C++ Redistributable; releases 0.3.1 and earlier do.
+- Put the DLL next to the exe and load it by full path.
+- Details and a 5-point checklist: [Integration checklist](docs/integration/recomp-games.md#integration-checklist).
+
+---
+
 ## Quick Integration (6 Steps)
 
 Integrating `renhdrum.dll` with an SDL3-based C/C++ or C# host requires 6 straightforward steps:
@@ -109,10 +118,10 @@ Integrating `renhdrum.dll` with an SDL3-based C/C++ or C# host requires 6 straig
 3. **Push Vibration Data**: Feed stereo vibration parameters via `renhdrum_engine_push_sample` (or `renhdrum_engine_push_half_sample` if left/right are processed independently).
 4. **Tick Engine at 1 ms**: In a 1 ms timer loop, call `renhdrum_engine_tick(engine, now_us, packet10)`. When it returns `1`, dispatch the 10-byte Subcommand `0x10` buffer via `SDL_SendJoystickEffect`.
 5. **Teardown**: Send the canonical neutral stop packet (`0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40`) and call `renhdrum_engine_destroy`.
-6. **Switch 2 Mode Routing**: When handling guest Switch 2 titles issuing IPC command 214 (`SendVibrationValuesInMode`), call `renhdrum_set_nx2_mode(2)` to automatically activate per-controller calibrated piecewise response curves (preset `[3]` for DualSense, preset `[4]` with transient boost for Pro Controller 1). When running classic Switch 1 games or standard vibration commands, call `renhdrum_set_nx2_mode(0)` to keep vibration 100% bit-exact and untouched.
+6. **Switch 2 Mode Routing**: When handling guest Switch 2 titles issuing IPC command 214 (`SendVibrationValuesInMode`), call `renhdrum_set_nx2_mode(2)` to automatically activate per-controller calibrated piecewise response curves (DualSense: `a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`, no EQ; Pro Controller 1: threshold T = 0.004 with transient boost). When running classic Switch 1 games or standard vibration commands, call `renhdrum_set_nx2_mode(0)` to keep vibration 100% bit-exact and untouched.
 
 > [!NOTE]
-> **Known limitation**: `renhdrum_settings_resolve` still queries local override files and IPC shared memory managed by `Brontide-App`. There is no pure in-memory resolver yet; hosts that want one can fill `RenHdcSettings` themselves and call `renhdrum_engine_apply_settings`.
+> `renhdrum_settings_resolve` also reads flag files next to the exe and the shared memory of `Brontide-App`; that is right for Brontide only. If your host is not Brontide, I recommend calling `renhdrum_settings_resolve_pure` instead: it uses only the config you pass in.
 
 ### Documentation Links
 
@@ -178,6 +187,8 @@ cargo clippy -- -D warnings
 # Build optimized release library (renhdrum.dll / librenhdrum.so)
 cargo build --release
 ```
+
+The build also produces `renhdrum.lib` (staticlib). To see which system libraries a static link needs, run `cargo rustc --release --crate-type staticlib -- --print native-static-libs`.
 
 ---
 
@@ -256,7 +267,7 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
 | Multi-sample AM/FM formats and 5 ms planner | - | Switchbrew Wiki: bit-packing layouts, AmFmCodes tables | Planner that picks 1/2/3-sample frames per 15 ms window, with fallback | `src/encoding/amfm.rs`, `src/planner/amfm_planner.rs`, `docs/research/02` |
 | 5-bit logarithmic amplitude scale | - | felipearmat, OGX-Mini PR #116 (no code copied) | Energy compensation constant `CODE5_GAME_SCALE = 1.7947091` | `src/encoding/amfm.rs`, `NOTICE` item 4 |
 | Click pulse and Crisp Notes | - | rei-github oscilloscope measurements, CTCaer `jc_toolkit` captures | Click synthesizer and +3 dB / -3 dB transient shaping | `src/encoding/click.rs`, `src/encoding/crisp_notes.rs`, `docs/research/02` |
-| Bluetooth pacing (3 levels), idle-gated writes, write-after-input | - | Behaviour of the SDL HIDAPI Switch driver | Token-bucket pacing levels, idle-gated no-queue writes, write-after-input | `tests/guardrails.rs`, `docs/research/03`, `docs/research/04` |
+| Bluetooth pacing (Detailed 5 ms / Compatible + legacy 3 tiers), idle-gated writes, write-after-input | - | Behaviour of the SDL HIDAPI Switch driver; newest-sample fallback idea from Hookshot PR #1213 (no code copied) | Detailed 5 ms mode, Compatible fallback, token-bucket tiers, idle-gated no-queue writes, write-after-input | `tests/guardrails.rs`, `docs/research/03`, `docs/research/04` |
 | DualSense USB audio haptics DSP | - | Nielk1 and the DualSense reverse-engineering community: 4-channel 48 kHz USB audio layout | The synthesizer itself (the DSP shared with Ryuhdr is also my own code) | `src/dualsense/haptics.rs`, `tests/golden_dualsense.rs`, `NOTICE` item 6 |
 | DualSense Bluetooth haptics, report `0x32` | - | egormanga, SAxense: report layout only | Reimplementation in Rust, 48 kHz to 3 kHz conversion, CRC | `src/dualsense/bt_haptics.rs` (header comment: no SAxense code copied), `docs/research/05` |
 | Switch 2 command 214 IPC dispatching | - | neo Luigi (Eglantine PR #155): command 214 routing pattern | Adapted into Brontide-NS2 input driver to feed RenHDrum `_half_` C ABI | `docs/research/11`, `docs/integration/switch2-games.md` |
@@ -265,7 +276,7 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
 | Switch 2 per-controller response curves & traces | - | samaBR85: Switch 2 traces and Lichii patch port | Piecewise transfer curves per controller | `src/nx2.rs`, `docs/integration/switch2-games.md` |
 | SDL3 patches | Modifies SDL source (zlib) | - | The HD Rumble patches | `integrations/sdl3/sdl3-patches/` |
 | Brontide hook patches | Modifies Eden source (GPL-3.0-or-later) | - | The RenHDrum hook patches | `integrations/brontide/` |
-| Static recompilation C bridge | MIT OR Apache-2.0 / reference patch (GPL-3.0) | NotRexed (Hookshot v2.0.6): reference testbed | Generic recomp C bridge and Hookshot v2.0.6 reference patch | `integrations/recomp-c/`, `docs/integration/recomp-games.md` |
+| Static recompilation C bridge | MIT OR Apache-2.0 / reference patch (GPL-3.0) | NotRexed (Hookshot v2.1.0): reference testbed | Generic recomp C bridge and Hookshot v2.1.0 reference patch | `integrations/recomp-c/`, `docs/integration/recomp-games.md` |
 | Rumble data from games and DSP origins | Parts of the DSP logic, packet structures and state transitions (MIT, from Ryujinx via Ryuhdr; `NOTICE` item 1) | Ryujinx / Ryubing / Eden HID vibration services | Experimental runtime hook (reference only) | `reference/ryubing-hook/`, `NOTICE` item 1 |
 
 #### Sources referenced without copying code

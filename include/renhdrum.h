@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RENHDRUM_VERSION 0x000301
+#define RENHDRUM_VERSION 0x000400
 
 #define RENHDRUM_OK 0
 #define RENHDRUM_ERR_NULL_PTR -1
@@ -18,7 +18,7 @@ extern "C" {
 typedef struct RenHdcSettings {
     bool enabled;
     int32_t usb_interval_ms;
-    int32_t bluetooth_level;
+    int32_t bluetooth_level; /* 1-4, 4 = Compatible (default) */
     bool usb_auto_slow;
     bool sync_to_input;
     bool click_pulse;
@@ -87,6 +87,9 @@ uint32_t renhdrum_version(void);
 
 int32_t renhdrum_settings_default(RenHdcSettings *out_settings);
 int32_t renhdrum_settings_resolve(const RenHdcConfig *config, RenHdcSettings *out_settings);
+/* Use this when the host is not Brontide: reads no IPC and no flag files, only `config`. */
+/* NULL config gives the same result as renhdrum_settings_default. */
+int32_t renhdrum_settings_resolve_pure(const RenHdcConfig *config, RenHdcSettings *out_settings);
 
 int32_t renhdrum_preset_apply(int32_t kind, RenHdcConfig *config);
 int32_t renhdrum_preset_detect(const RenHdcConfig *config, int32_t *out_kind);
@@ -227,6 +230,10 @@ int32_t renhdrum_engine_push_half_sample(
 );
 int32_t renhdrum_engine_tick(RenHdcEngine *engine, int64_t now_us, uint8_t *out_packet10);
 
+// volume_percent (clamped 10..100) is the final output gain; the core already applies it.
+// The host must NOT scale samples again before pushing them. The core exports no volume
+// setter yet: to change it, destroy and re-create the DSP object (no need to reopen the
+// audio stream). If the Brontide-App config is present in shared memory, it overrides both arguments.
 RenHdcDualSenseDsp *renhdrum_dualsense_dsp_create(int32_t volume_percent, bool crisp_notes);
 void renhdrum_dualsense_dsp_destroy(RenHdcDualSenseDsp *dsp);
 int32_t renhdrum_dualsense_dsp_set_target(
@@ -264,6 +271,22 @@ int32_t renhdrum_dualsense_dsp_build_bt_report(
     RenHdcDualSenseDsp *dsp,
     uint8_t buffer_length,
     uint8_t *out_report142
+);
+/* Experimental: Steam Controller (2026) grips, report 0x88, built from iafx's measurements (RenHDrum#5).
+   Create with renhdrum_valve_grip_dsp_create, then use renhdrum_dualsense_dsp_set_half_target and
+   renhdrum_dualsense_dsp_destroy on the handle. One report every RENHDRUM_VALVE_GRIP_PERIOD_NS_*.
+   Returns 1 when the block carries vibration, 0 when silent, < 0 on error
+   (unknown format -> RENHDRUM_ERR_INVALID_ARG). out_report64 must hold 64 bytes. */
+#define RENHDRUM_VALVE_GRIP_REPORT_SIZE 64
+#define RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K 8
+#define RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K 9
+#define RENHDRUM_VALVE_GRIP_PERIOD_NS_8K 3875000ULL
+#define RENHDRUM_VALVE_GRIP_PERIOD_NS_4K 7750000ULL
+RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create(int32_t volume_percent, bool crisp_notes);
+int32_t renhdrum_valve_grip_build_report(
+    RenHdcDualSenseDsp *dsp,
+    uint8_t format,
+    uint8_t *out_report64
 );
 int32_t renhdrum_dualsense_evaluate_triggers(
     uint64_t title_id,

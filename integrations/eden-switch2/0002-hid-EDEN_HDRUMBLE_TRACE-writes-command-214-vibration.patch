@@ -1,7 +1,7 @@
 From 219563f481d19141eb03c1bc8f007d0b8477e7eb Mon Sep 17 00:00:00 2001
 From: samaBR85 <sama85@gmail.com>
 Date: Thu, 5 Nov 2026 21:33:02 -0300
-Subject: [PATCH 2/6] hid: EDEN_HDRUMBLE_TRACE writes command 214 vibration
+Subject: [PATCH 2/9] hid: EDEN_HDRUMBLE_TRACE writes command 214 vibration
  values to a CSV
 
 Feito com Claude Code

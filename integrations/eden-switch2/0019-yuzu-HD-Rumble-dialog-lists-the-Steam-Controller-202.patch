@@ -1,0 +1,65 @@
+From 43fd4c8d2b548668e56f996ab253da54d2319809 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:45:52 +0700
+Subject: [PATCH] yuzu: HD Rumble dialog lists the Steam Controller (2026) as
+ experimental
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/input_common/drivers/renhdrum_pad.cpp      | 5 ++++-
+ src/input_common/drivers/renhdrum_pad.h        | 2 +-
+ src/yuzu/configuration/configure_hd_rumble.cpp | 2 ++
+ 3 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index e507b99..aa09b6d 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -277,7 +277,7 @@ float ShapeAmplitude(float amplitude, const UserSettings& u) {
+ }
+ 
+ // Controllers RenHDrum drives, per kind, for the settings dialog
+-std::array<std::atomic<int>, 3> connected_count{};
++std::array<std::atomic<int>, 4> connected_count{};
+ std::atomic<int> last_connected_kind{-1};
+ // Connected Xbox-style controllers that expose trigger motors
+ std::atomic<int> xbox_trigger_pads{};
+@@ -999,6 +999,9 @@ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gam
+         }
+         LOG_INFO(Input, "RenHDrum: Steam Controller {:04X}:{:04X} (experimental)", vid, pid);
+         steam->StartSteamGrip(joystick, pid);
++        steam->kind = 3;
++        ++connected_count[steam->kind];
++        last_connected_kind = steam->kind;
+         return std::shared_ptr<RenHDrumPad>(new RenHDrumPad(std::move(steam)));
+     }
+     const bool switch_pad = IsSwitchHdController(vid, pid);
+diff --git a/src/input_common/drivers/renhdrum_pad.h b/src/input_common/drivers/renhdrum_pad.h
+index 8b47384..ab44644 100644
+--- a/src/input_common/drivers/renhdrum_pad.h
++++ b/src/input_common/drivers/renhdrum_pad.h
+@@ -20,7 +20,7 @@ bool IsRenHDrumBuilt();
+ bool IsRenHDrumLoaded();
+ 
+ /// Kind of the controller RenHDrum connected most recently and still drives: 0 Switch
+-/// controller, 1 DualSense, 2 Xbox style, or -1 when none.
++/// controller, 1 DualSense, 2 Xbox style, 3 Steam Controller (2026), or -1 when none.
+ int GetRenHDrumConnectedKind();
+ 
+ /// For connected Xbox-style controllers: 1 when one exposes trigger motors, 0 when none does,
+diff --git a/src/yuzu/configuration/configure_hd_rumble.cpp b/src/yuzu/configuration/configure_hd_rumble.cpp
+index 4e8b499..51a95ab 100644
+--- a/src/yuzu/configuration/configure_hd_rumble.cpp
++++ b/src/yuzu/configuration/configure_hd_rumble.cpp
+@@ -92,6 +92,8 @@ ConfigureHdRumble::ConfigureHdRumble(QWidget* parent) : QDialog(parent) {
+             &ds_simple);
+         row(2, tr("Xbox and Xbox-style controllers"),
+             tr("RenHDrum's Xbox rumble. Off: the emulator's standard rumble."), &xbox_simple);
++        row(3, tr("Steam Controller (2026): grips, experimental"),
++            tr("Both grip motors play HD Rumble. Follows the switch above."), nullptr);
+     }
+ 
+     // Tuning widgets: all still built, but shown only when hd_rumble_advanced is set by hand in
+-- 
+2.55.0.windows.5
+

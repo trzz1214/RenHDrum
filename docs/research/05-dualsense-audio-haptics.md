@@ -27,10 +27,10 @@ Physical voice coil motors exhibit a non-linear displacement-to-voltage response
    Input game amplitude $a \in [0.0, 1.0]$ is mapped through a non-linear square-root curve:
    $$A_{\text{perceptual}} = a^{0.5} = \sqrt{a}$$
    This lifts delicate, subtle texture vibrations into the physical actuator's active tactile sensitivity zone without overdriving heavy impacts.
-2. **Thermal & Mechanical Power Ceiling (`0.70`)**:
+2. **Thermal & Mechanical Power Ceiling (`0.8`)**:
    Continuous maximum excursion on DualSense VCM coils generates substantial heat and distortion. Output amplitude is strictly limited:
-   $$A_{\text{out}} = \min(A_{\text{perceptual}} \times V_{\text{gain}}, 0.70)$$
-   Where `0.70` represents the maximum safe sustained power ceiling (`DUALSENSE_OUTPUT_CEILING = 0.70`).
+   $$A_{\text{out}} = \min(A_{\text{perceptual}} \times V_{\text{gain}}, 0.8)$$
+   Where `0.8` represents the maximum safe sustained power ceiling (`DUALSENSE_OUTPUT_CEILING = 0.8`).
 
 ---
 

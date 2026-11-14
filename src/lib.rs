@@ -15,6 +15,7 @@ pub mod settings;
 pub mod status;
 pub mod test_pattern;
 pub mod trace;
+pub mod valve;
 pub mod xbox;
 
 pub use backend::{HdSample, NintendoHdEngine};

@@ -3,7 +3,7 @@
 This guide describes how to integrate `renhdrum.dll` into C and C++ static recompilation runtimes using SDL3 to achieve authentic HD Rumble on physical gamepads. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 ---
 
@@ -14,9 +14,34 @@ Static recompilation projects translate native console machine code into native 
 By dynamically loading `renhdrum.dll` at runtime, the host runtime can synthesize authentic HD Rumble directly to connected hardware:
 - **Nintendo Switch Pro Controller 1**: Receives sub-command `0x10` multi-sample packets with dekuNukem LUT encoding at 15 ms cadence (USB) or token-bucket pacing (Bluetooth).
 - **PlayStation 5 DualSense**: Receives continuous 48 kHz audio-rate waveforms over wired USB or periodic HID report `0x32` over Bluetooth.
-- **Xbox One S**: Receives heuristic 4-motor tactile synthesis across grip and trigger motors.
+- **Xbox One S**: Receives 4-motor tactile synthesis across grip and trigger motors (Switch 2 Mode 2 maps through the Pro curve first, then the Switch 1 converter).
 
 If `renhdrum.dll` is absent, or if the user disables it via an environment variable, the runtime cleanly falls back to two-motor `SDL_RumbleGamepad`.
+
+---
+
+## Integration checklist
+
+Five things I would check before shipping an integration. They come from review of a real recomp port (fefw-recomp, PR #95) and from my own hardware tests.
+
+1. **Load the DLL by full path, next to the exe.** A bare name searches the working directory and `PATH`, so a stray copy can win. Check `renhdrum_version()` after loading, and load newer functions as "use if present" so an older DLL still works.
+   ```c
+   wchar_t p[MAX_PATH]; GetModuleFileNameW(NULL, p, MAX_PATH);
+   wchar_t *s = wcsrchr(p, L'\\'); if (s) wcscpy(s + 1, L"renhdrum.dll");
+   HMODULE h = LoadLibraryExW(p, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+   ```
+2. **Apply intensity in one place only.** `volume_percent` in `renhdrum_dualsense_dsp_create` is already the final factor; do not scale the samples again before pushing them. The core exports no C function to change it, so to change intensity destroy and recreate the DSP. The audio stream stays open.
+3. **The host's "rumble off" switch must stop everything.** Haptic output and plain two-motor rumble both. Check it in the one function every vibration call passes through.
+4. **Bluetooth always goes through the core's limiter.** Two modes: **Detailed (5 ms)** is the most detailed and requires SDL with idle-gated writes (the host enables `bt_fast`); **Compatible** (level 4, the default) runs on unpatched SDL out of the box—sending the newest value, spaced at least 32 ms apart, and resending every 40 ms while rumbling, with nothing extra to do. Legacy levels 1-3 are kept only to match Ryuhdr pacing and are not recommended for new integrations; the host never sends its own packets. If you have not tested on hardware, let `auto` use HD only on a cable. I tested the Switch Pro Controller (057E:2009) both wired and over Bluetooth.
+5. **Fall back in layers.** Missing DLL, engine creation failure, no DualSense speaker device appearing, or repeated rejected packets: drop to normal `SDL_RumbleGamepad`. Keep the 250 ms silence watchdog (section 3) running either way.
+
+---
+
+## Shipping to players
+
+- A DLL built from the current source needs no Visual C++ Redistributable (the C runtime is linked statically).
+- Release 0.3.1 and earlier DO need it. Either ship `vc_redist.x64.exe` with your build, or build the DLL yourself with `crt-static` (`.cargo/config.toml` in this repo does it; run `cargo build --release` from the repo directory, cargo ignores that file from elsewhere).
+- Put `renhdrum.dll` next to the exe, and compare its SHA-256 with the release's `SHA256SUMS.txt`.
 
 ---
 
@@ -65,7 +90,10 @@ static int rh_load(void) {
     if (rh.tried) return rh.create != NULL;
     rh.tried = 1;
     const char *why = NULL;
-    rh.dll = SDL_LoadObject("renhdrum.dll");
+    // Full path next to the exe, never a bare name (see the checklist, item 1)
+    char path[1024];
+    SDL_snprintf(path, sizeof path, "%srenhdrum.dll", SDL_GetBasePath());
+    rh.dll = SDL_LoadObject(path);
     if (!rh.dll) {
         why = "renhdrum.dll not found";
     } else {
@@ -279,9 +307,9 @@ WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ClearUSB, NULL, 0, false);
 ## 5. Validation Status & Turnkey Reference Kit
 
 The integration architecture and reliability fixes described above have been empirically validated on physical hardware across static recompilation projects:
-- **`Hookshot (v2.0.6)`** (OoT Switch 2 Recompiler): Confirmed fully functional authentic HD Rumble on **Nintendo Switch Pro Controller (Bluetooth Level 2)** and **Sony DualSense (4-channel 48 kHz float audio haptics via wired USB)** on physical hardware (November 9, 2026). Incorporates automatic `renhdrum_set_nx2_mode(2)` initialization for Switch 2 waveform curves.
+- **`Hookshot (v2.1.0)`** (OoT Switch 2 Recompiler): Rebased onto `v2.1.0` with **Nintendo Switch Pro Controller (Bluetooth Level 4 Compatible + 40 ms wired resend)** and **Sony DualSense (4-channel 48 kHz float audio haptics via wired USB / report `0x32` over Bluetooth)**, plus `renhdrum_set_nx2_mode(2)` and strict `major.minor` DLL version checks. Newer Hookshot releases already include built-in HD Rumble for Pro and Joy-Con controllers; the bridge adds DualSense haptics and crisp onset boost while blocking double rumble only on claimed pads so secondary pads keep Hookshot's native path.
 - **`totk-pc-recomp (v0.3.7)`**: Confirmed functional HD Rumble with wired Switch Pro Controller (dynamic loading, 1 ms tick thread, and silence watchdog).
 - **`LASRecomp`**: Verified runtime bridge operational at stable 60 FPS with controller recognition.
 
-A ready-to-use drop-in bridge implementation and reference patch for Hookshot v2.0.6 are available in [`integrations/recomp-c/`](../../integrations/recomp-c/).
+A ready-to-use drop-in bridge implementation and reference patch for Hookshot v2.1.0 are available in [`integrations/recomp-c/`](../../integrations/recomp-c/).
 

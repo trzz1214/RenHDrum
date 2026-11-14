@@ -30,7 +30,7 @@ graph TD
     subgraph Transport & Physical Hardware
         ENG -->|Subcommand 0x10| SDL[Patched SDL3 Core]
         SDL -->|USB 15 ms| SW_USB[Switch Controller USB]
-        SDL -->|BT Token Bucket| SW_BT[Switch Controller Bluetooth]
+        SDL -->|BT Detailed 5 ms / Compatible| SW_BT[Switch Controller Bluetooth]
         DSP -->|4-Ch 48 kHz PCM| DS_USB[DualSense VCM Haptics USB]
     end
 ```
@@ -62,7 +62,7 @@ graph TD
 | `src/status.rs` | Human-readable telemetry formatting for active rumble status. |
 | `src/play_report.rs` | Detailed logging and performance diagnostic report generator. |
 | `src/ipc.rs` | 4096-byte memory-mapped shared memory structures (`RenHDrumSharedMemory`). |
-| `src/nx2.rs` | Switch 2 Mode 2 translation: DualSense preset [3], Pro 1 preset [4] with low-frequency boost, mode state. |
+| `src/nx2.rs` | Switch 2 Mode 2 translation: DualSense noise floor (`<= 0.001 -> 0`, fixed L1 law in `dualsense::haptics`), Pro 1 `PRO_DEFAULT` (`T = 0.004`) with low-frequency boost, Xbox following `PRO_DEFAULT`, mode state. |
 | `src/test_pattern.rs` | Diagnostic test patterns and hearing test sequences. |
 
 ---
@@ -84,4 +84,4 @@ RenHDrum enforces a comprehensive 3-tier testing regimen across all commits:
 ## 4. Known Technical Limitations
 
 - **DualSense Wireless Limitation**: Windows and macOS generic Bluetooth stacks do not expose the 4-channel USB Audio Class endpoint for DualSense controllers; audio haptics are strictly supported over wired USB.
-- **Settings resolution**: `renhdrum_settings_resolve` still queries local override files and shared memory. There is no standalone in-memory resolver yet; hosts can fill `RenHdcSettings` directly instead.
+- **Settings resolution**: `renhdrum_settings_resolve` queries local override files and shared memory (Brontide only); other hosts use `renhdrum_settings_resolve_pure`, which uses only the config passed in.

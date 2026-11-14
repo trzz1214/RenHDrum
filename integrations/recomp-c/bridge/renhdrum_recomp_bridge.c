@@ -12,6 +12,8 @@
 #include <windows.h>
 
 #define RH_STALE_US 250000LL
+#define RH_RESEND_US 40000LL
+#define RH_MAX_PADS 8
 #define DS_CHUNK_FRAMES 256
 
 #ifndef SDLCALL
@@ -29,6 +31,7 @@ int hos_sdl_init(uint32_t subsystems);
 static struct {
     int tried;
     HMODULE dll;
+    uint32_t (*version)(void);
     RenHdcEngine *(*create)(bool, bool);
     void (*destroy)(RenHdcEngine *);
     int32_t (*defaults)(RenHdcSettings *);
@@ -68,6 +71,7 @@ static struct {
     void (*hid_free_enumeration)(void *);
 
     /* SDL3 audio */
+    void (*pump_events)(void);
     uint32_t *(*get_playback_devs)(int *);
     const char *(*get_dev_name)(uint32_t);
     int (*get_dev_format)(uint32_t, void *, int *);
@@ -112,6 +116,7 @@ static void init_sdl(void) {
         *(FARPROC *)&sdl.hid_enumerate = GetProcAddress(m, "SDL_hid_enumerate");
         *(FARPROC *)&sdl.hid_free_enumeration = GetProcAddress(m, "SDL_hid_free_enumeration");
 
+        *(FARPROC *)&sdl.pump_events = GetProcAddress(m, "SDL_PumpEvents");
         *(FARPROC *)&sdl.get_playback_devs = GetProcAddress(m, "SDL_GetAudioPlaybackDevices");
         *(FARPROC *)&sdl.get_dev_name = GetProcAddress(m, "SDL_GetAudioDeviceName");
         *(FARPROC *)&sdl.get_dev_format = GetProcAddress(m, "SDL_GetAudioDeviceFormat");
@@ -156,13 +161,48 @@ int rh_load(void) {
         hos_log("renhdrum: off (env)");
         return 0;
     }
-    rh.dll = LoadLibraryA("renhdrum.dll");
+
+    WCHAR exe_path[MAX_PATH];
+    DWORD exe_len = GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+    if (exe_len == 0 || exe_len >= MAX_PATH) {
+        hos_log("renhdrum: off (cannot resolve exe path)");
+        return 0;
+    }
+    const WCHAR *slash = NULL;
+    for (DWORD i = 0; i < exe_len; i++) {
+        if (exe_path[i] == L'\\' || exe_path[i] == L'/') {
+            slash = &exe_path[i];
+        }
+    }
+    if (!slash) {
+        hos_log("renhdrum: off (cannot resolve exe directory)");
+        return 0;
+    }
+    static const WCHAR dll_name[] = L"renhdrum.dll";
+    size_t dir_len = (size_t)(slash - exe_path) + 1;
+    size_t name_len = sizeof(dll_name) / sizeof(dll_name[0]); /* includes NUL */
+    if (dir_len + name_len > MAX_PATH) {
+        hos_log("renhdrum: off (dll path too long)");
+        return 0;
+    }
+    WCHAR dll_path[MAX_PATH];
+    memcpy(dll_path, exe_path, dir_len * sizeof(WCHAR));
+    memcpy(dll_path + dir_len, dll_name, name_len * sizeof(WCHAR));
+
+#ifndef LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+#define LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR 0x00000100
+#endif
+#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
+#define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#endif
+    rh.dll = LoadLibraryExW(dll_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!rh.dll) {
-        hos_log("renhdrum: off (renhdrum.dll not found)");
+        hos_log("renhdrum: off (renhdrum.dll not found beside exe)");
         return 0;
     }
     const char *why = NULL;
 #define RH_FN(field, name) *(FARPROC *)&rh.field = GetProcAddress(rh.dll, name); if (!rh.field && !why) why = name;
+    RH_FN(version, "renhdrum_version");
     RH_FN(create, "renhdrum_engine_create");
     RH_FN(destroy, "renhdrum_engine_destroy");
     RH_FN(defaults, "renhdrum_settings_default");
@@ -174,8 +214,17 @@ int rh_load(void) {
     if (why) {
         hos_log("renhdrum: off (%s missing)", why);
         FreeLibrary(rh.dll);
-        rh.dll = NULL;
-        rh.create = NULL;
+        memset(&rh, 0, sizeof(rh));
+        rh.tried = 1;
+        return 0;
+    }
+    uint32_t ver = rh.version();
+    if ((ver >> 8) != ((uint32_t)RENHDRUM_VERSION >> 8)) {
+        hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected branch 0x%04xxx)",
+                (unsigned)ver, (unsigned)((uint32_t)RENHDRUM_VERSION >> 8));
+        FreeLibrary(rh.dll);
+        memset(&rh, 0, sizeof(rh));
+        rh.tried = 1;
         return 0;
     }
     if (rh.set_nx2_mode) {
@@ -192,13 +241,89 @@ int rh_load(void) {
     return 1;
 }
 
+/* ---- Connected slot tracking (matched to pad_sdl.c MAX_PADS slots) ---- */
+static SRWLOCK rh_pads_lock = SRWLOCK_INIT;
+static void *rh_conn_pads[RH_MAX_PADS];
+static int rh_slot_claimed[RH_MAX_PADS];
+
+static void rh_pads_track(void *pad) {
+    if (!pad) return;
+    AcquireSRWLockExclusive(&rh_pads_lock);
+    int free_slot = -1;
+    for (int i = 0; i < RH_MAX_PADS; i++) {
+        if (rh_conn_pads[i] == pad) {
+            ReleaseSRWLockExclusive(&rh_pads_lock);
+            return;
+        }
+        if (!rh_conn_pads[i] && free_slot < 0) free_slot = i;
+    }
+    if (free_slot >= 0) {
+        rh_conn_pads[free_slot] = pad;
+        rh_slot_claimed[free_slot] = 0;
+    }
+    ReleaseSRWLockExclusive(&rh_pads_lock);
+}
+
+static void rh_pads_set_claimed(void *pad, int claimed) {
+    if (!pad) return;
+    AcquireSRWLockExclusive(&rh_pads_lock);
+    for (int i = 0; i < RH_MAX_PADS; i++) {
+        if (rh_conn_pads[i] == pad) {
+            rh_slot_claimed[i] = claimed ? 1 : 0;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&rh_pads_lock);
+}
+
+static void rh_pads_untrack(void *pad) {
+    AcquireSRWLockExclusive(&rh_pads_lock);
+    for (int i = 0; i < RH_MAX_PADS; i++) {
+        if (!pad || rh_conn_pads[i] == pad) {
+            rh_conn_pads[i] = NULL;
+            rh_slot_claimed[i] = 0;
+        }
+    }
+    ReleaseSRWLockExclusive(&rh_pads_lock);
+}
+
+int rh_pad_claimed(int i) {
+    if (i < 0 || i >= RH_MAX_PADS) return 0;
+    AcquireSRWLockShared(&rh_pads_lock);
+    int claimed = (rh_conn_pads[i] != NULL && rh_slot_claimed[i] != 0) ? 1 : 0;
+    ReleaseSRWLockShared(&rh_pads_lock);
+    return claimed;
+}
+
+static int rh_all_pads_claimed(void) {
+    AcquireSRWLockShared(&rh_pads_lock);
+    int total = 0, claimed = 0;
+    for (int i = 0; i < RH_MAX_PADS; i++) {
+        if (rh_conn_pads[i]) {
+            total++;
+            if (rh_slot_claimed[i]) claimed++;
+        }
+    }
+    ReleaseSRWLockShared(&rh_pads_lock);
+    return total > 0 && claimed == total;
+}
+
 /* ---- Pro Controller state ---- */
 static SRWLOCK rh_lock = SRWLOCK_INIT;
 static RenHdcEngine *rh_engine;
 static void *rh_active_pad;
 static void *rh_joy;
+static int rh_is_bt;
+static uint8_t rh_last_pkt[10];
+static int rh_has_last_pkt;
+static int64_t rh_last_send_us;
 static int64_t rh_at[2];
 static int rh_muted[2];
+
+static int rh_pkt_is_silent(const uint8_t p[10]) {
+    static const uint8_t neutral[4] = {0x00, 0x01, 0x40, 0x40};
+    return memcmp(p + 2, neutral, 4) == 0 && memcmp(p + 6, neutral, 4) == 0;
+}
 
 /* ---- DualSense state ---- */
 static SRWLOCK rh_ds_lock = SRWLOCK_INIT;
@@ -283,6 +408,9 @@ static void rh_ds_try_open_audio(void) {
 
     if (sdl.is_sdl3) {
         if (!sdl.get_playback_devs || !sdl.get_dev_name || !sdl.get_dev_format || !sdl.open_audio_stream) return;
+        /* The Windows build never pumps SDL events (no SDL window), and SDL3 only applies audio hotplug
+         * while pumping: without this a DualSense plugged in after start never shows up as a device. */
+        if (sdl.pump_events) sdl.pump_events();
         int count = 0;
         uint32_t *devs = sdl.get_playback_devs(&count);
         if (!devs) return;
@@ -315,12 +443,25 @@ static void rh_ds_try_open_audio(void) {
         }
         if (sdl.resume_audio_stream) sdl.resume_audio_stream(st);
 
+        int keep = 0;
+        void *pad = NULL;
         AcquireSRWLockExclusive(&rh_ds_lock);
-        rh_ds_stream = st;
+        if (rh_ds_dsp != NULL && rh_ds_stream == NULL) {
+            rh_ds_stream = st;
+            pad = rh_ds_active_pad;
+            keep = 1;
+        }
         ReleaseSRWLockExclusive(&rh_ds_lock);
 
-        if (sdl.rumble_pad && rh_ds_active_pad) {
-            sdl.rumble_pad(rh_ds_active_pad, 0, 0, 0);
+        if (!keep) {
+            if (sdl.pause_audio_stream) sdl.pause_audio_stream(st);
+            if (sdl.clear_audio_stream) sdl.clear_audio_stream(st);
+            if (sdl.destroy_audio_stream) sdl.destroy_audio_stream(st);
+            return;
+        }
+
+        if (sdl.rumble_pad && pad) {
+            sdl.rumble_pad(pad, 0, 0, 0);
         }
         hos_log("renhdrum: dualsense audio opened on \"%s\" (4 ch, 48000 Hz, attempt %d)",
                 matched_name ? matched_name : "DualSense", rh_ds_audio_attempts);
@@ -366,12 +507,24 @@ static void rh_ds_try_open_audio(void) {
         }
         if (sdl.pause_audio_device) sdl.pause_audio_device(dev, 0);
 
+        int keep = 0;
+        void *pad = NULL;
         AcquireSRWLockExclusive(&rh_ds_lock);
-        rh_ds_dev2 = dev;
+        if (rh_ds_dsp != NULL && rh_ds_dev2 == 0) {
+            rh_ds_dev2 = dev;
+            pad = rh_ds_active_pad;
+            keep = 1;
+        }
         ReleaseSRWLockExclusive(&rh_ds_lock);
 
-        if (sdl.rumble_pad && rh_ds_active_pad) {
-            sdl.rumble_pad(rh_ds_active_pad, 0, 0, 0);
+        if (!keep) {
+            if (sdl.pause_audio_device) sdl.pause_audio_device(dev, 1);
+            if (sdl.close_audio_device) sdl.close_audio_device(dev);
+            return;
+        }
+
+        if (sdl.rumble_pad && pad) {
+            sdl.rumble_pad(pad, 0, 0, 0);
         }
         hos_log("renhdrum: dualsense audio opened on \"%s\" (4 ch, 48000 Hz, attempt %d, SDL2)",
                 matched_name, rh_ds_audio_attempts);
@@ -460,10 +613,10 @@ static DWORD WINAPI rh_worker(void *arg) {
     uint8_t pkt[10];
     while (InterlockedCompareExchange(&rh_run, 1, 1) == 1) {
         int64_t now_us = hos_now_ns() / 1000;
-        int r = 0;
+        int send_pkt = 0;
         void *target = NULL;
 
-        /* Pro Controller watchdog & tick */
+        /* Pro Controller watchdog, tick, and wired-only 40 ms resend */
         AcquireSRWLockExclusive(&rh_lock);
         if (rh_engine) {
             for (int s = 0; s < 2; s++) {
@@ -472,12 +625,22 @@ static DWORD WINAPI rh_worker(void *arg) {
                     rh_muted[s] = 1;
                 }
             }
-            r = rh.tick(rh_engine, now_us, pkt);
+            int r = rh.tick(rh_engine, now_us, pkt);
+            if (r == 1) {
+                memcpy(rh_last_pkt, pkt, sizeof(pkt));
+                rh_has_last_pkt = !rh_pkt_is_silent(pkt);
+                rh_last_send_us = now_us;
+                send_pkt = 1;
+            } else if (!rh_is_bt && rh_has_last_pkt && (now_us - rh_last_send_us) >= RH_RESEND_US) {
+                memcpy(pkt, rh_last_pkt, sizeof(pkt));
+                rh_last_send_us = now_us;
+                send_pkt = 1;
+            }
             target = rh_joy ? rh_joy : rh_active_pad;
         }
         ReleaseSRWLockExclusive(&rh_lock);
 
-        if (r == 1 && target && sdl.send_effect) {
+        if (send_pkt && target && sdl.send_effect) {
             sdl.send_effect(target, pkt, 10);
         }
 
@@ -521,6 +684,7 @@ static void rh_ensure_worker(void) {
 
 void rh_attach(void *pad) {
     if (!pad) return;
+    rh_pads_track(pad);
     const char *off = getenv("HOOKSHOT_RENHDRUM");
     if (off && !strcmp(off, "0")) return;
     init_sdl();
@@ -546,6 +710,11 @@ void rh_attach(void *pad) {
     if (vid == 0x057E && pid == 0x2009) {
         if (!rh_load()) return;
 
+        AcquireSRWLockExclusive(&rh_lock);
+        int pro_busy = (rh_engine != NULL);
+        ReleaseSRWLockExclusive(&rh_lock);
+        if (pro_busy) return;
+
         RenHdcEngine *e = rh.create(bt != 0, true);
         if (!e) {
             hos_log("renhdrum: off (engine create failed)");
@@ -558,9 +727,9 @@ void rh_attach(void *pad) {
             return;
         }
         if (bt) {
-            s.bluetooth_level = 2; /* Level 2 (45 ms spacing) stable, avoids button input latency */
+            s.bluetooth_level = 4; /* Level 4 (Compatible): core handles pacing & 40 ms resend */
             const char *env_bt = getenv("HOOKSHOT_BT_LEVEL");
-            if (env_bt && atoi(env_bt) >= 1 && atoi(env_bt) <= 3) {
+            if (env_bt && atoi(env_bt) >= 1 && atoi(env_bt) <= 4) {
                 s.bluetooth_level = atoi(env_bt);
             }
         }
@@ -570,13 +739,23 @@ void rh_attach(void *pad) {
         void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
 
         AcquireSRWLockExclusive(&rh_lock);
+        if (rh_engine) {
+            ReleaseSRWLockExclusive(&rh_lock);
+            rh.destroy(e);
+            return;
+        }
         rh_engine = e;
         rh_active_pad = pad;
         rh_joy = joy;
+        rh_is_bt = bt ? 1 : 0;
+        memset(rh_last_pkt, 0, sizeof(rh_last_pkt));
+        rh_has_last_pkt = 0;
+        rh_last_send_us = 0;
         rh_at[0] = rh_at[1] = 0;
         rh_muted[0] = rh_muted[1] = 0;
         ReleaseSRWLockExclusive(&rh_lock);
 
+        rh_pads_set_claimed(pad, 1);
         rh_ensure_worker();
         if (bt) {
             hos_log("renhdrum: on (bluetooth level %d)", s.bluetooth_level);
@@ -593,6 +772,11 @@ void rh_attach(void *pad) {
             hos_log("renhdrum: off (dualsense dsp functions missing in renhdrum.dll)");
             return;
         }
+
+        AcquireSRWLockExclusive(&rh_ds_lock);
+        int ds_busy = (rh_ds_dsp != NULL);
+        ReleaseSRWLockExclusive(&rh_ds_lock);
+        if (ds_busy) return;
 
         if (bt) {
             if (!rh.ds_build_bt_report) {
@@ -673,9 +857,11 @@ void rh_attach(void *pad) {
                 InterlockedExchange(&rh_ds_bt_run, 0);
                 hos_log("renhdrum: off (cannot create dualsense bt worker thread)");
                 rh_detach(pad);
+                rh_pads_track(pad);
                 return;
             }
 
+            rh_pads_set_claimed(pad, 1);
             rh_ensure_worker();
             hos_log("renhdrum: on (dualsense bluetooth)");
             return;
@@ -688,6 +874,11 @@ void rh_attach(void *pad) {
         }
 
         AcquireSRWLockExclusive(&rh_ds_lock);
+        if (rh_ds_dsp) {
+            ReleaseSRWLockExclusive(&rh_ds_lock);
+            if (rh.ds_destroy) rh.ds_destroy(dsp);
+            return;
+        }
         rh_ds_dsp = dsp;
         rh_ds_active_pad = pad;
         rh_ds_is_bt = 0;
@@ -697,6 +888,7 @@ void rh_attach(void *pad) {
         rh_ds_muted[0] = rh_ds_muted[1] = 0;
         ReleaseSRWLockExclusive(&rh_ds_lock);
 
+        rh_pads_set_claimed(pad, 1);
         rh_ensure_worker();
         hos_log("renhdrum: on (dualsense usb)");
         rh_ds_try_open_audio();
@@ -706,6 +898,7 @@ void rh_attach(void *pad) {
 
 int rh_detach(void *pad) {
     int detached_any = 0;
+    rh_pads_untrack(pad);
 
     /* Pro Controller detach */
     AcquireSRWLockExclusive(&rh_lock);
@@ -715,6 +908,10 @@ int rh_detach(void *pad) {
         rh_engine = NULL;
         rh_active_pad = NULL;
         rh_joy = NULL;
+        rh_is_bt = 0;
+        memset(rh_last_pkt, 0, sizeof(rh_last_pkt));
+        rh_has_last_pkt = 0;
+        rh_last_send_us = 0;
         ReleaseSRWLockExclusive(&rh_lock);
 
         static const uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
@@ -757,8 +954,14 @@ int rh_detach(void *pad) {
             if (sdl.close_audio_device) sdl.close_audio_device(dev2);
         }
         if (bt_th) {
-            WaitForSingleObject(bt_th, 2000);
+            DWORD w = WaitForSingleObject(bt_th, 2000);
             CloseHandle(bt_th);
+            if (w != WAIT_OBJECT_0) {
+                hos_log("renhdrum: DualSense BT worker did not stop within 2000 ms (wait=0x%lx); skipping hid_close/ds_destroy",
+                        (unsigned long)w);
+                bt_hid = NULL;
+                dsp = NULL;
+            }
         }
         if (bt_hid && sdl.hid_close) {
             sdl.hid_close(bt_hid);
@@ -820,7 +1023,7 @@ int rh_vibration(int side, float al, float fl, float ah, float fh) {
     }
     ReleaseSRWLockExclusive(&rh_ds_lock);
 
-    return handled;
+    return (handled && rh_all_pads_claimed()) ? 1 : 0;
 }
 
 void rh_permit(int on) {

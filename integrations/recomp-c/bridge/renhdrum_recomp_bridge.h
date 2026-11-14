@@ -15,6 +15,7 @@ int rh_vibration(int side, float al, float fl, float ah, float fh);
 void rh_permit(int on);
 void rh_cleanup(void);
 int rh_is_active(void *pad);
+int rh_pad_claimed(int i);
 int rh_ds_render_frames(float *out, int frames);
 
 #ifdef __cplusplus

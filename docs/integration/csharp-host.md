@@ -3,7 +3,7 @@
 This guide covers integrating `renhdrum.dll` into managed C# / .NET applications and emulators (such as Ryujinx forks targeting SDL3).
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `🔬 Xbox One S (research)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 > [!WARNING]
 > **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**

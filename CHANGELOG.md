@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-14
+
+### Added
+- **Pure C ABI settings resolver (`renhdrum_settings_resolve_pure`)**: resolves `RenHdcConfig` into `RenHdcSettings` using only the struct passed by the host, ignoring `Brontide-App` shared memory, `%APPDATA%\RenHDrum\renhdrum-settings.txt`, and local flag files adjacent to the executable.
+- **Steam Controller (2026) grip audio (experimental)**: added `renhdrum_valve_grip_dsp_create` and `renhdrum_valve_grip_build_report` to synthesize both HD Rumble bands into 64-byte mu-law HID `0x88` reports (8 kHz wired USB, 4 kHz wireless dongle and Windows Bluetooth) with a per-band grip gain curve (-5 dB flat 40–500 Hz, -20 dB at 800 Hz). Built from hardware measurements by iafx (`RenHDrum#5`) and LiveHaptics' PCM stream discovery (MIT); I do not own the controller.
+
+### Changed
+- **DualSense, Switch 2 games**: one fixed law for every game (floor `0.001`, then `min(1, 3.5 * a^0.75)`) replaces the 4-marker curve (`preset [3]`) and the square root (`x^0.5`), keeping the 5.3 ms slot peak-hold, 4 ms smoothing, and 0.8 output ceiling (Switch 1 games are unchanged). No per-game gain.
+- **Pro Controller 1, Switch 2 games**: vibration at or below `0.004` is now silence instead of being lifted (`PRO_DEFAULT` cutoff threshold `T` raised from `0.001` to `0.004`), keeping the 4-marker curve (`0.048 / 0.240 / 0.640 / 0.950`) and the 25 ms 1.2x low-frequency (< 150 Hz) onset boost. Clearer, still detailed.
+- **Xbox One S, Switch 2 games**: now follows the Pro Controller curve (`PRO_DEFAULT`, `T = 0.004`, without the 1.2x boost), then the Switch 1 four-motor converter (replacing the separate `XBOX_DEFAULT` curve and per-beat arranger). Confirmed in *Ocarina of Time*, *Donkey Kong Bananza*, and *Mario Kart World*.
+- **Bluetooth**: the 5 ms envelope no longer depends on the Bluetooth level; it runs whenever the host sets `bt_fast` (same as Ryuhdr `HdApplyBtFast`). Levels 1–3 remain in the core for Ryuhdr compatibility.
+- **Bluetooth, Pro Controller**: two modes. **Detailed (5 ms)** is the most detailed; **Compatible** (level 4, new default when 5 ms is off or SDL is unpatched) sends the newest value at least 32 ms apart and resends every 40 ms while rumbling (even when the game keeps pushing identical samples), with no note accent. Idea from Hookshot PR #1213 by hckrman101, idea only, no code copied.
+- **Static CRT linkage**: `renhdrum.dll` is now linked with `+crt-static` and no longer requires the Visual C++ Redistributable at runtime.
+- `RENHDRUM_VERSION` is now `0x000400`.
+
+### Integrations
+- **`integrations/eden-switch2` (`0001`–`0019`)**: added Bluetooth Detailed (5 ms) / Compatible modes (`0011`), Switch 2 Mode 2 fallback curve and SDL packet-refusal fallback (`0012`–`0013`), per-controller wired DualSense speaker claim, Bluetooth haptics auto-restart, and lost-speaker recovery under lock (`0014`–`0017`), and Steam Controller (2026) grip support (`0018`–`0019`).
+- **`integrations/recomp-c`**: rebased reference patch onto Hookshot `v2.1.0`, added per-pad claim check (`rh_pad_claimed`), `IsOunceVibrationDeviceMounted` HLE, major.minor DLL version check, 40 ms wired resend, and lock/thread teardown safety.
+
+### Known Limitations
+- **DualSense**: a faint drum-like resonance remains on gravel scenes in *Donkey Kong Bananza* (voice-coil mechanical resonance around 75–175 Hz, not filtered).
+- **Xbox One S**: occasional abnormally strong rumble spikes in some scenes (under investigation).
+- **Joy-Con & Switch 2 Pro Controller**: Joy-Con shares the Pro Controller 1 curve and has not been measured separately; Switch 2 Pro Controller is not supported yet.
+- **Pro Controller 1 over Bluetooth**: right-stick drift can still occur when connecting mid-session.
+
 ## [0.3.1] - 2026-11-11
 
 ### Fixed
