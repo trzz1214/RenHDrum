@@ -1,315 +1,271 @@
 # Static Recompilation Games HD Rumble Integration Guide
 
-This guide describes how to integrate `renhdrum.dll` into C and C++ static recompilation runtimes using SDL3 to achieve authentic HD Rumble on physical gamepads. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
+This guide explains how I integrate `renhdrum.dll` (`0.4.x`) into C and C++ static recompilation runtimes using SDL3 (or SDL2) to deliver authentic HD Rumble across all four controllers supported by the core. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
+> **Supported Controllers**: `✅ Nintendo Pro Controller` · `✅ DualSense` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 ---
 
-## 1. Overview & Architectural Fit
+## Integration Checklist
 
-Static recompilation projects translate native console machine code into native C or C++ sources that link with an SDL3-based platform abstraction layer. In titles where the guest calls vibration services (such as `nn::hid::detail::SendVibrationValue` or `SendVibrationValues`), vanilla recomp runtimes typically downmix the 4-parameter haptic signal (`amp_low`, `freq_low`, `amp_high`, `freq_high`) into standard two-motor low/high frequency vibration (`SDL_RumbleGamepad`).
+Five checks I run before shipping any recomp integration. They come from real PR review lessons (`Goldoire/fefw-recomp#95`) and hardware testing across Hookshot `v2.2.0-rc.2`, `totk-pc-recomp`, and `LASRecomp`:
 
-By dynamically loading `renhdrum.dll` at runtime, the host runtime can synthesize authentic HD Rumble directly to connected hardware:
-- **Nintendo Switch Pro Controller 1**: Receives sub-command `0x10` multi-sample packets with dekuNukem LUT encoding at 15 ms cadence (USB) or token-bucket pacing (Bluetooth).
-- **PlayStation 5 DualSense**: Receives continuous 48 kHz audio-rate waveforms over wired USB or periodic HID report `0x32` over Bluetooth.
-- **Xbox One S**: Receives 4-motor tactile synthesis across grip and trigger motors (Switch 2 Mode 2 maps through the Pro curve first, then the Switch 1 converter).
-
-If `renhdrum.dll` is absent, or if the user disables it via an environment variable, the runtime cleanly falls back to two-motor `SDL_RumbleGamepad`.
+1. **Load `renhdrum.dll` by full path beside the executable.** Never pass a bare filename that searches CWD or `PATH`. Verify `(renhdrum_version() >> 8) == (RENHDRUM_VERSION >> 8)` (`0x0004xx`), and resolve optional per-controller functions as "use if present".
+2. **Apply intensity in one place only.** `volume_percent` in `renhdrum_dualsense_dsp_create` is already the final output gain; never scale samples again before pushing them. To change volume at runtime, recreate the DSP handle while keeping the audio stream open.
+3. **Respect the host's rumble and HD Rumble switches everywhere.** Turning rumble off must stop both RenHDrum haptics and plain motor rumble; turning HD Rumble off must release all claimed pads cleanly back to the host's built-in rumble.
+4. **Always route Switch Pro Bluetooth through the core's limiter.** **Compatible** (level 4, default) runs on unpatched SDL3 out of the box (newest value, 32 ms minimum spacing, 40 ms resend while rumbling). **Detailed (5 ms)** (`bt_fast`) requires idle-gated SDL3 transport patches. Never push raw unthrottled HID packets over Bluetooth.
+5. **Fall back in layers and avoid lock inversion.** Missing DLL, version mismatch, missing optional exports, missing DualSense speaker, or repeated write failures must degrade cleanly per pad. Always drop host locks before joining worker threads.
 
 ---
 
-## Integration checklist
+## 1. What You Need (`renhdrum.dll` 0.4.x and Header)
 
-Five things I would check before shipping an integration. They come from review of a real recomp port (fefw-recomp, PR #95) and from my own hardware tests.
+To integrate RenHDrum into a C/C++ recomp runtime:
 
-1. **Load the DLL by full path, next to the exe.** A bare name searches the working directory and `PATH`, so a stray copy can win. Check `renhdrum_version()` after loading, and load newer functions as "use if present" so an older DLL still works.
+- **`renhdrum.dll` (`0.4.x`)** placed directly beside the compiled game executable (Windows x64).
+- **[`include/renhdrum.h`](../../include/renhdrum.h)** (with `RENHDRUM_VERSION` in branch `0x0004xx`).
+- Optional drop-in reference implementation:
+  - [`integrations/recomp-c/bridge/renhdrum_recomp_bridge.c`](../../integrations/recomp-c/bridge/renhdrum_recomp_bridge.c)
+  - [`integrations/recomp-c/bridge/renhdrum_recomp_bridge.h`](../../integrations/recomp-c/bridge/renhdrum_recomp_bridge.h)
+  - [`integrations/recomp-c/reference/recomp-c-reference.patch`](../../integrations/recomp-c/reference/recomp-c-reference.patch) (complete reference patch against Hookshot `v2.2.0-rc.2`, GPL-3.0).
+
+You do **not** need to link against `renhdrum.dll.lib` or `SDL3.lib` at compile time. The reference bridge resolves `renhdrum.dll` with `LoadLibraryExW` and resolves SDL3/SDL2 functions at runtime with `GetModuleHandleA` + `GetProcAddress`.
+
+For Switch 2 titles (where guest commands use audio-range amplitudes and frequencies), call `renhdrum_set_nx2_mode(2)` right after loading the DLL. For Switch 1 titles, keep mode `0`.
+
+---
+
+## 2. Safe DLL Loading & Version Check
+
+Never call `LoadLibraryA("renhdrum.dll")` or `SDL_LoadObject("renhdrum.dll")` with a bare name: Windows searches the current working directory and `PATH`, allowing an older or unrelated DLL elsewhere on the system to hijack the load.
+
+Resolve the executable's own directory with `GetModuleFileNameW`, append `renhdrum.dll`, and load with restricted search flags:
+
+```c
+WCHAR exe_path[MAX_PATH];
+DWORD exe_len = GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+/* find last '\\' or '/' in exe_path, copy directory + L"renhdrum.dll" into dll_path */
+
+HMODULE dll = LoadLibraryExW(
+    dll_path,
+    NULL,
+    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32
+);
+```
+
+After loading:
+
+1. **Resolve required core exports** (`renhdrum_version`, `renhdrum_engine_create`, `renhdrum_engine_destroy`, `renhdrum_settings_default`, `renhdrum_engine_apply_settings`, `renhdrum_engine_push_half_sample`, `renhdrum_engine_tick`, `renhdrum_set_nx2_mode`). If any required symbol is missing, call `FreeLibrary` and disable the bridge.
+2. **Verify the `major.minor` branch**:
    ```c
-   wchar_t p[MAX_PATH]; GetModuleFileNameW(NULL, p, MAX_PATH);
-   wchar_t *s = wcsrchr(p, L'\\'); if (s) wcscpy(s + 1, L"renhdrum.dll");
-   HMODULE h = LoadLibraryExW(p, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+   uint32_t ver = rh.version();
+   if ((ver >> 8) != ((uint32_t)RENHDRUM_VERSION >> 8)) {
+       hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected branch 0x%04xxx)",
+               (unsigned)ver, (unsigned)((uint32_t)RENHDRUM_VERSION >> 8));
+       FreeLibrary(rh.dll);
+       /* zero rh struct, mark tried = 1, fall back to host rumble */
+       return 0;
+   }
    ```
-2. **Apply intensity in one place only.** `volume_percent` in `renhdrum_dualsense_dsp_create` is already the final factor; do not scale the samples again before pushing them. The core exports no C function to change it, so to change intensity destroy and recreate the DSP. The audio stream stays open.
-3. **The host's "rumble off" switch must stop everything.** Haptic output and plain two-motor rumble both. Check it in the one function every vibration call passes through.
-4. **Bluetooth always goes through the core's limiter.** Two modes: **Detailed (5 ms)** is the most detailed and requires SDL with idle-gated writes (the host enables `bt_fast`); **Compatible** (level 4, the default) runs on unpatched SDL out of the box—sending the newest value, spaced at least 32 ms apart, and resending every 40 ms while rumbling, with nothing extra to do. Legacy levels 1-3 are kept only to match Ryuhdr pacing and are not recommended for new integrations; the host never sends its own packets. If you have not tested on hardware, let `auto` use HD only on a cable. I tested the Switch Pro Controller (057E:2009) both wired and over Bluetooth.
-5. **Fall back in layers.** Missing DLL, engine creation failure, no DualSense speaker device appearing, or repeated rejected packets: drop to normal `SDL_RumbleGamepad`. Keep the 250 ms silence watchdog (section 3) running either way.
+   A `0.3.x` DLL (`0x0003xx`) is rejected cleanly so structural or ABI mismatches never cause crashes.
+3. **Load optional device exports as "use if present"**:
+   - DualSense DSP: `renhdrum_dualsense_dsp_create`, `renhdrum_dualsense_dsp_destroy`, `renhdrum_dualsense_dsp_set_half_target`, `renhdrum_dualsense_dsp_fill_f32`, `renhdrum_dualsense_dsp_build_bt_report`.
+   - Xbox One S 4-motor converter: `renhdrum_xbox_rumble_create`, `renhdrum_xbox_rumble_destroy`, `renhdrum_xbox_rumble_push_half_sample`, `renhdrum_xbox_rumble_tick`, `renhdrum_xbox_rumble_resend`.
+   - Steam Controller 2026 grips: `renhdrum_valve_grip_dsp_create`, `renhdrum_valve_grip_build_report`.
+   If an optional symbol is missing, only that controller type stays unclaimed and uses the host's standard rumble.
+4. **Support an environment kill switch** (e.g., `HOOKSHOT_RENHDRUM=0`) so users or testers can compare native vs. RenHDrum rumble without deleting the DLL.
 
 ---
 
-## Shipping to players
+## 3. The Two Hook Points (`vibration_send` and Per-Pad Loop)
 
-- A DLL built from the current source needs no Visual C++ Redistributable (the C runtime is linked statically).
-- Release 0.3.1 and earlier DO need it. Either ship `vc_redist.x64.exe` with your build, or build the DLL yourself with `crt-static` (`.cargo/config.toml` in this repo does it; run `cargo build --release` from the repo directory, cargo ignores that file from elsewhere).
-- Put `renhdrum.dll` next to the exe, and compare its SHA-256 with the release's `SHA256SUMS.txt`.
+Beyond lifecycle hooks (`rh_attach(gc)` on controller open, `rh_detach(gc)` on disconnect, and `atexit` cleanup before `SDL_CloseGamepad`), all runtime vibration routing goes through two hook points:
 
----
+### 3.1 Hook 1: Guest Vibration Entry (`host/nn_hid.c:vibration_send`)
 
-## 2. Runtime Dynamic Loading (`SDL_LoadObject`)
-
-Using `SDL_LoadObject` and `SDL_LoadFunction` avoids hard-linking against `renhdrum.dll.lib`, keeping compiler toolchains (such as MinGW Clang or MSVC) free of build-time dependencies.
-
-### 2.1 Function Pointer Table
+Intercept guest vibration values **before** the host's downmix (`rumble_map`) or built-in HD Rumble (`hos_sdl_rumble_hd`). Pass the raw, unscaled floats (`amp_low`, `freq_low`, `amp_high`, `freq_high`):
 
 ```c
-#include <SDL3/SDL.h>
-#include <stdint.h>
-#include <stdbool.h>
+const int dev = (G32(handle) >> 16) & 1;
+if (rh_vibration(dev, v[0], v[1], v[2], v[3])) {
+    return; /* Handled by RenHDrum for all connected pads */
+}
+rumble_map(v, amp[dev]);
+```
 
-#define RH_STALE_US 250000
+`rh_vibration` feeds all active RenHDrum engines (`Pro`, `DualSense`, `Xbox`, `Steam`) and returns `1` **only** when `handled && rh_all_pads_claimed()`. If an unclaimed secondary pad is also connected, `rh_vibration` returns `0` so the host still computes fallback values for that pad.
 
-typedef struct RenHdcEngine RenHdcEngine;
+Also wire:
+- `PermitVibration(bool)` → `rh_permit((int)ARG(0))` (pushes neutral `(0.0f, 160.0f, 0.0f, 320.0f)` to both sides when `0`).
+- Switch 2 HLE `IsOunceVibrationDeviceMounted` → return `1` (both overloads) so Switch 2 games see a mounted HD Rumble device.
 
-typedef struct {
-    uint32_t struct_size;
-    int32_t controller_type;
-    int32_t bt_level;
-    bool bt_after_input;
-    bool bt_fast;
-    bool usb_no_queue;
-    bool clamp_amplitudes;
-    bool zero_stale_half;
-    float amp_gain;
-    float high_freq_scale;
-    uint32_t flags;
-    uint8_t reserved[32];
-} RenHdcSettings;
+### 3.2 Hook 2: Per-Pad Poll Loop (`host/pad_sdl.c:pads_poll`)
 
-static struct {
-    int tried;
-    SDL_SharedObject *dll;
-    RenHdcEngine *(*create)(bool, bool);
-    void (*destroy)(RenHdcEngine *);
-    int32_t (*defaults)(RenHdcSettings *);
-    int32_t (*apply)(RenHdcEngine *, const RenHdcSettings *);
-    int32_t (*push)(RenHdcEngine *, int64_t, bool, float, float, float, float);
-    int32_t (*tick)(RenHdcEngine *, int64_t, uint8_t *);
-} rh;
+At the top of `pads_poll()`, sync the menu option to the bridge (`rh_set_enabled(rx_option(HOS_OPT_HD_RUMBLE, 1) != 0)`). Then, inside the per-pad loop, skip the host's built-in HD Rumble and motor rumble **only** for slots claimed by RenHDrum:
 
-static int rh_load(void) {
-    if (rh.tried) return rh.create != NULL;
-    rh.tried = 1;
-    const char *why = NULL;
-    // Full path next to the exe, never a bare name (see the checklist, item 1)
-    char path[1024];
-    SDL_snprintf(path, sizeof path, "%srenhdrum.dll", SDL_GetBasePath());
-    rh.dll = SDL_LoadObject(path);
-    if (!rh.dll) {
-        why = "renhdrum.dll not found";
-    } else {
-#define RH_FN(f, name) \
-        *(SDL_FunctionPointer *)&rh.f = SDL_LoadFunction(rh.dll, name); \
-        if (!rh.f && !why) why = name " missing"
-
-        RH_FN(create, "renhdrum_engine_create");
-        RH_FN(destroy, "renhdrum_engine_destroy");
-        RH_FN(defaults, "renhdrum_settings_default");
-        RH_FN(apply, "renhdrum_engine_apply_settings");
-        RH_FN(push, "renhdrum_engine_push_half_sample");
-        RH_FN(tick, "renhdrum_engine_tick");
-#undef RH_FN
-    }
-    if (why) {
-        rh.create = NULL;
-        SDL_Log("renhdrum: disabled (%s)", why);
-    }
-    return rh.create != NULL;
+```c
+if (rh_pad_claimed(i)) continue;
+if (hd_poll(i, side, now)) continue;
+if (rumble_due(lo, hi, pads[i].rumble_lo, pads[i].rumble_hi, now, pads[i].rumble_ns)) {
+    hos_sdl_pad_rumble(gc, lo, hi, lo || hi ? 1000 : 0);
 }
 ```
 
----
+### 3.3 1 ms Worker Thread, 250 ms Silence Watchdog & Lock Discipline
 
-## 3. 1 ms Tick Thread, 250 ms Silence Watchdog & Lock Ordering
+Games frequently stop sending vibration commands when paused or loading without sending an explicit zero packet. The worker thread tracks timestamps (`rh_at[2]`, `rh_ds_at[2]`, `rh_xb_at[2]`, `rh_sv_at[2]`) per side and injects `(0.0f, 160.0f, 0.0f, 320.0f)` after `RH_STALE_US` (`250000` µs) of silence.
 
-Because physical HD Rumble requires steady packet pacing (15 ms intervals for USB Pro Controller) regardless of game rendering framerates, the runtime dispatches a dedicated 1 ms background worker thread.
-
-### 3.1 Silence Watchdog (250 ms)
-
-When a game pauses, displays a static menu, or hits a loading screen, guest vibration calls cease immediately without issuing an explicit zero-amplitude packet `(0.0, 160.0, 0.0, 320.0)`.
-
-To prevent motors from buzzing indefinitely, the tick thread checks elapsed time for each side: if no update has arrived for longer than `RH_STALE_US` (250,000 microseconds), it injects a neutral silence sample `(0.0f, 160.0f, 0.0f, 320.0f)`.
-
-### 3.2 Strict Lock Ordering
-
-To prevent deadlocks between the host controller mutex and the engine mutex:
-- **Lock Hierarchy**: `host_lock` -> `rh_lock`.
-- **Golden Rule**: Never acquire `host_lock` while holding `rh_lock`.
-- **Detaching Cleanly**: In `rh_detach()`, release `host_lock` before joining the tick worker thread (the worker may be waiting for `host_lock` to complete an in-flight `SDL_SendJoystickEffect`). Once joined, re-acquire `host_lock`, transmit a standard silence packet, and destroy the engine.
-
-### 3.3 Implementation Example
-
-```c
-static RenHdcEngine *rh_engine;          // Guarded by rh_lock
-static SDL_Joystick *rh_joy;             // Guarded by host_lock
-static SDL_Mutex *rh_lock;
-static SDL_Thread *rh_thread;            // Guarded by host_lock
-static int rh_run = 0;
-static int rh_detaching = 0;
-static int64_t rh_at[2];                 // Guarded by rh_lock: timestamp in microseconds
-static int rh_muted[2];                  // Guarded by rh_lock: muted state flag
-
-static int rh_worker(void *data) {
-    (void)data;
-    uint8_t pkt[10];
-    while (SDL_GetAtomicInt((SDL_AtomicInt *)&rh_run)) {
-        int64_t now_us = (int64_t)(SDL_GetTicksNS() / 1000);
-        int send_ready = 0;
-
-        SDL_LockMutex(rh_lock);
-        if (rh_engine) {
-            for (int s = 0; s < 2; s++) {
-                if (rh_at[s] && !rh_muted[s] && (now_us - rh_at[s] > RH_STALE_US)) {
-                    rh.push(rh_engine, now_us, s == 1, 0.0f, 160.0f, 0.0f, 320.0f);
-                    rh_muted[s] = 1;
-                }
-            }
-            send_ready = rh.tick(rh_engine, now_us, pkt);
-        }
-        SDL_UnlockMutex(rh_lock);
-
-        if (send_ready == 1) {
-            SDL_LockMutex(host_lock);
-            if (rh_joy) {
-                SDL_SendJoystickEffect(rh_joy, pkt, 10);
-            }
-            SDL_UnlockMutex(host_lock);
-        }
-        SDL_DelayNS(1000000); // 1 ms pacing
-    }
-    return 0;
-}
-
-// Call under host_lock when a supported controller is opened
-void rh_attach(SDL_Gamepad *pad) {
-    const char *off = SDL_getenv("RECOMP_RENHDRUM");
-    if (off && strcmp(off, "0") == 0) return;
-
-    // Check for Switch Pro Controller (057E:2009)
-    if (SDL_GetGamepadVendor(pad) != 0x057E || SDL_GetGamepadProduct(pad) != 0x2009) return;
-    if (!rh_load()) return;
-
-    bool is_bt = (SDL_GetGamepadConnectionState(pad) == SDL_JOYSTICK_CONNECTION_WIRELESS);
-    RenHdcEngine *e = rh.create(is_bt, true);
-    RenHdcSettings s;
-    if (!e || rh.defaults(&s) != 0) {
-        if (e) rh.destroy(e);
-        return;
-    }
-
-    // Standard SDL3 without custom transport patches
-    s.usb_no_queue = false;
-    s.bt_after_input = false;
-    s.bt_fast = false;
-    rh.apply(e, &s);
-
-    rh_joy = SDL_GetGamepadJoystick(pad);
-
-    SDL_LockMutex(rh_lock);
-    rh_engine = e;
-    rh_at[0] = rh_at[1] = 0;
-    rh_muted[0] = rh_muted[1] = 0;
-    SDL_UnlockMutex(rh_lock);
-
-    SDL_SetAtomicInt((SDL_AtomicInt *)&rh_run, 1);
-    rh_thread = SDL_CreateThread(rh_worker, "renhdrum_tick", NULL);
-}
-
-// Call under host_lock before closing gamepad
-void rh_detach(void) {
-    if (!rh_thread) return;
-    SDL_Thread *t = rh_thread;
-    rh_thread = NULL;
-    SDL_SetAtomicInt((SDL_AtomicInt *)&rh_run, 0);
-
-    // Drop host_lock while joining to prevent deadlock with worker
-    SDL_UnlockMutex(host_lock);
-    SDL_WaitThread(t, NULL);
-    SDL_LockMutex(host_lock);
-
-    static const uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
-    if (rh_joy) {
-        SDL_SendJoystickEffect(rh_joy, stop_pkt, sizeof(stop_pkt));
-        rh_joy = NULL;
-    }
-
-    SDL_LockMutex(rh_lock);
-    if (rh_engine) {
-        rh.destroy(rh_engine);
-        rh_engine = NULL;
-    }
-    SDL_UnlockMutex(rh_lock);
-}
-
-// Public API called when guest sends vibration value
-int rh_push_sample(int side, float al, float fl, float ah, float fh) {
-    if (side < 0 || side > 1) return 0;
-    int handled = 0;
-
-    SDL_LockMutex(rh_lock);
-    if (rh_engine) {
-        int64_t now_us = (int64_t)(SDL_GetTicksNS() / 1000);
-        rh.push(rh_engine, now_us, side == 1, al, fl, ah, fh);
-        rh_at[side] = now_us;
-        rh_muted[side] = 0;
-        handled = 1;
-    }
-    SDL_UnlockMutex(rh_lock);
-    return handled;
-}
-```
+Follow strict lock discipline:
+- Never acquire the host mutex while holding a bridge lock (`rh_lock`, `rh_ds_lock`, `rh_xb_lock`, `rh_sv_lock`).
+- Release bridge locks **before** calling `SDL_SendJoystickEffect`, `SDL_RumbleJoystick`, or `SDL_RumbleJoystickTriggers`.
+- On detach, clear the engine pointers under the lock, release the lock, then stop devices and `WaitForSingleObject(thread, 2000)` outside the lock. If a worker thread fails to stop within 2000 ms, log and skip `hid_close` / `destroy` rather than risking a use-after-free or shutdown hang.
 
 ---
 
-## 4. Pro Controller Reliability Fixes (Usable Even Without HD Rumble)
+## 4. The Four Supported Controllers and How Each Is Detected
 
-Empirical testing across static recompilation projects uncovered two hardware and driver quirks specific to the Nintendo Switch Pro Controller on Windows. These fixes improve control stability regardless of whether HD Rumble is active.
+### 4.1 Nintendo Switch Pro Controller (`057E:2009`)
+- **Detection**: `vid == 0x057E && pid == 0x2009`.
+- **Engine**: `renhdrum_engine_create(bt != 0, true)` with `renhdrum_settings_default(&s)`.
+- **Bluetooth**: Default to `s.bluetooth_level = 4` (**Compatible** — 32 ms spacing, newest value, 40 ms resend handled inside the core, safe on unpatched SDL3). Allow optional `HOOKSHOT_BT_LEVEL=1..4` override. Keep `usb_no_queue = bt_after_input = bt_fast = false` when targeting unpatched SDL3.
+- **Output**: 10-byte sub-command `0x10` packets via `SDL_SendJoystickEffect`. Over USB, if no new non-silent packet was sent for `40 ms` (`RH_RESEND_US = 40000`), resend the last non-silent packet so the controller's hardware watchdog does not drop sustained rumbles. On detach, send the neutral packet `{0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40}`.
 
-### 4.1 Right Stick Upward Drift Fix (`|offset| > 0.5f -> 0.0f`)
+### 4.2 Sony DualSense / DualSense Edge (`054C:0CE6` / `0x0DF2`)
+- **Detection**: `vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)`.
+- **Wired USB**: Create `renhdrum_dualsense_dsp_create(100, true)`. Initialize SDL audio (`hos_sdl_init(0x10)`), **call `SDL_PumpEvents()` first** (Windows recomp builds with Vulkan windows often never pump SDL events, so SDL3 audio hotplug never registers a DualSense plugged in after startup without pumping), then enumerate playback devices matching `"DualSense"` or `"Wireless Controller"` with `channels >= 4`. Open a 4-channel `48000 Hz` `SDL_AUDIO_F32` stream (`0x8120`). Retry every 2 seconds if the audio endpoint appears late, and clear SDL's HID rumble (`SDL_RumbleGamepad(pad, 0, 0, 0)`) once opened.
+- **Bluetooth**: Create `renhdrum_dualsense_dsp_create(100, false)` (`crisp_notes = false` for cleaner Bluetooth notes). Open the controller's HID path via `SDL_GetGamepadPath` / `SDL_GetJoystickPath` (falling back to `SDL_hid_enumerate(vid, pid)`), stop SDL's motor rumble, and spawn a dedicated high-resolution timer thread sending `142`-byte report `0x32` every `RENHDRUM_DS5_BT_PERIOD_NS` (`10666666` ns) via `renhdrum_dualsense_dsp_build_bt_report(dsp, RENHDRUM_DS5_BT_BUFFER_LENGTH_DEFAULT, report)`. Gate transmission 2 seconds after the last active vibration so the Bluetooth radio stays idle when silent.
 
-#### The Problem
-During analog stick calibration or when switching between standard HID reports and full-report sub-commands, stale calibration offsets (such as `offset_y: 0.939940`) can become permanently trapped in configuration memory. The runtime treats this spurious offset as genuine center position, causing the in-game camera to slowly pan upward continuously.
+### 4.3 Microsoft Xbox One S / Xbox Series (`XBOXONE` or VID `0x045E`)
+- **Detection**: `SDL_GetGamepadType(pad) == 3` (`SDL_GAMEPAD_TYPE_XBOXONE` in SDL3; `2` in SDL2) **or** `vid == 0x045E` (third-party XInput pads may report another SDL type).
+- **Engine**: `renhdrum_xbox_rumble_create(xb_bt != 0)`. If SDL cannot determine the connection type, treat it as Bluetooth (`20 ms` cadence instead of `10 ms` USB).
+- **Rule**: Do **not** invent custom motor ratios or curves in the bridge. The core owns the `XBOX_DEFAULT` / `PRO_DEFAULT` mapping and returns exact 16-bit motor amplitudes.
+- **Output**: `renhdrum_xbox_rumble_tick` fills `uint16_t motors[4]` (`left grip, right grip, left trigger, right trigger`). Outside the lock, call `SDL_RumbleJoystick(joy, motors[0], motors[1], 2000)` and `SDL_RumbleJoystickTriggers(joy, motors[2], motors[3], 200)`. Keep trigger duration short (`200 ms`) so a dropped packet never leaves triggers stuck on. Note that SDL3's `SDL_RumbleJoystick` returns `bool` (`(r & 0xFF) != 0`), whereas SDL2 returns `0` on success. If the send fails (common on `rawinput` before the first button press), call `renhdrum_xbox_rumble_resend(rh_xb)` so the next tick retries. Zero all four motors on detach.
+- **Note on triggers**: Trigger motors require SDL `rawinput` or `Windows.Gaming.Input`; XInput exposes grips only. See [xbox.md](xbox.md).
 
-#### The Fix
-When initializing stick axes or processing analog properties, validate that the calibrated center offset does not exceed a reasonable deadzone threshold (0.50f). If it exceeds 0.50f, clamp it to neutral zero:
-
-```c
-// When setting up analog stick mapping parameters:
-if (fabsf(offset_x) > 0.5f) {
-    offset_x = 0.0f;
-}
-if (fabsf(offset_y) > 0.5f) {
-    offset_y = 0.0f;
-}
-```
-
-### 4.2 Stuck Left Stick / Errant Button Inputs on Exit (`ClearUSB` / `SDL_CloseGamepad`)
-
-#### The Problem
-Many static recompilation runtimes terminate execution quickly via `plat_exit` (which calls `ExitProcess`) without executing standard controller cleanup.
-
-When connected via USB cable, the Switch Pro Controller operates in high-rate proprietary reporting mode (`0x30`). If the host process exits abruptly without issuing a teardown command, the controller remains trapped in mode `0x30`. The Windows generic HID driver interprets these raw proprietary packets as standard DirectInput axes, causing:
-- Left analog stick locked at extreme upper position (`Y = 9472` instead of neutral `32767`).
-- Errant, continuous button cycling across the desktop.
-- Requires physically unplugging and replugging the USB cable to reset the gamepad.
-
-#### The Fix
-1. **Always invoke `SDL_CloseGamepad` prior to process termination**: Never bypass controller shutdown in fast exit paths.
-2. **Dispatch `ClearUSB` in SDL HIDAPI Driver**:
-   In `src/joystick/hidapi/SDL_hidapi_switch.c` inside `HIDAPI_DriverSwitch_CloseJoystick`:
-
-```c
-// Ensure the controller leaves proprietary reporting mode
-WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ClearUSB, NULL, 0, false);
-```
+### 4.4 Steam Controller 2026 (`0x28DE`, PIDs `0x1302` / `0x1303` / `0x1304`, Experimental)
+- **Detection**: `vid == 0x28DE` and `pid == 0x1302` (wired, 8 kHz mu-law `RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K`, `3.875 ms` period), `0x1303` (Bluetooth, 4 kHz `RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K`, `7.75 ms`), or `0x1304` (dongle, 4 kHz).
+- **Steam Input stand-in avoidance**: Always check `SDL_GetGamepadSteamHandle(pad) != 0`. Steam Input creates a virtual stand-in gamepad alongside the physical HID device; **never** claim the stand-in pad. If a stand-in pad is already tracked, skip claiming the real Steam Controller; if a stand-in opens after grips already started, stop the grip worker (`rh_sv_stop`) and clear its claim bit so rumble does not double-fire.
+- **Output**: Open the HID path (`SDL_hid_open_path`), create `renhdrum_valve_grip_dsp_create(100, true)`, clear SDL motor rumble, and run a dedicated high-resolution thread:
+  1. Send HID report `0x86` `{0x86, op, ch, format}` on channels `2` and `5` (`op = 1` off, sleep `10 ms`, `op = 2` on with `format`, sleep `200 ms` settle).
+  2. Call `renhdrum_valve_grip_build_report(dsp, format, report)` and `SDL_hid_write` (`64` bytes, report `0x88`) at the format period while active plus a `100 ms` tail (`RH_STEAM_TAIL_NS`).
+  3. On `100` consecutive write failures (`RH_STEAM_FAILS_MAX`), stop and release the claim bit (`rh_pads_set_claimed(pad, 0)`) so the pad falls back to host rumble.
+  4. On stop, send `0x86` `op = 1` (off) on channels `2` and `5` before closing the HID handle.
+- Always label Steam Controller 2026 support as **experimental** in UI text and docs.
 
 ---
 
-## 5. Validation Status & Turnkey Reference Kit
+## 5. Toggling HD Rumble & Locking Intensity
 
-The integration architecture and reliability fixes described above have been empirically validated on physical hardware across static recompilation projects:
-- **`Hookshot (v2.1.0)`** (OoT Switch 2 Recompiler): Rebased onto `v2.1.0` with **Nintendo Switch Pro Controller (Bluetooth Level 4 Compatible + 40 ms wired resend)** and **Sony DualSense (4-channel 48 kHz float audio haptics via wired USB / report `0x32` over Bluetooth)**, plus `renhdrum_set_nx2_mode(2)` and strict `major.minor` DLL version checks. Newer Hookshot releases already include built-in HD Rumble for Pro and Joy-Con controllers; the bridge adds DualSense haptics and crisp onset boost while blocking double rumble only on claimed pads so secondary pads keep Hookshot's native path.
-- **`totk-pc-recomp (v0.3.7)`**: Confirmed functional HD Rumble with wired Switch Pro Controller (dynamic loading, 1 ms tick thread, and silence watchdog).
-- **`LASRecomp`**: Verified runtime bridge operational at stable 60 FPS with controller recognition.
+In the reference Hookshot integration (`gpu/vk/vk_menu.cpp`, `gpu/vk/vk_replay.cpp`):
 
-A ready-to-use drop-in bridge implementation and reference patch for Hookshot v2.1.0 are available in [`integrations/recomp-c/`](../../integrations/recomp-c/).
+1. **Menu option**: Add `opts.hd_rumble` (default `1`), persisted to INI (`hd_rumble`) and marked `preset_exempt = true` so graphics presets never toggle rumble. Forward it to the host via `HOS_OPT_HD_RUMBLE` (`rx_option(HOS_OPT_HD_RUMBLE, 1)`).
+2. **Runtime enable/disable (`rh_set_enabled`)**:
+   - Calling `rh_set_enabled(0)` detaches every active RenHDrum engine (`rh_detach_engines(NULL, 0)`) and clears `rh_slot_claimed[]` while **keeping** `rh_conn_pads[]` tracked. `rh_pad_claimed(i)` and `rh_vibration` immediately return `0`.
+   - Calling `rh_set_enabled(1)` re-attaches every tracked pad in `rh_conn_pads[]`.
+3. **Locking "Rumble strength"**:
+   - While `opts.hd_rumble != 0`, lock the **Rumble strength** row (`row_fixed(&opts.rumble)` returns `true` so arrow keys, clicks, and `set_row` cannot alter it) and display `"-"` in the value cell.
+   - Keep the underlying `opts.rumble` value untouched in memory and INI so turning HD Rumble off immediately restores the user's previous Rumble strength percentage.
+4. **Live status line (`rh_status_line`)**:
+   Expose a 1-line status callback to the menu (`MkwVkHost::hd_rumble_status`) returning the active hardware state:
+   - `"HD Rumble is off: using normal rumble"`
+   - `"Connected: Pro Controller (USB), HD Rumble"` / `"(Bluetooth)"`
+   - `"Connected: DualSense (USB), HD Rumble"` / `"(Bluetooth)"`
+   - `"Connected: Xbox One S, HD Rumble (4 motors)"`
+   - `"Steam Controller: HD Rumble (experimental)"`
+   - `"No controller HD Rumble supports: normal rumble"`
 
+---
+
+## 6. Coexisting with a Recomp's Native HD Rumble
+
+Newer recomp runtimes such as Hookshot (`v2.2.0-rc.2`) already implement native HD Rumble for Switch Pro and Joy-Con (`host/hd_rumble.h`, `hd_poll` in `host/pad_sdl.c`). To coexist cleanly without double rumble or breaking secondary pads:
+
+1. **Per-pad claim gating**: `pads_poll()` checks `if (rh_pad_claimed(i)) continue;` before both `hd_poll()` and `rumble_due()`. Claimed slots are driven solely by RenHDrum; unclaimed slots (such as Joy-Con or unsupported pads) continue using the host's native `hd_poll` or motor rumble.
+2. **All-pads check in `vibration_send`**: `rh_vibration()` updates every claimed engine and returns `1` only if `handled && rh_all_pads_claimed()`. If Player 1 has a DualSense (claimed) and Player 2 has a Joy-Con (unclaimed), `rh_vibration()` returns `0` so `nn_hid.c` still passes the sample to the host for Player 2, while `rh_pad_claimed(0)` skips Player 1 in `pads_poll()`.
+3. **Clean handoff when disabled**: Toggling **HD Rumble** off sets `rh_set_enabled(0)`, releasing all claimed pads immediately so Hookshot's built-in Pro/Joy-Con HD Rumble (and motor rumble on other pads) resumes without restarting the game.
+
+---
+
+## 7. Building `renhdrum.dll` with `crt-static`
+
+Shipping a dynamically linked MSVC C runtime (`VCRUNTIME140.dll`) causes `LoadLibraryExW` to fail silently on Windows machines that do not have the Visual C++ Redistributable installed.
+
+The `RenHDrum` repository includes `.cargo/config.toml`:
+
+```toml
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+```
+
+When building from source:
+
+1. **Run `cargo build --release` from inside the `RenHDrum` repository directory** (Cargo only reads `.cargo/config.toml` from the working directory or its ancestors; if invoked from outside, pass `RUSTFLAGS="-C target-feature=+crt-static"` explicitly).
+2. **Verify dependencies** with Visual Studio's `dumpbin`:
+   ```powershell
+   dumpbin /dependents target\release\renhdrum.dll
+   ```
+   Confirm only OS DLLs (`KERNEL32.dll`, `ntdll.dll`, `api-ms-win-core-synch-*`, etc.) appear and `VCRUNTIME140.dll` is **not** listed.
+3. **Package `renhdrum.dll`** next to the compiled executable (`BESIDE` in `nx2/make_game.py` and `nx2/build.py`) and compare its SHA-256 against `SHA256SUMS.txt`.
+
+---
+
+## 8. Self-Test Checklist
+
+Before considering an integration complete, verify every case below (using mock DLL tests for automated CI plus hardware checks where available):
+
+- [ ] **Missing DLL**: Removing `renhdrum.dll` falls back to host rumble with zero crashes.
+- [ ] **Incompatible DLL version**: A `0.3.x` DLL (`0x000302`) or a DLL missing `renhdrum_version` is rejected and unloaded (`FreeLibrary`).
+- [ ] **Missing optional exports**: A `0.4.x` DLL lacking `renhdrum_valve_grip_*` or `renhdrum_xbox_rumble_*` leaves only that controller unclaimed while Pro/DualSense still work.
+- [ ] **Controls menu & INI**: `"HD Rumble"` appears directly above `"Rumble strength"`, defaults to on, locks `"Rumble strength"` to `"-"`, preserves saved `rumble_strength` in INI, and updates `rh_status_line()`.
+- [ ] **Runtime toggle**: Turning HD Rumble off mid-session detaches engines and restores host rumble; turning it back on re-attaches connected pads.
+- [ ] **Multi-pad isolation**: With one claimed pad and one unclaimed pad, `rh_vibration` returns `0` and `rh_pad_claimed` skips only the claimed slot.
+- [ ] **Switch Pro Controller (USB & BT)**: Verified `0x10` packets, 40 ms wired resend on sustained rumble, Bluetooth Level 4 pacing, and clean `SDL_CloseGamepad` on exit so wired Pro leaves `0x30` mode.
+- [ ] **DualSense (USB & BT)**: Verified 4-ch 48 kHz audio stream opens even when plugged in after launch (`SDL_PumpEvents`), hotplug unplug/replug does not crash, and Bluetooth report `0x32` sends cleanly.
+- [ ] **Xbox One S**: Verified 4-motor tick (`grips` + `triggers`), `xb_resend` retry on failure, and all 4 motors zeroed on detach.
+- [ ] **Steam Controller 2026 (experimental)**: Verified `0x86` mode on/off + 64-byte `0x88` reports, and verified Steam Input stand-in pad prevents double rumble in both attach orders.
+- [ ] **250 ms silence watchdog**: Pausing or entering a static menu stops rumble cleanly within ~250 ms.
+- [ ] **`crt-static` check**: `dumpbin /dependents renhdrum.dll` shows no `VCRUNTIME140.dll`.
+
+---
+
+## 9. Lessons from PR #95 (`Goldoire/fefw-recomp`)
+
+Real-world review of PR #95 on *Fire Emblem: Fortune's Weave* recomp (`Goldoire/fefw-recomp`, `v0.1.7`, `renhdrum.dll` `0.3.0`) surfaced six concrete pitfalls that shaped this guide:
+
+1. **Loading by bare DLL name**: Searching CWD and `PATH` allowed stray DLL copies to win. **Fix**: resolve the exe directory with `GetModuleFileNameW` and call `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`.
+2. **Dynamic CRT (`VCRUNTIME140.dll`) dependency**: Players without the VC++ Redistributable silently lost haptics. **Fix**: build `renhdrum.dll` with `+crt-static` and verify with `dumpbin /dependents`.
+3. **Rumble-off toggle bypassed by haptics**: Disabling rumble in settings left RenHDrum active. **Fix**: enforce the master toggle at the single entry point and detach/yield all engines when disabled.
+4. **Double intensity scaling & audio stream reopening**: `volume_percent` in `renhdrum_dualsense_dsp_create` is already the final gain; scaling samples again squared the attenuation (40% became ~16%), and recreating the SDL audio stream on slider drag caused pops. **Fix**: scale in one place only, and recreate only the DSP handle while keeping the stream open.
+5. **Unthrottled Switch Pro Bluetooth**: Bypassing the core's limiter caused input lag (#26). **Fix**: always route Bluetooth through `RenHdcEngine` (`bluetooth_level = 4` Compatible by default on unpatched SDL3).
+6. **Deadlock risk & missing layered fallbacks**: Joining a worker thread while holding the host controller mutex deadlocks if the worker waits on that mutex to send a packet. **Fix**: establish strict lock ordering, drop host locks before `WaitForSingleObject` / `SDL_WaitThread`, and fall back to standard rumble across every failure layer.
+
+---
+
+## 10. Pro Controller Reliability Fixes (Usable Even Without HD Rumble)
+
+Testing across static recompilation projects uncovered two Windows driver quirks specific to the Nintendo Switch Pro Controller. These fixes apply even when HD Rumble is turned off:
+
+### 10.1 Right Stick Upward Drift Fix (`|offset| > 0.5f -> 0.0f`)
+When switching between standard HID reports and full-report sub-commands, stale calibration offsets (such as `offset_y: 0.939940`) can stick in configuration memory and cause continuous upward camera drift. Clamp any stick center offset exceeding `0.50f` to `0.0f`:
+
+```c
+if (fabsf(offset_x) > 0.5f) offset_x = 0.0f;
+if (fabsf(offset_y) > 0.5f) offset_y = 0.0f;
+```
+
+### 10.2 Stuck Left Stick / Errant Inputs on Exit (`SDL_CloseGamepad` / `ClearUSB`)
+Many recomp runtimes exit abruptly via `ExitProcess` without closing controllers. Because a wired Switch Pro Controller runs in proprietary mode `0x30`, leaving it open traps it in `0x30` until physically unplugged, which Windows DirectInput misreads as a stuck upper-left stick (`Y = 9472` instead of `32767`) and spurious button presses.
+
+1. **Always call `SDL_CloseGamepad` at exit** (for example inside an `atexit` handler after detaching RenHDrum).
+2. If you ship a custom SDL3 build, ensure `HIDAPI_DriverSwitch_CloseJoystick` issues `ClearUSB`:
+   ```c
+   WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ClearUSB, NULL, 0, false);
+   ```
+
+---
+
+## Prebuilt Builds & Reference Kit
+
+- Ready-to-use C bridge and Hookshot `v2.2.0-rc.2` reference patch: [`integrations/recomp-c/`](../../integrations/recomp-c/).
+- End-user test builds and downloads: see the [website](https://ryuhdr.threedola.workers.dev/).

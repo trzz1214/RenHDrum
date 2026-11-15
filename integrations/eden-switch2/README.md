@@ -24,6 +24,10 @@ Built and played on Fritchii v5.8.4; applies to NovaS v0.2.1 with one hand-fixed
 | `0017` | Destroys a lost DualSense speaker stream under the pad lock so it cannot race with teardown or a DSP rebuild. |
 | `0018` | Steam Controller (2026) grips play both HD Rumble bands (experimental; protocol and measurements by iafx, PCM stream found by LiveHaptics). |
 | `0019` | Lists the Steam Controller (2026) as experimental in the HD Rumble dialog. |
+| `0020` | Exposes connected RenHDrum pads, runtime library version (`renhdrum_version()`), and per-kind toggles (`switch_hd_rumble_enabled`, `steam_hd_rumble_enabled`, `hd_rumble_on_connect`) and reads `hd_rumble_bt_fast` directly. |
+| `0021` | Neutral shared Qt HD Rumble dialog (live controller list, Bluetooth mode & per-type toggles, two-phase test rumble + rumble on connect, scrubbed zip problem report, and `Powered by RenHDrum <version>` footer; supersedes the UI of `0007`/`0008`/`0019` without modifying existing patches). |
+| `0022` | Keeps short (< 15 ms) vibration pulses when HD Rumble is enabled even if "Enable Accurate Vibration" is off. |
+| `0023` | Compacts the shared HD Rumble dialog (status on the enable row, auto-sized pad list without group box, single `Controllers` group with tooltips). |
 
 ## Files to ship next to the exe
 - `renhdrum.dll` 0.4.0 (or newer).
@@ -34,7 +38,7 @@ Built and played on Fritchii v5.8.4; applies to NovaS v0.2.1 with one hand-fixed
 ## Build
 Add `-DENABLE_RENHDRUM=ON` (and leave `-DRENHDRUM_DOWNLOAD=OFF`). `RENHDRUM_SDL_PATCHES` is ON by default, so SDL3 is built from the `sdl3-hdrumble` package.
 Put **RenHDrum 0.4.0** `renhdrum.dll` next to the executable. The `RENHDRUM_DOWNLOAD` option still fetches 0.2.1, which has no Mode 2 support.
-Turn on "Enable Accurate Vibration" in Configure Vibration. Without the DLL every pad keeps the standard rumble.
+With patch `0022` applied and HD Rumble enabled, short (< 15 ms) vibration pulses are kept automatically even with "Enable Accurate Vibration" off (enable it only if applying earlier patches without `0022`). Without the DLL every pad keeps the standard rumble.
 With two wired DualSense controllers the speakers are matched in listing order; plug them in one after the other if the rumble lands on the wrong pad.
 
 ## Applied to
@@ -43,6 +47,7 @@ With two wired DualSense controllers the speakers are matched in listing order; 
 | Fritchii | v5.8.4 | Built, played (Mario Kart World, wired DualSense and Pro) |
 | NovaS | v0.2.1 | Applies (`0001` needs the last hunk of `src/yuzu/CMakeLists.txt` pasted by hand; `0007`-`0009` apply cleanly). Not built yet |
 | Lichii | build-160 | Applies with `git am --3way` once the Fritchii blobs are fetched; `0001` needs `PumpEvents()` merged by hand (Lichii added a motion-sensor restart there, so it stays non-const). Not built yet |
+| Lichii | build-177 | Applied manually (`src/yuzu/` → `src/lichii/`, PR #1497 DualSense haptics yielded when HD Rumble owns the pad, and `0022` keeps Lichii's `IsVibrationStreamed()` check) |
 | Orchid | v0.9.5 | Does not apply: `sdl_driver.cpp` (4 hunks), CMake (1) |
 
 The same series in `git am --3way` form fails on a clean clone without the original blobs; use `git am --reject` and paste the CMake hunk.

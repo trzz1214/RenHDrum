@@ -1,0 +1,304 @@
+From 9e990119d6e80b93227da1d2acaa6c7b210ea450 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 22:49:20 +0700
+Subject: [PATCH 20/21] input: expose connected RenHDrum pads, version, and
+ per-kind toggles
+
+---
+ src/common/settings.h                     |   6 ++
+ src/input_common/drivers/renhdrum_pad.cpp | 120 ++++++++++++++++++++--
+ src/input_common/drivers/renhdrum_pad.h   |  18 ++++
+ 3 files changed, 138 insertions(+), 6 deletions(-)
+
+diff --git a/src/common/settings.h b/src/common/settings.h
+index 09c4bcd..2bd8390 100644
+--- a/src/common/settings.h
++++ b/src/common/settings.h
+@@ -959,6 +959,12 @@ struct Values {
+     Setting<int> dualsense_haptics_volume{linkage, 100, "dualsense_haptics_volume", Category::Controls};
+     Setting<bool> dualsense_crisp_notes{linkage, true, "dualsense_crisp_notes",
+                                         Category::Controls};
++    Setting<bool> switch_hd_rumble_enabled{linkage, true, "switch_hd_rumble_enabled",
++                                           Category::Controls};
++    Setting<bool> steam_hd_rumble_enabled{linkage, true, "steam_hd_rumble_enabled",
++                                          Category::Controls};
++    Setting<bool> hd_rumble_on_connect{linkage, true, "hd_rumble_on_connect",
++                                       Category::Controls};
+     Setting<bool> xbox_rumble_enabled{linkage, true, "xbox_rumble_enabled", Category::Controls};
+     Setting<int> xbox_motor_strength{linkage, 100, "xbox_motor_strength", Category::Controls};
+     // 0: RenHDrum's four-motor mix, 1: direct (low band to the big motor, high band to the small)
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index aa09b6d..3e25747 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -21,6 +21,7 @@
+ #include "common/logging.h"
+ #include "common/settings.h"
+ #include "common/thread.h"
++#include "common/uuid.h"
+ 
+ #ifdef RENHDRUM_SDL_HDRUMBLE
+ // Added by .patch/sdl3-hdrumble/0002-hdrumble-idle-write.patch (SDL3 is linked statically). Each
+@@ -64,6 +65,8 @@ struct RenHDrumApi {
+     // RenHdcDualSenseDsp, so set_half_target and dsp_destroy work on it too.
+     decltype(&renhdrum_valve_grip_dsp_create) valve_create{};
+     decltype(&renhdrum_valve_grip_build_report) valve_build_report{};
++    // Optional (RenHDrum 0.4.0+): runtime library version
++    decltype(&renhdrum_version) version{};
+     bool HasValve() const {
+         return valve_create && valve_build_report;
+     }
+@@ -116,6 +119,7 @@ const RenHDrumApi& Api() {
+             (void)a.library.GetSymbol("renhdrum_valve_grip_dsp_create", &a.valve_create);
+             (void)a.library.GetSymbol("renhdrum_valve_grip_build_report",
+                                       &a.valve_build_report);
++            (void)a.library.GetSymbol("renhdrum_version", &a.version);
+             LOG_INFO(Input, "RenHDrum: loaded {}", name);
+         } else {
+             LOG_WARNING(Input, "RenHDrum: {} is missing functions, using the standard rumble", name);
+@@ -213,6 +217,8 @@ struct UserSettings {
+     bool bt_after_input{true};
+     bool bt_fast{true};
+     bool bt_crisp_notes{true};
++    bool switch_enabled{true};
++    bool steam_enabled{true};
+     bool dualsense_enabled{true};
+     int dualsense_volume{100};
+     bool dualsense_crisp_notes{true};
+@@ -244,8 +250,10 @@ UserSettings ReadUserSettings() {
+         .crisp_notes = pick(s.hd_rumble_crisp_notes),
+         .bluetooth_level = std::clamp(pick(s.hd_rumble_bluetooth_level), 1, 4),
+         .bt_after_input = pick(s.hd_rumble_bt_after_input),
+-        .bt_fast = pick(s.hd_rumble_bt_fast),
++        .bt_fast = s.hd_rumble_bt_fast.GetValue(),
+         .bt_crisp_notes = pick(s.hd_rumble_bt_crisp_notes),
++        .switch_enabled = s.switch_hd_rumble_enabled.GetValue(),
++        .steam_enabled = s.steam_hd_rumble_enabled.GetValue(),
+         .dualsense_enabled = s.dualsense_haptics_enabled.GetValue(),
+         .dualsense_volume = std::clamp(pick(s.dualsense_haptics_volume), 0, 100),
+         .dualsense_crisp_notes = pick(s.dualsense_crisp_notes),
+@@ -288,6 +296,57 @@ std::atomic<int> xbox_official_no_triggers{};
+ std::mutex claimed_audio_mutex;
+ std::vector<SDL_AudioDeviceID> claimed_audio_devices;
+ 
++// Connected controllers currently driven by RenHDrum. Leaf lock: never calls SDL or takes `mutex`.
++std::mutex active_pads_mutex;
++struct ActivePadEntry {
++    const void* id;
++    RenHDrumPadInfo info;
++};
++std::vector<ActivePadEntry> active_pads;
++
++void RegisterActivePad(const void* id, RenHDrumPadInfo info) {
++    std::scoped_lock lock{active_pads_mutex};
++    active_pads.push_back({id, std::move(info)});
++}
++
++void UnregisterActivePad(const void* id) {
++    std::scoped_lock lock{active_pads_mutex};
++    std::erase_if(active_pads, [id](const ActivePadEntry& entry) { return entry.id == id; });
++}
++
++std::string PadGuid(SDL_Joystick* joystick) {
++    const SDL_GUID guid = SDL_GetJoystickGUID(joystick);
++    std::array<std::uint8_t, 16> data{};
++    std::memcpy(data.data(), guid.data, sizeof(data));
++    std::memset(data.data() + 2, 0, sizeof(std::uint16_t));
++    return Common::UUID{data}.RawString();
++}
++
++std::string PadName(SDL_Joystick* joystick, SDL_Gamepad* gamepad, int kind, Uint16 vid,
++                    Uint16 pid) {
++    const char* name = gamepad ? SDL_GetGamepadName(gamepad) : nullptr;
++    if (!name || !name[0]) {
++        name = SDL_GetJoystickName(joystick);
++    }
++    if (name && name[0]) {
++        return name;
++    }
++    switch (kind) {
++    case 0:
++        return pid == 0x2006 ? "Joy-Con (L)"
++             : pid == 0x2007 ? "Joy-Con (R)"
++                             : "Switch Pro Controller";
++    case 1:
++        return pid == 0x0DF2 ? "DualSense Edge" : "DualSense";
++    case 2:
++        return "Xbox Controller";
++    case 3:
++        return "Steam Controller (2026)";
++    default:
++        return fmt::format("{:04X}:{:04X}", vid, pid);
++    }
++}
++
+ } // namespace
+ 
+ // Lock rule: `mutex` is never held while calling an SDL function that takes the SDL joystick lock
+@@ -356,7 +415,7 @@ struct RenHDrumPad::Impl {
+     /// Caller holds the mutex.
+     bool ResolveEngineSettings(RenHdcSettings& settings) const {
+         RenHdcConfig config{};
+-        config.enable_hd_rumble = user.hd_enabled;
++        config.enable_hd_rumble = user.hd_enabled && user.switch_enabled;
+         config.hd_rumble_usb_interval_ms = user.usb_interval_ms;
+         config.hd_rumble_bluetooth_level = user.bluetooth_level;
+         config.hd_rumble_usb_auto_slow = true;
+@@ -485,7 +544,8 @@ struct RenHDrumPad::Impl {
+         }
+         return {
+             .reconfigure_engine = engine != nullptr,
+-            .stop_engine = engine != nullptr && old.hd_enabled && !now.hd_enabled,
++            .stop_engine = engine != nullptr && ((old.hd_enabled && !now.hd_enabled) ||
++                                                 (old.switch_enabled && !now.switch_enabled)),
+         };
+     }
+ 
+@@ -963,6 +1023,26 @@ bool IsRenHDrumLoaded() {
+     return Api().loaded;
+ }
+ 
++std::string GetRenHDrumVersionString() {
++    const auto& api = Api();
++    if (!api.loaded || !api.version) {
++        return {};
++    }
++    const std::uint32_t v = api.version();
++    return std::to_string((v >> 16) & 0xffU) + "." + std::to_string((v >> 8) & 0xffU) + "." +
++           std::to_string(v & 0xffU);
++}
++
++std::vector<RenHDrumPadInfo> GetRenHDrumPads() {
++    std::scoped_lock lock{active_pads_mutex};
++    std::vector<RenHDrumPadInfo> out;
++    out.reserve(active_pads.size());
++    for (const auto& entry : active_pads) {
++        out.push_back(entry.info);
++    }
++    return out;
++}
++
+ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gamepad* gamepad) {
+     if (!joystick || !IsRenHDrumLoaded()) {
+         return nullptr;
+@@ -1002,6 +1082,15 @@ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gam
+         steam->kind = 3;
+         ++connected_count[steam->kind];
+         last_connected_kind = steam->kind;
++        RegisterActivePad(steam.get(), {
++            .name = PadName(joystick, gamepad, steam->kind, vid, pid),
++            .guid = PadGuid(joystick),
++            .vid = vid,
++            .pid = pid,
++            .kind = steam->kind,
++            .is_bluetooth = steam->is_bluetooth,
++            .xbox_triggers = false,
++        });
+         return std::shared_ptr<RenHDrumPad>(new RenHDrumPad(std::move(steam)));
+     }
+     const bool switch_pad = IsSwitchHdController(vid, pid);
+@@ -1065,6 +1154,15 @@ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gam
+         ++xbox_official_no_triggers;
+     }
+     last_connected_kind = state->kind;
++    RegisterActivePad(state.get(), {
++        .name = PadName(joystick, gamepad, state->kind, vid, pid),
++        .guid = PadGuid(joystick),
++        .vid = vid,
++        .pid = pid,
++        .kind = state->kind,
++        .is_bluetooth = state->is_bluetooth,
++        .xbox_triggers = state->xbox_triggers,
++    });
+     return std::shared_ptr<RenHDrumPad>(new RenHDrumPad(std::move(state)));
+ }
+ 
+@@ -1129,6 +1227,7 @@ void RenHDrumPad::Shutdown() {
+         impl->joystick = nullptr;
+         impl->gamepad = nullptr;
+     }
++    UnregisterActivePad(impl.get());
+     if (had_engine) {
+         SendNeutralPacket(joystick);
+     }
+@@ -1252,7 +1351,7 @@ bool RenHDrumPad::Vibrate(std::int64_t now_us, bool is_right,
+                 engine_sample = true;
+             }
+         } else if (impl->engine) {
+-            if (u.hd_enabled) {
++            if (u.hd_enabled && u.switch_enabled) {
+                 api.engine_push_half_sample(impl->engine, now_us, is_right,
+                                             ShapeAmplitude(status.low_amplitude, u),
+                                             status.low_frequency,
+@@ -1263,8 +1362,9 @@ bool RenHDrumPad::Vibrate(std::int64_t now_us, bool is_right,
+             }
+         } else if (impl->steam_dsp) {
+             // Steam Controller grips: the same two bands as a DualSense; the sender thread reads
+-            // the DSP. General HD Rumble switch off or a stopped sender: standard rumble.
+-            const bool on = u.hd_enabled;
++            // the DSP. General HD Rumble switch or Steam toggle off or a stopped sender: standard
++            // rumble.
++            const bool on = u.hd_enabled && u.steam_enabled;
+             api.dsp_set_half_target(impl->steam_dsp, is_right,
+                                     on ? ShapeAmplitude(status.low_amplitude, u) : 0.0f,
+                                     status.low_frequency,
+@@ -1475,6 +1575,14 @@ bool IsRenHDrumLoaded() {
+     return false;
+ }
+ 
++std::string GetRenHDrumVersionString() {
++    return {};
++}
++
++std::vector<RenHDrumPadInfo> GetRenHDrumPads() {
++    return {};
++}
++
+ int GetRenHDrumConnectedKind() {
+     return -1;
+ }
+diff --git a/src/input_common/drivers/renhdrum_pad.h b/src/input_common/drivers/renhdrum_pad.h
+index ab44644..b16c0ed 100644
+--- a/src/input_common/drivers/renhdrum_pad.h
++++ b/src/input_common/drivers/renhdrum_pad.h
+@@ -6,6 +6,8 @@
+ #include <cstdint>
+ #include <memory>
+ #include <mutex>
++#include <string>
++#include <vector>
+ 
+ #include <SDL3/SDL.h>
+ 
+@@ -13,12 +15,28 @@
+ 
+ namespace InputCommon {
+ 
++struct RenHDrumPadInfo {
++    std::string name;
++    std::string guid;
++    std::uint16_t vid{};
++    std::uint16_t pid{};
++    int kind{-1}; ///< 0 Switch, 1 DualSense, 2 Xbox style, 3 Steam Controller (2026)
++    bool is_bluetooth{};
++    bool xbox_triggers{};
++};
++
+ /// True when the build includes RenHDrum support (ENABLE_RENHDRUM).
+ bool IsRenHDrumBuilt();
+ 
+ /// True when renhdrum.dll (librenhdrum.so / .dylib) was found and loaded. Loads it on first call.
+ bool IsRenHDrumLoaded();
+ 
++/// Runtime version reported by renhdrum.dll (e.g. "0.4.0"), or "" when not loaded / older DLL.
++std::string GetRenHDrumVersionString();
++
++/// Snapshot of controllers currently driven by RenHDrum.
++std::vector<RenHDrumPadInfo> GetRenHDrumPads();
++
+ /// Kind of the controller RenHDrum connected most recently and still drives: 0 Switch
+ /// controller, 1 DualSense, 2 Xbox style, 3 Steam Controller (2026), or -1 when none.
+ int GetRenHDrumConnectedKind();
+-- 
+2.55.0.windows.5
+

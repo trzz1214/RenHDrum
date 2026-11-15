@@ -1,0 +1,337 @@
+From 209faf5654fbda8cc2ee38447123057dcf220522 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 09:44:54 +0700
+Subject: [PATCH 23/23] yuzu: compact HD Rumble dialog
+
+---
+ src/yuzu/configuration/hd_rumble_dialog.cpp | 198 ++++++++++++--------
+ src/yuzu/configuration/hd_rumble_dialog.h   |   8 +-
+ 2 files changed, 119 insertions(+), 87 deletions(-)
+
+diff --git a/src/yuzu/configuration/hd_rumble_dialog.cpp b/src/yuzu/configuration/hd_rumble_dialog.cpp
+index da47123..5050db7 100644
+--- a/src/yuzu/configuration/hd_rumble_dialog.cpp
++++ b/src/yuzu/configuration/hd_rumble_dialog.cpp
+@@ -18,6 +18,7 @@
+ #include <QFile>
+ #include <QFileInfo>
+ #include <QFont>
++#include <QFontMetrics>
+ #include <QGroupBox>
+ #include <QGuiApplication>
+ #include <QHBoxLayout>
+@@ -28,6 +29,7 @@
+ #include <QProcess>
+ #include <QPushButton>
+ #include <QStandardPaths>
++#include <QStyle>
+ #include <QSysInfo>
+ #include <QTreeWidget>
+ #include <QTreeWidgetItem>
+@@ -358,96 +360,110 @@ void ThunderRumblePlayer::Send(float low_amp, float low_freq, float high_amp, fl
+ HdRumbleDialog::HdRumbleDialog(QWidget* parent, Core::HID::HIDCore& hid_core_)
+     : QDialog(parent), hid_core{hid_core_}, thunder{new ThunderRumblePlayer(hid_core_, this)} {
+     setWindowTitle(tr("HD Rumble"));
+-    setMinimumWidth(520);
+ 
+     auto* root = new QVBoxLayout(this);
+-    root->setSpacing(10);
++    root->setSpacing(8);
+ 
+-    // 1. Enable toggle & runtime status
++    // 1. Enable toggle & compact runtime status on the same row
++    auto* top_row = new QHBoxLayout;
++    top_row->setSpacing(6);
+     hd_enabled = new QCheckBox(tr("Enable HD Rumble"));
+     hd_enabled->setChecked(Settings::values.hd_rumble_enabled.GetValue());
+-    root->addWidget(hd_enabled);
+-
+-    auto* status_row = new QHBoxLayout;
+-    status_row->setContentsMargins(18, 0, 0, 0);
+-    status_row->setSpacing(6);
+     status_dot = new QLabel(QStringLiteral("●"));
+-    status_label = new QLabel;
+-    status_label->setWordWrap(true);
++    status_label = MakeMutedLabel(QString{});
++    status_label->setWordWrap(false);
+     missing_link = new QLabel(
+         QStringLiteral("<a href=\"%1\">%2</a>")
+-            .arg(QString::fromLatin1(RELEASES_URL), tr("Download renhdrum.dll")));
++            .arg(QString::fromLatin1(RELEASES_URL), tr("Download")));
+     missing_link->setOpenExternalLinks(true);
+-    status_row->addWidget(status_dot);
+-    status_row->addWidget(status_label, 1);
+-    status_row->addWidget(missing_link);
+-    root->addLayout(status_row);
+-
+-    // 2. Connected controllers
+-    auto* pads_group = new QGroupBox(tr("Connected controllers"));
+-    auto* pads_layout = new QVBoxLayout(pads_group);
++    top_row->addWidget(hd_enabled);
++    top_row->addStretch(1);
++    top_row->addWidget(status_dot);
++    top_row->addWidget(status_label);
++    top_row->addWidget(missing_link);
++    root->addLayout(top_row);
++
++    // 2. Connected controllers table (no QGroupBox, auto-sized to 1-3 rows)
+     pad_tree = new QTreeWidget;
+     pad_tree->setHeaderLabels({tr("Controller"), tr("Connection"), tr("Player")});
+     pad_tree->setRootIsDecorated(false);
++    pad_tree->setIndentation(0);
+     pad_tree->setSelectionMode(QAbstractItemView::NoSelection);
+     pad_tree->setFocusPolicy(Qt::NoFocus);
++    pad_tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++    pad_tree->header()->setStretchLastSection(false);
+     pad_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+     pad_tree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+     pad_tree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+-    pad_tree->setFixedHeight(96);
+-    pads_layout->addWidget(pad_tree);
+-    root->addWidget(pads_group);
+-
+-    // 3. Per-controller-type settings (neutral single column, no tuning numbers)
+-    switch_group = new QGroupBox(tr("Switch (Pro Controller / Joy-Con)"));
+-    auto* switch_layout = new QVBoxLayout(switch_group);
+-    switch_layout->setSpacing(4);
+-    switch_enabled = new QCheckBox(tr("Use HD Rumble for Switch controllers"));
++    root->addWidget(pad_tree);
++
++    const QFontMetrics fm = pad_tree->fontMetrics();
++    const int max_name_w = std::max({
++        fm.horizontalAdvance(QStringLiteral("Nintendo Switch Pro Controller")),
++        fm.horizontalAdvance(QStringLiteral("DualSense Wireless Controller")),
++        fm.horizontalAdvance(QStringLiteral("Steam Controller (2026)")),
++        fm.horizontalAdvance(tr("No supported controllers connected")),
++    });
++    const int conn_col_w = std::max(fm.horizontalAdvance(tr("Connection")),
++                                    fm.horizontalAdvance(tr("Bluetooth")));
++    const int player_col_w = std::max({
++        fm.horizontalAdvance(tr("Player")),
++        fm.horizontalAdvance(tr("Not assigned")),
++        fm.horizontalAdvance(tr("Handheld")),
++        fm.horizontalAdvance(tr("Player 8")),
++    });
++    const QMargins root_margins = root->contentsMargins();
++    const int scroll_w = QApplication::style()->pixelMetric(QStyle::PM_ScrollBarExtent);
++    const int pad_tree_extra = 2 * pad_tree->frameWidth() + scroll_w + 48;
++    setMinimumWidth(max_name_w + conn_col_w + player_col_w + pad_tree_extra +
++                    root_margins.left() + root_margins.right());
++
++    // 3. Single Controllers group (neutral widgets, tooltips carry descriptions)
++    controllers_group = new QGroupBox(tr("Controllers"));
++    auto* ctrl_layout = new QVBoxLayout(controllers_group);
++    ctrl_layout->setSpacing(6);
++
++    auto* switch_row = new QHBoxLayout;
++    switch_row->setSpacing(6);
++    switch_enabled = new QCheckBox(tr("Switch (Pro / Joy-Con)"));
+     switch_enabled->setChecked(Settings::values.switch_hd_rumble_enabled.GetValue());
+-    switch_layout->addWidget(switch_enabled);
+-    auto* bt_row = new QHBoxLayout;
+-    bt_row->setContentsMargins(18, 0, 0, 0);
+-    bt_row->addWidget(new QLabel(tr("Bluetooth:")));
++    switch_enabled->setToolTip(
++        tr("Sends full-detail HD Rumble waveforms directly to Nintendo Switch controllers."));
++    switch_row->addWidget(switch_enabled);
++    switch_row->addStretch(1);
++    switch_row->addWidget(new QLabel(tr("Bluetooth")));
+     switch_bt_mode = new QComboBox;
+     switch_bt_mode->addItem(tr("Detailed (5 ms)"), true);
+     switch_bt_mode->addItem(tr("Compatible"), false);
+     switch_bt_mode->setCurrentIndex(Settings::values.hd_rumble_bt_fast.GetValue() ? 0 : 1);
+-    bt_row->addWidget(switch_bt_mode);
+-    bt_row->addStretch(1);
+-    switch_layout->addLayout(bt_row);
+-    switch_layout->addWidget(MakeMutedLabel(
+-        tr("Sends full-detail HD Rumble waveforms directly to Nintendo Switch controllers.")));
+-    root->addWidget(switch_group);
+-
+-    dualsense_group = new QGroupBox(tr("DualSense (PS5 / DualSense Edge)"));
+-    auto* ds_layout = new QVBoxLayout(dualsense_group);
+-    ds_layout->setSpacing(4);
+-    dualsense_enabled = new QCheckBox(tr("Use audio haptics on DualSense"));
++    switch_bt_mode->setToolTip(
++        tr("Detailed (5 ms) sends full 5 ms envelopes over Bluetooth; Compatible uses level 4 "
++           "fallback if packets are dropped."));
++    switch_row->addWidget(switch_bt_mode);
++    ctrl_layout->addLayout(switch_row);
++
++    dualsense_enabled = new QCheckBox(tr("DualSense"));
+     dualsense_enabled->setChecked(Settings::values.dualsense_haptics_enabled.GetValue());
+-    ds_layout->addWidget(dualsense_enabled);
+-    ds_layout->addWidget(MakeMutedLabel(
+-        tr("Plays HD Rumble through the DualSense voice-coil actuators over USB or Bluetooth.")));
+-    root->addWidget(dualsense_group);
+-
+-    xbox_group = new QGroupBox(tr("Xbox (Xbox One S and Xbox-style controllers)"));
+-    auto* xbox_layout = new QVBoxLayout(xbox_group);
+-    xbox_layout->setSpacing(4);
+-    xbox_enabled = new QCheckBox(tr("Shape rumble for Xbox controllers"));
++    dualsense_enabled->setToolTip(
++        tr("Plays HD Rumble through the DualSense voice-coil actuators over USB or Bluetooth."));
++    ctrl_layout->addWidget(dualsense_enabled);
++
++    xbox_enabled = new QCheckBox(tr("Xbox"));
+     xbox_enabled->setChecked(Settings::values.xbox_rumble_enabled.GetValue());
+-    xbox_layout->addWidget(xbox_enabled);
+-    xbox_layout->addWidget(MakeMutedLabel(
+-        tr("Translates HD Rumble into grip and trigger feedback on Xbox-style controllers.")));
++    xbox_enabled->setToolTip(
++        tr("Translates HD Rumble into grip and trigger feedback on Xbox-style controllers."));
++    ctrl_layout->addWidget(xbox_enabled);
+ 
+     if (InputCommon::GetRenHDrumXboxNeedsRawInput() &&
+         !Settings::values.enable_raw_input.GetValue()) {
+         xbox_raw_box = new QWidget;
+         auto* raw_row = new QHBoxLayout(xbox_raw_box);
+-        raw_row->setContentsMargins(0, 2, 0, 0);
++        raw_row->setContentsMargins(20, 0, 0, 0);
+         raw_row->addWidget(
+             MakeMutedLabel(tr("Trigger rumble needs \"XInput 8 player support\".")), 1);
+         auto* raw_btn = new QPushButton(tr("Turn it on"));
+         raw_row->addWidget(raw_btn);
+-        xbox_layout->addWidget(xbox_raw_box);
++        ctrl_layout->addWidget(xbox_raw_box);
+         connect(raw_btn, &QPushButton::clicked, this, [this] {
+             Settings::values.enable_raw_input.SetValue(true);
+             for (QWidget* top : QApplication::topLevelWidgets()) {
+@@ -456,6 +472,7 @@ HdRumbleDialog::HdRumbleDialog(QWidget* parent, Core::HID::HIDCore& hid_core_)
+                 }
+             }
+             xbox_raw_box->setVisible(false);
++            adjustSize();
+             QMessageBox::information(
+                 this, tr("HD Rumble"),
+                 tr("\"XInput 8 player support\" is now on.\n"
+@@ -463,17 +480,24 @@ HdRumbleDialog::HdRumbleDialog(QWidget* parent, Core::HID::HIDCore& hid_core_)
+                    "hands its trigger motors to SDL."));
+         });
+     }
+-    root->addWidget(xbox_group);
+ 
+-    steam_group = new QGroupBox(tr("Steam Controller (2026)"));
+-    auto* steam_layout = new QVBoxLayout(steam_group);
+-    steam_layout->setSpacing(4);
+-    steam_enabled = new QCheckBox(tr("Steam Controller (2026) — Experimental"));
++    auto* steam_row = new QHBoxLayout;
++    steam_row->setSpacing(6);
++    steam_enabled = new QCheckBox(tr("Steam Controller (2026)"));
+     steam_enabled->setChecked(Settings::values.steam_hd_rumble_enabled.GetValue());
+-    steam_layout->addWidget(steam_enabled);
+-    steam_layout->addWidget(MakeMutedLabel(
+-        tr("Experimental grip haptics for Steam Controller (2026) driven by RenHDrum.")));
+-    root->addWidget(steam_group);
++    steam_enabled->setToolTip(
++        tr("Experimental grip haptics for Steam Controller (2026) driven by RenHDrum."));
++    auto* steam_exp = MakeMutedLabel(tr("Experimental"));
++    steam_exp->setWordWrap(false);
++    QFont exp_font = steam_exp->font();
++    exp_font.setPointSizeF(std::max(8.0, exp_font.pointSizeF() - 1.0));
++    steam_exp->setFont(exp_font);
++    steam_row->addWidget(steam_enabled);
++    steam_row->addWidget(steam_exp);
++    steam_row->addStretch(1);
++    ctrl_layout->addLayout(steam_row);
++
++    root->addWidget(controllers_group);
+ 
+     // 4. Test & rumble on connect
+     auto* actions_row = new QHBoxLayout;
+@@ -562,11 +586,8 @@ HdRumbleDialog::~HdRumbleDialog() = default;
+ 
+ void HdRumbleDialog::ApplyEnabledState() {
+     const bool master = hd_enabled->isChecked();
+-    switch_group->setEnabled(master);
++    controllers_group->setEnabled(master);
+     switch_bt_mode->setEnabled(master && switch_enabled->isChecked());
+-    dualsense_group->setEnabled(master);
+-    xbox_group->setEnabled(master);
+-    steam_group->setEnabled(master);
+     test_button->setEnabled(master);
+ }
+ 
+@@ -587,18 +608,24 @@ void HdRumbleDialog::RefreshStatus() {
+     status_dot->setPalette(dot_pal);
+ 
+     missing_link->setVisible(!loaded);
++    QString tip;
+     if (!loaded) {
+-        status_label->setText(tr("renhdrum.dll was not found — using standard rumble."));
++        status_label->setText(tr("renhdrum.dll not found"));
++        tip = tr("renhdrum.dll was not found — using standard rumble.");
+     } else if (!hd_enabled->isChecked()) {
+-        status_label->setText(tr("HD Rumble is turned off — using standard rumble."));
++        status_label->setText(tr("off · standard rumble"));
++        tip = tr("HD Rumble is turned off — using standard rumble.");
+     } else if (pads.empty()) {
+-        status_label->setText(
+-            tr("RenHDrum %1 ready — connect a supported controller.").arg(ver_q));
++        status_label->setText(tr("RenHDrum %1 · ready").arg(ver_q));
++        tip = tr("RenHDrum %1 ready — connect a supported controller.").arg(ver_q);
+     } else {
+-        status_label->setText(tr("RenHDrum %1 active — %n controller(s) connected.", "",
+-                                 static_cast<int>(pads.size()))
+-                                  .arg(ver_q));
++        status_label->setText(tr("RenHDrum %1 · active (%2)").arg(ver_q).arg(pads.size()));
++        tip = tr("RenHDrum %1 active — %n controller(s) connected.", "",
++                 static_cast<int>(pads.size()))
++                  .arg(ver_q);
+     }
++    status_label->setToolTip(tip);
++    status_dot->setToolTip(tip);
+ }
+ 
+ void HdRumbleDialog::RefreshPads() {
+@@ -631,10 +658,21 @@ void HdRumbleDialog::RefreshPads() {
+         auto* item = new QTreeWidgetItem(pad_tree, {tr("No supported controllers connected"), {}, {}});
+         QPalette pal = pad_tree->palette();
+         item->setForeground(0, pal.color(QPalette::PlaceholderText));
+-        return;
++    } else {
++        for (const auto& r : rows) {
++            new QTreeWidgetItem(pad_tree, {r.name, r.link, r.player});
++        }
++    }
++    const int visible_rows = std::clamp(static_cast<int>(rows.size()), 1, 3);
++    int row_h = pad_tree->sizeHintForRow(0);
++    if (row_h <= 0) {
++        row_h = pad_tree->fontMetrics().height() + 6;
+     }
+-    for (const auto& r : rows) {
+-        new QTreeWidgetItem(pad_tree, {r.name, r.link, r.player});
++    const int header_h = pad_tree->header()->sizeHint().height();
++    pad_tree->setFixedHeight(header_h + visible_rows * row_h + 2 * pad_tree->frameWidth());
++    if (isVisible()) {
++        pad_tree->updateGeometry();
++        adjustSize();
+     }
+ }
+ 
+diff --git a/src/yuzu/configuration/hd_rumble_dialog.h b/src/yuzu/configuration/hd_rumble_dialog.h
+index 41ff00a..7e1a406 100644
+--- a/src/yuzu/configuration/hd_rumble_dialog.h
++++ b/src/yuzu/configuration/hd_rumble_dialog.h
+@@ -72,18 +72,12 @@ private:
+     QTreeWidget* pad_tree{};
+     std::string last_pad_signature;
+ 
+-    QGroupBox* switch_group{};
++    QGroupBox* controllers_group{};
+     QCheckBox* switch_enabled{};
+     QComboBox* switch_bt_mode{};
+-
+-    QGroupBox* dualsense_group{};
+     QCheckBox* dualsense_enabled{};
+-
+-    QGroupBox* xbox_group{};
+     QCheckBox* xbox_enabled{};
+     QWidget* xbox_raw_box{};
+-
+-    QGroupBox* steam_group{};
+     QCheckBox* steam_enabled{};
+ 
+     QPushButton* test_button{};
+-- 
+2.55.0.windows.5
+

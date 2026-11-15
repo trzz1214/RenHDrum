@@ -1,6 +1,6 @@
 /* host/rh_bridge.c - RenHDrum bridge for Hookshot
-   Authentic HD Rumble for Nintendo Switch Pro Controller (USB & Bluetooth)
-   and DualSense 4-channel 48 kHz audio haptics via renhdrum.dll.
+   Authentic HD Rumble for Nintendo Switch Pro Controller (USB & Bluetooth), DualSense 4-channel 48 kHz audio
+   haptics, Xbox One S (4 motors) and Steam Controller 2026 grips (experimental) via renhdrum.dll.
    Loaded dynamically at run time.
    Co-Authored-By: Claude Sonnet 5.5 + Gemini 3.8 Flash (AGY) */
 #include "rh_bridge.h"
@@ -46,6 +46,15 @@ static struct {
     int32_t (*ds_set_half_target)(RenHdcDualSenseDsp *, bool, float, float, float, float);
     int32_t (*ds_fill_f32)(RenHdcDualSenseDsp *, float *, size_t);
     int32_t (*ds_build_bt_report)(RenHdcDualSenseDsp *, uint8_t, uint8_t *);
+
+    /* Xbox One S rumble (4 motors) and Steam Controller 2026 grips (valve DSP); optional like the DualSense ones */
+    RenHdcXboxRumble *(*xb_create)(bool);
+    void (*xb_destroy)(RenHdcXboxRumble *);
+    int32_t (*xb_push)(RenHdcXboxRumble *, int64_t, bool, float, float, float, float);
+    int32_t (*xb_tick)(RenHdcXboxRumble *, int64_t, uint16_t *);
+    int32_t (*xb_resend)(RenHdcXboxRumble *);
+    RenHdcDualSenseDsp *(*sv_create)(int32_t, bool);
+    int32_t (*sv_build)(RenHdcDualSenseDsp *, uint8_t, uint8_t *);
 } rh;
 
 static struct {
@@ -59,6 +68,10 @@ static struct {
     void (*close_pad)(void *);
     int (*rumble_pad)(void *, uint16_t, uint16_t, uint32_t);
     void (*free_mem)(void *);
+    int (*get_type)(void *);                       /* SDL_GetGamepadType: Xbox One S by type */
+    uint64_t (*get_steam_handle)(void *);          /* not 0 = Steam Input's stand-in pad (host/steam_pads.h) */
+    int (*rumble_joy)(void *, uint16_t, uint16_t, uint32_t);        /* SDL3 returns bool: see sdl_ok() */
+    int (*rumble_joy_trig)(void *, uint16_t, uint16_t, uint32_t);
 
     /* SDL3 / SDL2 HID & device paths */
     const char *(*get_gamepad_path)(void *);
@@ -107,6 +120,10 @@ static void init_sdl(void) {
         *(FARPROC *)&sdl.close_pad = GetProcAddress(m, "SDL_CloseGamepad");
         *(FARPROC *)&sdl.rumble_pad = GetProcAddress(m, "SDL_RumbleGamepad");
         *(FARPROC *)&sdl.free_mem = GetProcAddress(m, "SDL_free");
+        *(FARPROC *)&sdl.get_type = GetProcAddress(m, "SDL_GetGamepadType");
+        *(FARPROC *)&sdl.get_steam_handle = GetProcAddress(m, "SDL_GetGamepadSteamHandle");
+        *(FARPROC *)&sdl.rumble_joy = GetProcAddress(m, "SDL_RumbleJoystick");
+        *(FARPROC *)&sdl.rumble_joy_trig = GetProcAddress(m, "SDL_RumbleJoystickTriggers");
 
         *(FARPROC *)&sdl.get_gamepad_path = GetProcAddress(m, "SDL_GetGamepadPath");
         *(FARPROC *)&sdl.get_joy_path = GetProcAddress(m, "SDL_GetJoystickPath");
@@ -136,6 +153,10 @@ static void init_sdl(void) {
         *(FARPROC *)&sdl.close_pad = GetProcAddress(m, "SDL_GameControllerClose");
         *(FARPROC *)&sdl.rumble_pad = GetProcAddress(m, "SDL_GameControllerRumble");
         *(FARPROC *)&sdl.get_power = GetProcAddress(m, "SDL_JoystickCurrentPowerLevel");
+        *(FARPROC *)&sdl.get_type = GetProcAddress(m, "SDL_GameControllerGetType");
+        *(FARPROC *)&sdl.get_steam_handle = GetProcAddress(m, "SDL_GameControllerGetSteamHandle");
+        *(FARPROC *)&sdl.rumble_joy = GetProcAddress(m, "SDL_JoystickRumble");
+        *(FARPROC *)&sdl.rumble_joy_trig = GetProcAddress(m, "SDL_JoystickRumbleTriggers");
 
         *(FARPROC *)&sdl.get_controller_path = GetProcAddress(m, "SDL_GameControllerPath");
         *(FARPROC *)&sdl.get_joy_path = GetProcAddress(m, "SDL_JoystickPath");
@@ -238,6 +259,15 @@ int rh_load(void) {
     *(FARPROC *)&rh.ds_fill_f32 = GetProcAddress(rh.dll, "renhdrum_dualsense_dsp_fill_f32");
     *(FARPROC *)&rh.ds_build_bt_report = GetProcAddress(rh.dll, "renhdrum_dualsense_dsp_build_bt_report");
 
+    /* Xbox One S and Steam Controller grips: a dll without them leaves that pad on Hookshot's own rumble */
+    *(FARPROC *)&rh.xb_create = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_create");
+    *(FARPROC *)&rh.xb_destroy = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_destroy");
+    *(FARPROC *)&rh.xb_push = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_push_half_sample");
+    *(FARPROC *)&rh.xb_tick = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_tick");
+    *(FARPROC *)&rh.xb_resend = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_resend");
+    *(FARPROC *)&rh.sv_create = GetProcAddress(rh.dll, "renhdrum_valve_grip_dsp_create");
+    *(FARPROC *)&rh.sv_build = GetProcAddress(rh.dll, "renhdrum_valve_grip_build_report");
+
     return 1;
 }
 
@@ -245,6 +275,14 @@ int rh_load(void) {
 static SRWLOCK rh_pads_lock = SRWLOCK_INIT;
 static void *rh_conn_pads[RH_MAX_PADS];
 static int rh_slot_claimed[RH_MAX_PADS];
+static int rh_slot_stand_in[RH_MAX_PADS];   /* Steam Input's stand-in pad: never claimed (see rh_attach) */
+static volatile LONG rh_enabled = 1;
+
+static void rh_pads_clear_claimed(void) {
+    AcquireSRWLockExclusive(&rh_pads_lock);
+    for (int i = 0; i < RH_MAX_PADS; i++) rh_slot_claimed[i] = 0;
+    ReleaseSRWLockExclusive(&rh_pads_lock);
+}
 
 static void rh_pads_track(void *pad) {
     if (!pad) return;
@@ -260,6 +298,7 @@ static void rh_pads_track(void *pad) {
     if (free_slot >= 0) {
         rh_conn_pads[free_slot] = pad;
         rh_slot_claimed[free_slot] = 0;
+        rh_slot_stand_in[free_slot] = 0;
     }
     ReleaseSRWLockExclusive(&rh_pads_lock);
 }
@@ -282,9 +321,25 @@ static void rh_pads_untrack(void *pad) {
         if (!pad || rh_conn_pads[i] == pad) {
             rh_conn_pads[i] = NULL;
             rh_slot_claimed[i] = 0;
+            rh_slot_stand_in[i] = 0;
         }
     }
     ReleaseSRWLockExclusive(&rh_pads_lock);
+}
+
+static void rh_pads_mark_stand_in(void *pad) {
+    AcquireSRWLockExclusive(&rh_pads_lock);
+    for (int i = 0; i < RH_MAX_PADS; i++)
+        if (rh_conn_pads[i] && rh_conn_pads[i] == pad) rh_slot_stand_in[i] = 1;
+    ReleaseSRWLockExclusive(&rh_pads_lock);
+}
+
+static int rh_stand_in_tracked(void) {
+    int any = 0;
+    AcquireSRWLockShared(&rh_pads_lock);
+    for (int i = 0; i < RH_MAX_PADS; i++) any |= rh_conn_pads[i] && rh_slot_stand_in[i];
+    ReleaseSRWLockShared(&rh_pads_lock);
+    return any;
 }
 
 int rh_pad_claimed(int i) {
@@ -339,6 +394,30 @@ static int rh_ds_audio_attempts;
 static int64_t rh_ds_next_audio_retry_us;
 static int64_t rh_ds_at[2];
 static int rh_ds_muted[2];
+
+/* ---- Xbox One S state (4 motors: grips, triggers) ---- */
+static SRWLOCK rh_xb_lock = SRWLOCK_INIT;
+static RenHdcXboxRumble *rh_xb;
+static void *rh_xb_pad;
+static void *rh_xb_joy;
+static int64_t rh_xb_at[2];
+static int rh_xb_muted[2];
+
+/* ---- Steam Controller 2026 grips (HID report 0x88 from a thread; experimental) ---- */
+#define RH_STEAM_FAILS_MAX 100
+#define RH_STEAM_TAIL_NS 100000000LL
+static SRWLOCK rh_sv_lock = SRWLOCK_INIT;
+static RenHdcDualSenseDsp *rh_sv_dsp;
+static void *rh_sv_pad;
+static void *rh_sv_hid;
+static HANDLE rh_sv_thread;
+static volatile LONG rh_sv_run;
+static uint8_t rh_sv_format;
+static int64_t rh_sv_at[2];
+static int rh_sv_muted[2];
+
+/* SDL3's rumble calls return bool (only the low byte is set), SDL2's int 0 when done */
+static int sdl_ok(int r) { return sdl.is_sdl3 ? (r & 0xFF) != 0 : r == 0; }
 
 /* ---- Worker thread ---- */
 static HANDLE rh_thread;
@@ -608,6 +687,122 @@ static DWORD WINAPI rh_ds_bt_worker(void *arg) {
     return 0;
 }
 
+/* Steam Controller 2026 grips (protocol by iafx, RenHDrum#5): HID report 0x86 chooses the PCM mode (op 2 = on, 1 = off,
+   once per channel 2 and 5), then report 0x88 every period while vibrating and for 100 ms after. Only this thread
+   writes to rh_sv_hid; rh_sv_stop joins it before closing the handle. */
+static void rh_sv_mode(void *hid, uint8_t op, uint8_t format) {
+    static const uint8_t channels[2] = {2, 5};
+    for (int i = 0; i < 2; i++) {
+        const uint8_t r[4] = {0x86, op, channels[i], format};
+        sdl.hid_write(hid, r, sizeof r);
+    }
+}
+
+static DWORD WINAPI rh_sv_worker(void *arg) {
+    (void)arg;
+    uint8_t report[RENHDRUM_VALVE_GRIP_REPORT_SIZE];
+    AcquireSRWLockExclusive(&rh_sv_lock);
+    void *hid = rh_sv_hid;
+    const uint8_t format = rh_sv_format;
+    void *pad = rh_sv_pad;
+    ReleaseSRWLockExclusive(&rh_sv_lock);
+    const int64_t period = format == RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K ? (int64_t)RENHDRUM_VALVE_GRIP_PERIOD_NS_8K
+                                                                         : (int64_t)RENHDRUM_VALVE_GRIP_PERIOD_NS_4K;
+    int gave_up = 0;
+
+    rh_sv_mode(hid, 1, 0);
+    Sleep(10);
+    rh_sv_mode(hid, 2, format);
+    Sleep(200); /* the controller needs a moment between off and on */
+
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    int64_t next = hos_now_ns();
+    int64_t last_signal = 0;
+    int fails_in_row = 0;
+    while (InterlockedCompareExchange(&rh_sv_run, 1, 1) == 1) {
+        next += period;
+        AcquireSRWLockExclusive(&rh_sv_lock);
+        RenHdcDualSenseDsp *dsp = rh_sv_dsp;
+        ReleaseSRWLockExclusive(&rh_sv_lock);
+        if (!dsp) break;
+
+        int r = rh.sv_build(dsp, format, report);
+        int64_t now = hos_now_ns();
+        if (r == 1) last_signal = now;
+        if (r >= 0 && last_signal != 0 && now - last_signal < RH_STEAM_TAIL_NS) {
+            if (sdl.hid_write(hid, report, sizeof report) < 0) fails_in_row++;
+            else fails_in_row = 0;
+        }
+        if (fails_in_row >= RH_STEAM_FAILS_MAX) {
+            hos_log("renhdrum: steam controller grip writes failing, using standard rumble");
+            gave_up = 1;
+            break;
+        }
+        if (next > now) {
+            int64_t ns = next - now;
+            if (timer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -(ns / 100 > 0 ? ns / 100 : 1);
+                if (SetWaitableTimerEx(timer, &due, 0, NULL, NULL, NULL, 0)) {
+                    WaitForSingleObject(timer, INFINITE);
+                    continue;
+                }
+            }
+            if (ns >= 2000000LL) Sleep((DWORD)((ns - 1000000LL) / 1000000LL));
+            while (hos_now_ns() < next) SwitchToThread();
+        } else if (now - next > 100000000LL) {
+            next = now; /* stalled > 100 ms: resync instead of bursting */
+        }
+    }
+    if (timer) CloseHandle(timer);
+    rh_sv_mode(hid, 1, format);
+    rh_sv_mode(hid, 1, 0);
+    InterlockedExchange(&rh_sv_run, 0);
+    if (gave_up) rh_pads_set_claimed(pad, 0); /* the pad goes back to Hookshot's own rumble */
+    return 0;
+}
+
+/* Stops the Steam grips (pad == NULL: whichever pad has them); returns the pad it released, or NULL */
+static void *rh_sv_stop(void *pad) {
+    AcquireSRWLockExclusive(&rh_sv_lock);
+    if (!rh_sv_pad || (pad && rh_sv_pad != pad)) {
+        ReleaseSRWLockExclusive(&rh_sv_lock);
+        return NULL;
+    }
+    void *had = rh_sv_pad;
+    void *hid = rh_sv_hid;
+    HANDLE th = rh_sv_thread;
+    RenHdcDualSenseDsp *dsp = rh_sv_dsp;
+    rh_sv_pad = NULL;
+    rh_sv_hid = NULL;
+    rh_sv_thread = NULL;
+    rh_sv_dsp = NULL;
+    InterlockedExchange(&rh_sv_run, 0);
+    ReleaseSRWLockExclusive(&rh_sv_lock);
+
+    if (th) {
+        DWORD w = WaitForSingleObject(th, 2000);
+        CloseHandle(th);
+        if (w != WAIT_OBJECT_0) {
+            hos_log("renhdrum: Steam grips worker did not stop within 2000 ms (wait=0x%lx); skipping hid_close/dsp destroy",
+                    (unsigned long)w);
+            return had;
+        }
+    }
+    if (hid && sdl.hid_close) sdl.hid_close(hid);
+    if (dsp && rh.ds_destroy) rh.ds_destroy(dsp);
+    return had;
+}
+
+static const char *rh_pad_hid_path(void *pad) {
+    void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
+    const char *path = NULL;
+    if (sdl.is_sdl3 && sdl.get_gamepad_path) path = sdl.get_gamepad_path(pad);
+    if (!sdl.is_sdl3 && sdl.get_controller_path) path = sdl.get_controller_path(pad);
+    if ((!path || !*path) && sdl.get_joy_path && joy) path = sdl.get_joy_path(joy);
+    return path;
+}
+
 static DWORD WINAPI rh_worker(void *arg) {
     (void)arg;
     uint8_t pkt[10];
@@ -643,6 +838,45 @@ static DWORD WINAPI rh_worker(void *arg) {
         if (send_pkt && target && sdl.send_effect) {
             sdl.send_effect(target, pkt, 10);
         }
+
+        /* Xbox One S: stale watchdog and tick; the four motors go out of the lock. The numbers come from the core as
+           they are (grips last longer than a tick, trigger pulses stay short so a lost stop cannot leave them on) */
+        uint16_t motors[4];
+        int send_xb = 0;
+        void *xb_target = NULL;
+        AcquireSRWLockExclusive(&rh_xb_lock);
+        if (rh_xb) {
+            for (int s = 0; s < 2; s++) {
+                if (rh_xb_at[s] && !rh_xb_muted[s] && (now_us - rh_xb_at[s] > RH_STALE_US)) {
+                    rh.xb_push(rh_xb, now_us, s == 1, 0.0f, 160.0f, 0.0f, 320.0f);
+                    rh_xb_muted[s] = 1;
+                }
+            }
+            send_xb = rh.xb_tick(rh_xb, now_us, motors) == 1;
+            xb_target = rh_xb_joy;
+        }
+        ReleaseSRWLockExclusive(&rh_xb_lock);
+        if (send_xb && xb_target) {
+            int ok = sdl_ok(sdl.rumble_joy(xb_target, motors[0], motors[1], 2000));
+            if (sdl.rumble_joy_trig) sdl.rumble_joy_trig(xb_target, motors[2], motors[3], 200);
+            if (!ok && rh.xb_resend) { /* some paths refuse rumble until the first press: try again next tick */
+                AcquireSRWLockExclusive(&rh_xb_lock);
+                if (rh_xb) rh.xb_resend(rh_xb);
+                ReleaseSRWLockExclusive(&rh_xb_lock);
+            }
+        }
+
+        /* Steam grips watchdog (the sender is its own thread) */
+        AcquireSRWLockExclusive(&rh_sv_lock);
+        if (rh_sv_dsp) {
+            for (int s = 0; s < 2; s++) {
+                if (rh_sv_at[s] && !rh_sv_muted[s] && (now_us - rh_sv_at[s] > RH_STALE_US)) {
+                    rh.ds_set_half_target(rh_sv_dsp, s == 1, 0.0f, 160.0f, 0.0f, 320.0f);
+                    rh_sv_muted[s] = 1;
+                }
+            }
+        }
+        ReleaseSRWLockExclusive(&rh_sv_lock);
 
         /* DualSense watchdog & periodic audio retry */
         int need_audio_retry = 0;
@@ -687,11 +921,25 @@ void rh_attach(void *pad) {
     rh_pads_track(pad);
     const char *off = getenv("HOOKSHOT_RENHDRUM");
     if (off && !strcmp(off, "0")) return;
+    if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) return;
     init_sdl();
     if (!sdl.get_vid || !sdl.get_pid) return;
 
     uint16_t vid = sdl.get_vid(pad);
     uint16_t pid = sdl.get_pid(pad);
+
+    /* Steam Input's stand-in pad (host/steam_pads.h: it has a Steam handle, a real pad has none) is never claimed: Steam
+       owns the real pad's rumble then, and a second sender on it (HID grips, or SDL rumble on the stand-in) would play
+       twice. A stand-in that opens after the Steam grips started takes them back. */
+    if (sdl.get_steam_handle && sdl.get_steam_handle(pad) != 0) {
+        rh_pads_mark_stand_in(pad);
+        void *old = rh_sv_stop(NULL);
+        if (old) {
+            rh_pads_set_claimed(old, 0);
+            hos_log("renhdrum: steam stand-in pad opened, Steam controller grips go back to Steam Input");
+        }
+        return;
+    }
 
     int bt = 0;
     if (sdl.is_sdl3 && sdl.get_conn) {
@@ -894,11 +1142,115 @@ void rh_attach(void *pad) {
         rh_ds_try_open_audio();
         return;
     }
+
+    /* Steam Controller 2026 (VID 0x28DE, PID 1302 wired / 1303 Bluetooth / 1304 dongle): grips over HID, experimental */
+    if (vid == 0x28DE && (pid == 0x1302 || pid == 0x1303 || pid == 0x1304)) {
+        if (rh_stand_in_tracked()) {
+            hos_log("renhdrum: steam controller: Steam Input's pad is open, its rumble stays with Steam");
+            return;
+        }
+        if (!rh_load()) return;
+        if (!rh.sv_create || !rh.sv_build || !rh.ds_set_half_target || !rh.ds_destroy) {
+            hos_log("renhdrum: steam controller: valve grip functions missing in renhdrum.dll, using standard rumble");
+            return;
+        }
+        if (!sdl.hid_open_path || !sdl.hid_write) return;
+
+        AcquireSRWLockExclusive(&rh_sv_lock);
+        int sv_busy = (rh_sv_dsp != NULL);
+        ReleaseSRWLockExclusive(&rh_sv_lock);
+        if (sv_busy) return;
+
+        const char *path = rh_pad_hid_path(pad);
+        void *hid = (path && *path) ? sdl.hid_open_path(path) : NULL;
+        if (!hid) {
+            hos_log("renhdrum: steam controller: no HID path or open failed, using standard rumble");
+            return;
+        }
+        RenHdcDualSenseDsp *dsp = rh.sv_create(100, true);
+        if (!dsp) {
+            if (sdl.hid_close) sdl.hid_close(hid);
+            hos_log("renhdrum: off (steam grip dsp create failed)");
+            return;
+        }
+
+        AcquireSRWLockExclusive(&rh_sv_lock);
+        rh_sv_dsp = dsp;
+        rh_sv_pad = pad;
+        rh_sv_hid = hid;
+        rh_sv_format = pid == 0x1302 ? RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K : RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K;
+        rh_sv_at[0] = rh_sv_at[1] = 0;
+        rh_sv_muted[0] = rh_sv_muted[1] = 0;
+        InterlockedExchange(&rh_sv_run, 1);
+        rh_sv_thread = CreateThread(NULL, 0, rh_sv_worker, NULL, 0, NULL);
+        const int started = rh_sv_thread != NULL;
+        ReleaseSRWLockExclusive(&rh_sv_lock);
+        if (!started) {
+            hos_log("renhdrum: off (cannot create steam grips thread)");
+            rh_sv_stop(pad);
+            return;
+        }
+        /* The grips' rumble motors would fight the audio */
+        if (sdl.rumble_pad) sdl.rumble_pad(pad, 0, 0, 0);
+        rh_pads_set_claimed(pad, 1);
+        rh_ensure_worker(); /* its watchdog mutes a rumble the game stopped sending */
+        hos_log("renhdrum: on (steam controller grips, experimental, %s kHz)", pid == 0x1302 ? "8" : "4");
+        return;
+    }
+
+    /* Xbox One S: SDL type XBOXONE, or Microsoft's vendor id (a third-party XInput pad may get another type).
+       Motor numbers and curves come from the core; the bridge sets none. */
+    const int xb_type = sdl.get_type ? sdl.get_type(pad) : 0;
+    if (xb_type == (sdl.is_sdl3 ? 3 : 2) /* XBOXONE */ || vid == 0x045E) {
+        if (!rh_load()) return;
+        if (!rh.xb_create || !rh.xb_destroy || !rh.xb_push || !rh.xb_tick) {
+            hos_log("renhdrum: xbox: rumble functions missing in renhdrum.dll, using standard rumble");
+            return;
+        }
+        if (!sdl.rumble_joy) {
+            hos_log("renhdrum: xbox: this SDL has no joystick rumble call, using standard rumble");
+            return;
+        }
+        AcquireSRWLockExclusive(&rh_xb_lock);
+        int xb_busy = (rh_xb != NULL);
+        ReleaseSRWLockExclusive(&rh_xb_lock);
+        if (xb_busy) return;
+
+        /* a connection SDL cannot tell counts as Bluetooth (the safer 20 ms ticks) */
+        const int xb_bt = (sdl.is_sdl3 && sdl.get_conn) ? sdl.get_conn(pad) != 1 /* WIRED */ : bt;
+        RenHdcXboxRumble *x = rh.xb_create(xb_bt != 0);
+        if (!x) {
+            hos_log("renhdrum: off (xbox rumble create failed)");
+            return;
+        }
+        void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
+        AcquireSRWLockExclusive(&rh_xb_lock);
+        if (rh_xb) {
+            ReleaseSRWLockExclusive(&rh_xb_lock);
+            rh.xb_destroy(x);
+            return;
+        }
+        rh_xb = x;
+        rh_xb_pad = pad;
+        rh_xb_joy = joy;
+        rh_xb_at[0] = rh_xb_at[1] = 0;
+        rh_xb_muted[0] = rh_xb_muted[1] = 0;
+        ReleaseSRWLockExclusive(&rh_xb_lock);
+
+        rh_pads_set_claimed(pad, 1);
+        rh_ensure_worker();
+        hos_log("renhdrum: on (xbox %s)", xb_bt ? "bluetooth" : "usb");
+        return;
+    }
 }
 
-int rh_detach(void *pad) {
+static int rh_detach_engines(void *pad, int untrack) {
     int detached_any = 0;
-    rh_pads_untrack(pad);
+    if (untrack) {
+        rh_pads_untrack(pad);
+    } else {
+        rh_pads_clear_claimed();
+    }
 
     /* Pro Controller detach */
     AcquireSRWLockExclusive(&rh_lock);
@@ -974,7 +1326,30 @@ int rh_detach(void *pad) {
         ReleaseSRWLockExclusive(&rh_ds_lock);
     }
 
-    /* Stop worker if neither controller is active */
+    /* Xbox detach: all four motors to 0 */
+    AcquireSRWLockExclusive(&rh_xb_lock);
+    if (rh_xb_pad && (!pad || rh_xb_pad == pad)) {
+        void *joy = rh_xb_joy ? rh_xb_joy : rh_xb_pad;
+        RenHdcXboxRumble *x = rh_xb;
+        rh_xb = NULL;
+        rh_xb_pad = NULL;
+        rh_xb_joy = NULL;
+        ReleaseSRWLockExclusive(&rh_xb_lock);
+
+        if (joy && sdl.rumble_joy) {
+            sdl.rumble_joy(joy, 0, 0, 0);
+            if (sdl.rumble_joy_trig) sdl.rumble_joy_trig(joy, 0, 0, 0);
+        }
+        if (x && rh.xb_destroy) rh.xb_destroy(x);
+        detached_any = 1;
+    } else {
+        ReleaseSRWLockExclusive(&rh_xb_lock);
+    }
+
+    /* Steam grips detach: the thread turns the PCM mode off, then the handle closes (rh_sv_stop) */
+    if (rh_sv_stop(pad)) detached_any = 1;
+
+    /* Stop worker if no pad it serves is active */
     AcquireSRWLockExclusive(&rh_lock);
     int pro_active = (rh_engine != NULL);
     ReleaseSRWLockExclusive(&rh_lock);
@@ -983,7 +1358,15 @@ int rh_detach(void *pad) {
     int ds_active = (rh_ds_dsp != NULL);
     ReleaseSRWLockExclusive(&rh_ds_lock);
 
-    if (!pro_active && !ds_active) {
+    AcquireSRWLockExclusive(&rh_xb_lock);
+    int xb_active = (rh_xb != NULL);
+    ReleaseSRWLockExclusive(&rh_xb_lock);
+
+    AcquireSRWLockExclusive(&rh_sv_lock);
+    int sv_active = (rh_sv_dsp != NULL);
+    ReleaseSRWLockExclusive(&rh_sv_lock);
+
+    if (!pro_active && !ds_active && !xb_active && !sv_active) {
         HANDLE t = rh_thread;
         rh_thread = NULL;
         InterlockedExchange(&rh_run, 0);
@@ -996,8 +1379,68 @@ int rh_detach(void *pad) {
     return 1;
 }
 
+int rh_detach(void *pad) {
+    return rh_detach_engines(pad, 1);
+}
+
+void rh_set_enabled(int on) {
+    LONG next = on ? 1 : 0;
+    LONG prev = InterlockedExchange(&rh_enabled, next);
+    if (prev == next) return;
+    if (!next) {
+        rh_detach_engines(NULL, 0);
+        return;
+    }
+    void *pads[RH_MAX_PADS];
+    int n = 0;
+    AcquireSRWLockShared(&rh_pads_lock);
+    for (int i = 0; i < RH_MAX_PADS; i++) {
+        if (rh_conn_pads[i]) pads[n++] = rh_conn_pads[i];
+    }
+    ReleaseSRWLockShared(&rh_pads_lock);
+    for (int i = 0; i < n; i++) rh_attach(pads[i]);
+}
+
+const char *rh_status_line(void) {
+    if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) {
+        return "HD Rumble is off: using normal rumble";
+    }
+    AcquireSRWLockExclusive(&rh_lock);
+    if (rh_engine) {
+        int bt = rh_is_bt;
+        ReleaseSRWLockExclusive(&rh_lock);
+        return bt ? "Connected: Pro Controller (Bluetooth), HD Rumble" : "Connected: Pro Controller (USB), HD Rumble";
+    }
+    ReleaseSRWLockExclusive(&rh_lock);
+
+    AcquireSRWLockExclusive(&rh_ds_lock);
+    if (rh_ds_dsp && (!rh_ds_is_bt || InterlockedCompareExchange(&rh_ds_bt_run, 1, 1) == 1)) {
+        int bt = rh_ds_is_bt;
+        ReleaseSRWLockExclusive(&rh_ds_lock);
+        return bt ? "Connected: DualSense (Bluetooth), HD Rumble" : "Connected: DualSense (USB), HD Rumble";
+    }
+    ReleaseSRWLockExclusive(&rh_ds_lock);
+
+    AcquireSRWLockExclusive(&rh_xb_lock);
+    if (rh_xb) {
+        ReleaseSRWLockExclusive(&rh_xb_lock);
+        return "Connected: Xbox One S, HD Rumble (4 motors)";
+    }
+    ReleaseSRWLockExclusive(&rh_xb_lock);
+
+    AcquireSRWLockExclusive(&rh_sv_lock);
+    if (rh_sv_dsp && InterlockedCompareExchange(&rh_sv_run, 1, 1) == 1) {
+        ReleaseSRWLockExclusive(&rh_sv_lock);
+        return "Steam Controller: HD Rumble (experimental)";
+    }
+    ReleaseSRWLockExclusive(&rh_sv_lock);
+
+    return "No controller HD Rumble supports: normal rumble";
+}
+
 int rh_vibration(int side, float al, float fl, float ah, float fh) {
     if (side < 0 || side > 1) return 0;
+    if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) return 0;
     int handled = 0;
     int64_t now_us = hos_now_ns() / 1000;
 
@@ -1022,6 +1465,24 @@ int rh_vibration(int side, float al, float fl, float ah, float fh) {
         }
     }
     ReleaseSRWLockExclusive(&rh_ds_lock);
+
+    AcquireSRWLockExclusive(&rh_xb_lock);
+    if (rh_xb) {
+        rh.xb_push(rh_xb, now_us, side == 1, al, fl, ah, fh);
+        rh_xb_at[side] = now_us;
+        rh_xb_muted[side] = 0;
+        handled = 1;
+    }
+    ReleaseSRWLockExclusive(&rh_xb_lock);
+
+    AcquireSRWLockExclusive(&rh_sv_lock);
+    if (rh_sv_dsp && InterlockedCompareExchange(&rh_sv_run, 1, 1) == 1) {
+        rh.ds_set_half_target(rh_sv_dsp, side == 1, al, fl, ah, fh);
+        rh_sv_at[side] = now_us;
+        rh_sv_muted[side] = 0;
+        handled = 1;
+    }
+    ReleaseSRWLockExclusive(&rh_sv_lock);
 
     return (handled && rh_all_pads_claimed()) ? 1 : 0;
 }
@@ -1048,6 +1509,16 @@ int rh_is_active(void *pad) {
         }
     }
     ReleaseSRWLockExclusive(&rh_ds_lock);
+    if (active) return 1;
+
+    AcquireSRWLockExclusive(&rh_xb_lock);
+    if (rh_xb && rh_xb_pad == pad) active = 1;
+    ReleaseSRWLockExclusive(&rh_xb_lock);
+    if (active) return 1;
+
+    AcquireSRWLockExclusive(&rh_sv_lock);
+    if (rh_sv_dsp && rh_sv_pad == pad && InterlockedCompareExchange(&rh_sv_run, 1, 1) == 1) active = 1;
+    ReleaseSRWLockExclusive(&rh_sv_lock);
     return active;
 }
 

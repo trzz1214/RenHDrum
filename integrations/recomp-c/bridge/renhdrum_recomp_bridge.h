@@ -16,6 +16,8 @@ void rh_permit(int on);
 void rh_cleanup(void);
 int rh_is_active(void *pad);
 int rh_pad_claimed(int i);
+void rh_set_enabled(int on);
+const char *rh_status_line(void);
 int rh_ds_render_frames(float *out, int frames);
 
 #ifdef __cplusplus

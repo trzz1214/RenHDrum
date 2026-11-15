@@ -1,5 +1,5 @@
 diff --git a/.gitignore b/.gitignore
-index 736ed96..84b04f6 100644
+index 6545e052..202d008c 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -17,7 +17,10 @@ gamefile/
@@ -13,19 +13,126 @@ index 736ed96..84b04f6 100644
  __pycache__/
  *.pyc
  *.o
+diff --git a/gpu/vk/vk_api.h b/gpu/vk/vk_api.h
+index 8f33df33..70f722db 100644
+--- a/gpu/vk/vk_api.h
++++ b/gpu/vk/vk_api.h
+@@ -47,6 +47,8 @@ enum { HOS_OPT_HDR_TONEMAP = 47 };
+ /* Gameplay's vertical field of view, percent of the game's current angle; 100 is unchanged. */
+ /* 49 and 50 are reserved for Walk mode and Walk speed (#2345). */
+ enum { HOS_OPT_FOV = 51 };
++/* RenHDrum HD Rumble (host/rh_bridge.c): 1 on (default; Rumble strength is locked), 0 off (Hookshot's normal rumble). */
++enum { HOS_OPT_HD_RUMBLE = 52 };
+ 
+ /* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of hookshot_options.ini):
+    the Switch's buttons in nn::hid's bit order, and a gamepad's inputs by position (the bottom face button first:
+@@ -183,6 +185,8 @@ typedef struct MkwVkHost {
+     /* (version 17, hookshot) what of the button prompts a change of face or controls reaches at once (host/prompts.c):
+        HOS_PROMPTS_LIVE_* bits; 0 none (a mod's files, built without the prompts, or not loaded yet) */
+     int (*prompts_live)(void);
++    /* (renhdrum) 1-line HD Rumble controller status for the Insert -> Controls help box (host/rh_bridge.c) */
++    const char *(*hd_rumble_status)(void);
+ } MkwVkHost;
+ 
+ /* One completed temporal-upscale sample; all zero while inactive. */
+diff --git a/gpu/vk/vk_menu.cpp b/gpu/vk/vk_menu.cpp
+index 220e5d7e..d68244df 100644
+--- a/gpu/vk/vk_menu.cpp
++++ b/gpu/vk/vk_menu.cpp
+@@ -537,7 +537,8 @@ bool row_fixed(const int* value) {
+     return (value == &opts.dlss && ur::upscaler_fixed(upscalers_available())) ||
+            (value == &opts.resolution && ur::render_fixed(upscaler())) || (value == &opts.upscale && !filter_needed()) ||
+            (value == &opts.dlss_model && ur::model_fixed(upscaler(), dlss_preset_env() != nullptr)) ||
+-           (value == &opts.astc_rgba8 && getenv("RX_VK_ASTC_RGBA8"));   // (set for the run: vk_texture.cpp reads it first)
++           (value == &opts.astc_rgba8 && getenv("RX_VK_ASTC_RGBA8")) ||   // (set for the run: vk_texture.cpp reads it first)
++           (value == &opts.rumble && opts.hd_rumble != 0);
+ }
+ const char* tx_output_res(int v) {
+     static char b[40];
+@@ -884,6 +885,25 @@ MENU_HINTS(hn_pad_layout, 0, "The Switch's order: A on the right, B at the botto
+            "Bindings of your own, from the Controls page.")
+ MENU_HINTS(hn_prompts, 0,
+            "Those of the first controller, from its name (SDL's). The Switch's when it has none, as with XInput alone.")
++const char* hn_hd_rumble(int v, int variant) {
++    if (v == 0) {
++        return variant <= 0 ? "HD Rumble is off: using normal rumble (Rumble strength applies)." : nullptr;
++    }
++    if (variant < 0) {
++        return host && host->hd_rumble_status ? host->hd_rumble_status()
++                                              : "No controller HD Rumble supports: normal rumble";
++    }
++    static const char* const kStatus[] = {
++        "Connected: Pro Controller (USB), HD Rumble",
++        "Connected: Pro Controller (Bluetooth), HD Rumble",
++        "Connected: DualSense (USB), HD Rumble",
++        "Connected: DualSense (Bluetooth), HD Rumble",
++        "Connected: Xbox One S, HD Rumble (4 motors)",
++        "Steam Controller: HD Rumble (experimental)",
++        "No controller HD Rumble supports: normal rumble",
++    };
++    return variant < (int)(sizeof(kStatus) / sizeof(kStatus[0])) ? kStatus[variant] : nullptr;
++}
+ 
+ Row rows[] = {
+     // Graphics, in sections: a heading row is a section's title (draw_options draws it, the selection steps over it). The
+@@ -1028,6 +1048,10 @@ Row rows[] = {
+     {TAB_CONTROLS, "Stick dead zone", &opts.stick_dead_zone, 0, 5, 1, tx_stick_dead_zone,
+      "How far a stick moves before the game sees it, on each axis. Lower for a precise stick, higher for one that drifts. "
+      "The game's own dead zone still follows.", nullptr, false, true},
++    {TAB_CONTROLS, "HD Rumble", &opts.hd_rumble, 0, 1, 1, tx_onoff,
++     "HD Rumble plays the game's rumble with its own frequencies on Switch Pro, DualSense, Xbox One S and Steam "
++     "Controller (experimental). While it is on, Rumble strength is locked so the rumble stays accurate.",
++     hn_hd_rumble, false, true},
+     {TAB_CONTROLS, "Rumble strength", &opts.rumble, 0, 150, 25, tx_rumble,
+      "How strongly the controller rumbles, in percent of the game's rumble. Off turns it off.", nullptr, false, true},
+     {TAB_MOTION, "Motion controls", &opts.gyro, 0, 1, 1, tx_gyro,
+@@ -2734,7 +2758,8 @@ void row_value_cell(ui::Ctx& c, const Row& r, ImVec2 va, ImVec2 vb, bool selecte
+             const bool output_row = r.value == &opts.output_res;
+             const bool left = !fixed && (!output_row || step_output_choice(*r.value, -1) != *r.value) && (!stops_at_ends(r) || *r.value > r.lo);
+             const bool right = !fixed && (!output_row || step_output_choice(*r.value, 1) != *r.value) && (!stops_at_ends(r) || *r.value < r.hi);
+-            choice_cell(c, va, vb, r.text(*r.value), selected, left, right, fixed);
++            const std::string val = (fixed && r.value == &opts.rumble) ? std::string("-") : r.text(*r.value);
++            choice_cell(c, va, vb, val, selected, left, right, fixed);
+         }
+     }
+ }
+diff --git a/gpu/vk/vk_menu.h b/gpu/vk/vk_menu.h
+index 25e17441..bb0c817a 100644
+--- a/gpu/vk/vk_menu.h
++++ b/gpu/vk/vk_menu.h
+@@ -65,6 +65,7 @@ struct Options {
+     int camera_speed = 100;   // (hookshot) the right stick's camera turn in percent of the game's, 50 to 400 (host/nn_vi.c, nx2/oot_patches.py: HOS_OPT_CAMERA_SPEED, 48)
+     int invert_cam_x = 0; // right-stick camera horizontal inversion: 0 normal, 1 inverted
+     int invert_cam_y = 0; // right-stick camera vertical inversion: 0 normal, 1 inverted
++    int hd_rumble = 1;    // RenHDrum HD Rumble (host/rh_bridge.c): 1 on (locks Rumble strength), 0 off (normal rumble)
+     int rumble = 100;     // the controllers' rumble in percent of the game's: 0 Off, 25 to 150 (host/pad_sdl.c)
+     int stick_dead_zone = 0;  // a stick axis below it is 0: 0 XInput's 7849 (~24%), 1..5 5% to 30% (host/nn_hid.c)
+     int pad_layout = 0;   // 0 Nintendo (default), 1 Xbox / PC, 2 Swap Face Buttons, 3 Custom
+diff --git a/gpu/vk/vk_replay.cpp b/gpu/vk/vk_replay.cpp
+index 7ce2f6aa..31e227c3 100644
+--- a/gpu/vk/vk_replay.cpp
++++ b/gpu/vk/vk_replay.cpp
+@@ -5022,6 +5022,7 @@ void fill_replay_table(MkwVkRenderer& t) {
+         if (id == HOS_OPT_CAMERA_SPEED) return opts.camera_speed;
+         if (id == HOS_OPT_PROMPTS) return opts.prompts;
+         if (id == HOS_OPT_FOV) return opts.fov;
++        if (id == HOS_OPT_HD_RUMBLE) return opts.hd_rumble;
+         return id == 0 ? opts.realtime : id == 1 ? menu_is_open() : id == 2 ? resolution_auto() && !temporal_full_scale() : id == 3 ? (temporal_full_scale() ? 10000 : resolution_scale()) : id == 4 ? opts.pad_background : id == 5 ? opts.text_speed : id == 6 ? opts.mouse_native :
+                id == 7 ? opts.mouse_sens : id == 8 ? opts.mouse_invert : id == 9 ? opts.rumble : id == 16 ? opts.invert_cam_x : id == 17 ? opts.invert_cam_y : id == HOS_OPT_GYRO ? opts.gyro : id == HOS_OPT_GYRO_SENS_X ? opts.gyro_sens_x : id == HOS_OPT_GYRO_SENS_Y ? opts.gyro_sens_y : id == HOS_OPT_GYRO_INV_X ? opts.gyro_inv_x : id == HOS_OPT_GYRO_INV_Y ? opts.gyro_inv_y : id == HOS_OPT_GYRO_DEADZONE ? opts.gyro_deadzone :
+                id == HOS_OPT_DLSS_JITTER_W || id == HOS_OPT_DLSS_JITTER_H || id == HOS_OPT_DLSS_JITTER_PHASES ? jitter_option(id) : 0;
 diff --git a/host/nn_hid.c b/host/nn_hid.c
-index 4688954..c3d7910 100644
+index 0cfc1e13..b80036d7 100644
 --- a/host/nn_hid.c
 +++ b/host/nn_hid.c
-@@ -26,6 +26,7 @@
-    pad } = 0x28 bytes. */
+@@ -27,6 +27,7 @@
  #include "hos.h"
  #include "hos_paths.h"
+ #include "control.h"
 +#include "rh_bridge.h"
  #include <math.h>
  #include <stdio.h>
  #include <stdlib.h>
-@@ -1076,6 +1077,9 @@ static void vibration_send(uint64_t handle, uint64_t value) {
+@@ -1138,6 +1139,9 @@ static void vibration_send(uint64_t handle, uint64_t value) {
      float v[4];
      memcpy(v, GP(value), sizeof v);
      const int dev = (G32(handle) >> 16) & 1;
@@ -35,7 +142,7 @@ index 4688954..c3d7910 100644
      rumble_map(v, amp[dev]);
      {   /* (hookshot, issue 263) what the game asks for: the first values, then a count now and then */
          static long long n, strong;
-@@ -1095,7 +1099,10 @@ static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low,
+@@ -1157,7 +1161,10 @@ static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low,
      float idle[4] = {0.0f, 160.0f, 0.0f, 320.0f};
      memcpy(GP(v), idle, sizeof idle);
  }
@@ -47,7 +154,7 @@ index 4688954..c3d7910 100644
  HLE(_ZN2nn3hid6detail20IsVibrationPermittedEPb) { *(uint8_t *)GP(ARG(0)) = 1; RET(0); }
  HLE(_ZN2nn3hid6detail27BeginPermitVibrationSessionEv) { RET(0); }
  HLE(_ZN2nn3hid6detail25EndPermitVibrationSessionEv) { RET(0); }
-@@ -1124,6 +1131,8 @@ HLE(_ZN2nn3hid6detail30GetActualVibrationGcErmCommandEPNS0_21VibrationGcErmComma
+@@ -1186,6 +1193,8 @@ HLE(_ZN2nn3hid6detail30GetActualVibrationGcErmCommandEPNS0_21VibrationGcErmComma
      RET(0);
  }
  HLE(_ZN2nn3hid6detail24IsVibrationDeviceMountedEPbRKNS0_21VibrationDeviceHandleE) { *(uint8_t *)GP(ARG(0)) = 1; RET(0); }
@@ -57,18 +164,18 @@ index 4688954..c3d7910 100644
      vibration_send(ARG(0), ARG(1));
      RET(0);
 diff --git a/host/pad_sdl.c b/host/pad_sdl.c
-index 7fd8d55..2bbcca0 100644
+index 92533e3e..07c00af0 100644
 --- a/host/pad_sdl.c
 +++ b/host/pad_sdl.c
-@@ -22,6 +22,7 @@
- #include "hos_sdl.h"
+@@ -23,6 +23,7 @@
  #include "hd_rumble.h"
  #include "hos_motion.h"
+ #include "steam_pads.h"
 +#include "rh_bridge.h"
  #include "../gpu/vk/vk_api.h"   /* (HOS_PAD_*) */
- 
- void hos_host_thread_register_self(const char *name);   /* hos_prof.c */
-@@ -82,6 +83,18 @@ static int32_t stick_value(int16_t v, int flip, int zone) {
+ #ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+ #include "../gpu/vk/compat/hookshot_env.h"
+@@ -90,6 +91,18 @@ static int32_t stick_value(int16_t v, int flip, int zone) {
  }
  
  /* SDL's controller support started; 0 when it could not be */
@@ -87,7 +194,7 @@ index 7fd8d55..2bbcca0 100644
  static int pads_start(void) {
      /* poll in the background, whatever window is in front (nn_hid.c decides when input counts) */
      hos_sdl_hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
-@@ -99,6 +112,7 @@ static int pads_start(void) {
+@@ -118,6 +131,7 @@ static int pads_start(void) {
          hos_log("hid: SDL could not start its controller support: %s", hos_sdl_error());
          return 0;
      }
@@ -95,7 +202,16 @@ index 7fd8d55..2bbcca0 100644
      hos_log("hid: SDL controller support ready (DualSense, DualShock 4, Switch Pro, Xbox and others)");
      return 1;
  }
-@@ -284,6 +298,7 @@ static void pads_poll(void) {
+@@ -332,6 +346,8 @@ static void motion_only_used(int i, int64_t now) {
+ /* one poll: controllers plugged in or gone (each second), then every open one's buttons, sticks and rumble */
+ static void pads_poll(void) {
+     static int64_t next_scan = 0;
++    int rx_option(int id, int otherwise);
++    rh_set_enabled(rx_option(HOS_OPT_HD_RUMBLE, 1) != 0);
+     hos_sdl_pads_update();
+         const int64_t now = hos_now_ns();
+         if (now >= next_scan) {   /* new controllers (and ones that went away) */
+@@ -339,6 +355,7 @@ static void pads_poll(void) {
              for (int i = 0; i < MAX_PADS; i++)
                  if (pads[i].gc && !hos_sdl_pad_connected(pads[i].gc)) {
                      hos_log("hid: controller \"%s\" disconnected (SDL)", hos_sdl_pad_name(pads[i].gc));
@@ -103,15 +219,15 @@ index 7fd8d55..2bbcca0 100644
                      hos_sdl_pad_close(pads[i].gc);
                      pads[i].gc = NULL;
                      pads[i].rumble_lo = pads[i].rumble_hi = 0;
-@@ -318,6 +333,7 @@ static void pads_poll(void) {
-                 pads[slot].has_bias = 0;
-                 hos_log("hid: controller \"%s\" connected (SDL)%s", hos_sdl_pad_name(gc),
-                         pads[slot].motion ? ", with a gyroscope" : "");
+@@ -376,6 +393,7 @@ static void pads_poll(void) {
+                 pads[slot].motion_only = 0;   /* (the poll below decides, and says so) */
+                 hos_log("hid: controller \"%s\" connected (SDL)%s%s", hos_sdl_pad_name(gc),
+                         pads[slot].motion ? ", with a gyroscope" : "", pads[slot].steam ? ", Steam Input's" : "");
 +                rh_attach(gc);
              }
          }
          uint64_t b = 0;
-@@ -379,6 +395,7 @@ static void pads_poll(void) {
+@@ -465,6 +483,7 @@ static void pads_poll(void) {
                  for (int k = 0; k < 4; k++) sig |= (uint64_t)(v[k] > 0 ? 1 : v[k] < 0 ? 2 : 0) << (32 + 2 * k);
                  if (sig != pads[i].input_sig) pads[i].input_sig = sig, pads[i].used_ns = now;
              }
@@ -121,23 +237,21 @@ index 7fd8d55..2bbcca0 100644
                  hos_sdl_pad_rumble(gc, lo, hi, lo || hi ? 1000 : 0);
 diff --git a/host/renhdrum.h b/host/renhdrum.h
 new file mode 100644
-index 0000000..d32dfe5
+index 00000000..237ab0a9
 --- /dev/null
 +++ b/host/renhdrum.h
-@@ -0,0 +1,325 @@
-+// Source: RenHDrum, include/renhdrum.h (MIT OR Apache-2.0). Hookshot integration.
+@@ -0,0 +1,323 @@
 +#ifndef RENHDRUM_H
 +#define RENHDRUM_H
 +
 +#include <stdint.h>
 +#include <stdbool.h>
-+#include <stddef.h>
 +
 +#ifdef __cplusplus
 +extern "C" {
 +#endif
 +
-+#define RENHDRUM_VERSION 0x000302
++#define RENHDRUM_VERSION 0x000400
 +
 +#define RENHDRUM_OK 0
 +#define RENHDRUM_ERR_NULL_PTR -1
@@ -452,13 +566,13 @@ index 0000000..d32dfe5
 +#endif /* RENHDRUM_H */
 diff --git a/host/rh_bridge.c b/host/rh_bridge.c
 new file mode 100644
-index 0000000..01c7557
+index 00000000..ef517969
 --- /dev/null
 +++ b/host/rh_bridge.c
-@@ -0,0 +1,1056 @@
+@@ -0,0 +1,1527 @@
 +/* host/rh_bridge.c - RenHDrum bridge for Hookshot
-+   Authentic HD Rumble for Nintendo Switch Pro Controller (USB & Bluetooth)
-+   and DualSense 4-channel 48 kHz audio haptics via renhdrum.dll.
++   Authentic HD Rumble for Nintendo Switch Pro Controller (USB & Bluetooth), DualSense 4-channel 48 kHz audio
++   haptics, Xbox One S (4 motors) and Steam Controller 2026 grips (experimental) via renhdrum.dll.
 +   Loaded dynamically at run time.
 +   Co-Authored-By: Claude Sonnet 5.5 + Gemini 3.8 Flash (AGY) */
 +#include "rh_bridge.h"
@@ -504,6 +618,15 @@ index 0000000..01c7557
 +    int32_t (*ds_set_half_target)(RenHdcDualSenseDsp *, bool, float, float, float, float);
 +    int32_t (*ds_fill_f32)(RenHdcDualSenseDsp *, float *, size_t);
 +    int32_t (*ds_build_bt_report)(RenHdcDualSenseDsp *, uint8_t, uint8_t *);
++
++    /* Xbox One S rumble (4 motors) and Steam Controller 2026 grips (valve DSP); optional like the DualSense ones */
++    RenHdcXboxRumble *(*xb_create)(bool);
++    void (*xb_destroy)(RenHdcXboxRumble *);
++    int32_t (*xb_push)(RenHdcXboxRumble *, int64_t, bool, float, float, float, float);
++    int32_t (*xb_tick)(RenHdcXboxRumble *, int64_t, uint16_t *);
++    int32_t (*xb_resend)(RenHdcXboxRumble *);
++    RenHdcDualSenseDsp *(*sv_create)(int32_t, bool);
++    int32_t (*sv_build)(RenHdcDualSenseDsp *, uint8_t, uint8_t *);
 +} rh;
 +
 +static struct {
@@ -517,6 +640,10 @@ index 0000000..01c7557
 +    void (*close_pad)(void *);
 +    int (*rumble_pad)(void *, uint16_t, uint16_t, uint32_t);
 +    void (*free_mem)(void *);
++    int (*get_type)(void *);                       /* SDL_GetGamepadType: Xbox One S by type */
++    uint64_t (*get_steam_handle)(void *);          /* not 0 = Steam Input's stand-in pad (host/steam_pads.h) */
++    int (*rumble_joy)(void *, uint16_t, uint16_t, uint32_t);        /* SDL3 returns bool: see sdl_ok() */
++    int (*rumble_joy_trig)(void *, uint16_t, uint16_t, uint32_t);
 +
 +    /* SDL3 / SDL2 HID & device paths */
 +    const char *(*get_gamepad_path)(void *);
@@ -565,6 +692,10 @@ index 0000000..01c7557
 +        *(FARPROC *)&sdl.close_pad = GetProcAddress(m, "SDL_CloseGamepad");
 +        *(FARPROC *)&sdl.rumble_pad = GetProcAddress(m, "SDL_RumbleGamepad");
 +        *(FARPROC *)&sdl.free_mem = GetProcAddress(m, "SDL_free");
++        *(FARPROC *)&sdl.get_type = GetProcAddress(m, "SDL_GetGamepadType");
++        *(FARPROC *)&sdl.get_steam_handle = GetProcAddress(m, "SDL_GetGamepadSteamHandle");
++        *(FARPROC *)&sdl.rumble_joy = GetProcAddress(m, "SDL_RumbleJoystick");
++        *(FARPROC *)&sdl.rumble_joy_trig = GetProcAddress(m, "SDL_RumbleJoystickTriggers");
 +
 +        *(FARPROC *)&sdl.get_gamepad_path = GetProcAddress(m, "SDL_GetGamepadPath");
 +        *(FARPROC *)&sdl.get_joy_path = GetProcAddress(m, "SDL_GetJoystickPath");
@@ -594,6 +725,10 @@ index 0000000..01c7557
 +        *(FARPROC *)&sdl.close_pad = GetProcAddress(m, "SDL_GameControllerClose");
 +        *(FARPROC *)&sdl.rumble_pad = GetProcAddress(m, "SDL_GameControllerRumble");
 +        *(FARPROC *)&sdl.get_power = GetProcAddress(m, "SDL_JoystickCurrentPowerLevel");
++        *(FARPROC *)&sdl.get_type = GetProcAddress(m, "SDL_GameControllerGetType");
++        *(FARPROC *)&sdl.get_steam_handle = GetProcAddress(m, "SDL_GameControllerGetSteamHandle");
++        *(FARPROC *)&sdl.rumble_joy = GetProcAddress(m, "SDL_JoystickRumble");
++        *(FARPROC *)&sdl.rumble_joy_trig = GetProcAddress(m, "SDL_JoystickRumbleTriggers");
 +
 +        *(FARPROC *)&sdl.get_controller_path = GetProcAddress(m, "SDL_GameControllerPath");
 +        *(FARPROC *)&sdl.get_joy_path = GetProcAddress(m, "SDL_JoystickPath");
@@ -696,6 +831,15 @@ index 0000000..01c7557
 +    *(FARPROC *)&rh.ds_fill_f32 = GetProcAddress(rh.dll, "renhdrum_dualsense_dsp_fill_f32");
 +    *(FARPROC *)&rh.ds_build_bt_report = GetProcAddress(rh.dll, "renhdrum_dualsense_dsp_build_bt_report");
 +
++    /* Xbox One S and Steam Controller grips: a dll without them leaves that pad on Hookshot's own rumble */
++    *(FARPROC *)&rh.xb_create = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_create");
++    *(FARPROC *)&rh.xb_destroy = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_destroy");
++    *(FARPROC *)&rh.xb_push = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_push_half_sample");
++    *(FARPROC *)&rh.xb_tick = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_tick");
++    *(FARPROC *)&rh.xb_resend = GetProcAddress(rh.dll, "renhdrum_xbox_rumble_resend");
++    *(FARPROC *)&rh.sv_create = GetProcAddress(rh.dll, "renhdrum_valve_grip_dsp_create");
++    *(FARPROC *)&rh.sv_build = GetProcAddress(rh.dll, "renhdrum_valve_grip_build_report");
++
 +    return 1;
 +}
 +
@@ -703,6 +847,14 @@ index 0000000..01c7557
 +static SRWLOCK rh_pads_lock = SRWLOCK_INIT;
 +static void *rh_conn_pads[RH_MAX_PADS];
 +static int rh_slot_claimed[RH_MAX_PADS];
++static int rh_slot_stand_in[RH_MAX_PADS];   /* Steam Input's stand-in pad: never claimed (see rh_attach) */
++static volatile LONG rh_enabled = 1;
++
++static void rh_pads_clear_claimed(void) {
++    AcquireSRWLockExclusive(&rh_pads_lock);
++    for (int i = 0; i < RH_MAX_PADS; i++) rh_slot_claimed[i] = 0;
++    ReleaseSRWLockExclusive(&rh_pads_lock);
++}
 +
 +static void rh_pads_track(void *pad) {
 +    if (!pad) return;
@@ -718,6 +870,7 @@ index 0000000..01c7557
 +    if (free_slot >= 0) {
 +        rh_conn_pads[free_slot] = pad;
 +        rh_slot_claimed[free_slot] = 0;
++        rh_slot_stand_in[free_slot] = 0;
 +    }
 +    ReleaseSRWLockExclusive(&rh_pads_lock);
 +}
@@ -740,9 +893,25 @@ index 0000000..01c7557
 +        if (!pad || rh_conn_pads[i] == pad) {
 +            rh_conn_pads[i] = NULL;
 +            rh_slot_claimed[i] = 0;
++            rh_slot_stand_in[i] = 0;
 +        }
 +    }
 +    ReleaseSRWLockExclusive(&rh_pads_lock);
++}
++
++static void rh_pads_mark_stand_in(void *pad) {
++    AcquireSRWLockExclusive(&rh_pads_lock);
++    for (int i = 0; i < RH_MAX_PADS; i++)
++        if (rh_conn_pads[i] && rh_conn_pads[i] == pad) rh_slot_stand_in[i] = 1;
++    ReleaseSRWLockExclusive(&rh_pads_lock);
++}
++
++static int rh_stand_in_tracked(void) {
++    int any = 0;
++    AcquireSRWLockShared(&rh_pads_lock);
++    for (int i = 0; i < RH_MAX_PADS; i++) any |= rh_conn_pads[i] && rh_slot_stand_in[i];
++    ReleaseSRWLockShared(&rh_pads_lock);
++    return any;
 +}
 +
 +int rh_pad_claimed(int i) {
@@ -797,6 +966,30 @@ index 0000000..01c7557
 +static int64_t rh_ds_next_audio_retry_us;
 +static int64_t rh_ds_at[2];
 +static int rh_ds_muted[2];
++
++/* ---- Xbox One S state (4 motors: grips, triggers) ---- */
++static SRWLOCK rh_xb_lock = SRWLOCK_INIT;
++static RenHdcXboxRumble *rh_xb;
++static void *rh_xb_pad;
++static void *rh_xb_joy;
++static int64_t rh_xb_at[2];
++static int rh_xb_muted[2];
++
++/* ---- Steam Controller 2026 grips (HID report 0x88 from a thread; experimental) ---- */
++#define RH_STEAM_FAILS_MAX 100
++#define RH_STEAM_TAIL_NS 100000000LL
++static SRWLOCK rh_sv_lock = SRWLOCK_INIT;
++static RenHdcDualSenseDsp *rh_sv_dsp;
++static void *rh_sv_pad;
++static void *rh_sv_hid;
++static HANDLE rh_sv_thread;
++static volatile LONG rh_sv_run;
++static uint8_t rh_sv_format;
++static int64_t rh_sv_at[2];
++static int rh_sv_muted[2];
++
++/* SDL3's rumble calls return bool (only the low byte is set), SDL2's int 0 when done */
++static int sdl_ok(int r) { return sdl.is_sdl3 ? (r & 0xFF) != 0 : r == 0; }
 +
 +/* ---- Worker thread ---- */
 +static HANDLE rh_thread;
@@ -1066,6 +1259,122 @@ index 0000000..01c7557
 +    return 0;
 +}
 +
++/* Steam Controller 2026 grips (protocol by iafx, RenHDrum#5): HID report 0x86 chooses the PCM mode (op 2 = on, 1 = off,
++   once per channel 2 and 5), then report 0x88 every period while vibrating and for 100 ms after. Only this thread
++   writes to rh_sv_hid; rh_sv_stop joins it before closing the handle. */
++static void rh_sv_mode(void *hid, uint8_t op, uint8_t format) {
++    static const uint8_t channels[2] = {2, 5};
++    for (int i = 0; i < 2; i++) {
++        const uint8_t r[4] = {0x86, op, channels[i], format};
++        sdl.hid_write(hid, r, sizeof r);
++    }
++}
++
++static DWORD WINAPI rh_sv_worker(void *arg) {
++    (void)arg;
++    uint8_t report[RENHDRUM_VALVE_GRIP_REPORT_SIZE];
++    AcquireSRWLockExclusive(&rh_sv_lock);
++    void *hid = rh_sv_hid;
++    const uint8_t format = rh_sv_format;
++    void *pad = rh_sv_pad;
++    ReleaseSRWLockExclusive(&rh_sv_lock);
++    const int64_t period = format == RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K ? (int64_t)RENHDRUM_VALVE_GRIP_PERIOD_NS_8K
++                                                                         : (int64_t)RENHDRUM_VALVE_GRIP_PERIOD_NS_4K;
++    int gave_up = 0;
++
++    rh_sv_mode(hid, 1, 0);
++    Sleep(10);
++    rh_sv_mode(hid, 2, format);
++    Sleep(200); /* the controller needs a moment between off and on */
++
++    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++    int64_t next = hos_now_ns();
++    int64_t last_signal = 0;
++    int fails_in_row = 0;
++    while (InterlockedCompareExchange(&rh_sv_run, 1, 1) == 1) {
++        next += period;
++        AcquireSRWLockExclusive(&rh_sv_lock);
++        RenHdcDualSenseDsp *dsp = rh_sv_dsp;
++        ReleaseSRWLockExclusive(&rh_sv_lock);
++        if (!dsp) break;
++
++        int r = rh.sv_build(dsp, format, report);
++        int64_t now = hos_now_ns();
++        if (r == 1) last_signal = now;
++        if (r >= 0 && last_signal != 0 && now - last_signal < RH_STEAM_TAIL_NS) {
++            if (sdl.hid_write(hid, report, sizeof report) < 0) fails_in_row++;
++            else fails_in_row = 0;
++        }
++        if (fails_in_row >= RH_STEAM_FAILS_MAX) {
++            hos_log("renhdrum: steam controller grip writes failing, using standard rumble");
++            gave_up = 1;
++            break;
++        }
++        if (next > now) {
++            int64_t ns = next - now;
++            if (timer) {
++                LARGE_INTEGER due;
++                due.QuadPart = -(ns / 100 > 0 ? ns / 100 : 1);
++                if (SetWaitableTimerEx(timer, &due, 0, NULL, NULL, NULL, 0)) {
++                    WaitForSingleObject(timer, INFINITE);
++                    continue;
++                }
++            }
++            if (ns >= 2000000LL) Sleep((DWORD)((ns - 1000000LL) / 1000000LL));
++            while (hos_now_ns() < next) SwitchToThread();
++        } else if (now - next > 100000000LL) {
++            next = now; /* stalled > 100 ms: resync instead of bursting */
++        }
++    }
++    if (timer) CloseHandle(timer);
++    rh_sv_mode(hid, 1, format);
++    rh_sv_mode(hid, 1, 0);
++    InterlockedExchange(&rh_sv_run, 0);
++    if (gave_up) rh_pads_set_claimed(pad, 0); /* the pad goes back to Hookshot's own rumble */
++    return 0;
++}
++
++/* Stops the Steam grips (pad == NULL: whichever pad has them); returns the pad it released, or NULL */
++static void *rh_sv_stop(void *pad) {
++    AcquireSRWLockExclusive(&rh_sv_lock);
++    if (!rh_sv_pad || (pad && rh_sv_pad != pad)) {
++        ReleaseSRWLockExclusive(&rh_sv_lock);
++        return NULL;
++    }
++    void *had = rh_sv_pad;
++    void *hid = rh_sv_hid;
++    HANDLE th = rh_sv_thread;
++    RenHdcDualSenseDsp *dsp = rh_sv_dsp;
++    rh_sv_pad = NULL;
++    rh_sv_hid = NULL;
++    rh_sv_thread = NULL;
++    rh_sv_dsp = NULL;
++    InterlockedExchange(&rh_sv_run, 0);
++    ReleaseSRWLockExclusive(&rh_sv_lock);
++
++    if (th) {
++        DWORD w = WaitForSingleObject(th, 2000);
++        CloseHandle(th);
++        if (w != WAIT_OBJECT_0) {
++            hos_log("renhdrum: Steam grips worker did not stop within 2000 ms (wait=0x%lx); skipping hid_close/dsp destroy",
++                    (unsigned long)w);
++            return had;
++        }
++    }
++    if (hid && sdl.hid_close) sdl.hid_close(hid);
++    if (dsp && rh.ds_destroy) rh.ds_destroy(dsp);
++    return had;
++}
++
++static const char *rh_pad_hid_path(void *pad) {
++    void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
++    const char *path = NULL;
++    if (sdl.is_sdl3 && sdl.get_gamepad_path) path = sdl.get_gamepad_path(pad);
++    if (!sdl.is_sdl3 && sdl.get_controller_path) path = sdl.get_controller_path(pad);
++    if ((!path || !*path) && sdl.get_joy_path && joy) path = sdl.get_joy_path(joy);
++    return path;
++}
++
 +static DWORD WINAPI rh_worker(void *arg) {
 +    (void)arg;
 +    uint8_t pkt[10];
@@ -1101,6 +1410,45 @@ index 0000000..01c7557
 +        if (send_pkt && target && sdl.send_effect) {
 +            sdl.send_effect(target, pkt, 10);
 +        }
++
++        /* Xbox One S: stale watchdog and tick; the four motors go out of the lock. The numbers come from the core as
++           they are (grips last longer than a tick, trigger pulses stay short so a lost stop cannot leave them on) */
++        uint16_t motors[4];
++        int send_xb = 0;
++        void *xb_target = NULL;
++        AcquireSRWLockExclusive(&rh_xb_lock);
++        if (rh_xb) {
++            for (int s = 0; s < 2; s++) {
++                if (rh_xb_at[s] && !rh_xb_muted[s] && (now_us - rh_xb_at[s] > RH_STALE_US)) {
++                    rh.xb_push(rh_xb, now_us, s == 1, 0.0f, 160.0f, 0.0f, 320.0f);
++                    rh_xb_muted[s] = 1;
++                }
++            }
++            send_xb = rh.xb_tick(rh_xb, now_us, motors) == 1;
++            xb_target = rh_xb_joy;
++        }
++        ReleaseSRWLockExclusive(&rh_xb_lock);
++        if (send_xb && xb_target) {
++            int ok = sdl_ok(sdl.rumble_joy(xb_target, motors[0], motors[1], 2000));
++            if (sdl.rumble_joy_trig) sdl.rumble_joy_trig(xb_target, motors[2], motors[3], 200);
++            if (!ok && rh.xb_resend) { /* some paths refuse rumble until the first press: try again next tick */
++                AcquireSRWLockExclusive(&rh_xb_lock);
++                if (rh_xb) rh.xb_resend(rh_xb);
++                ReleaseSRWLockExclusive(&rh_xb_lock);
++            }
++        }
++
++        /* Steam grips watchdog (the sender is its own thread) */
++        AcquireSRWLockExclusive(&rh_sv_lock);
++        if (rh_sv_dsp) {
++            for (int s = 0; s < 2; s++) {
++                if (rh_sv_at[s] && !rh_sv_muted[s] && (now_us - rh_sv_at[s] > RH_STALE_US)) {
++                    rh.ds_set_half_target(rh_sv_dsp, s == 1, 0.0f, 160.0f, 0.0f, 320.0f);
++                    rh_sv_muted[s] = 1;
++                }
++            }
++        }
++        ReleaseSRWLockExclusive(&rh_sv_lock);
 +
 +        /* DualSense watchdog & periodic audio retry */
 +        int need_audio_retry = 0;
@@ -1145,11 +1493,25 @@ index 0000000..01c7557
 +    rh_pads_track(pad);
 +    const char *off = getenv("HOOKSHOT_RENHDRUM");
 +    if (off && !strcmp(off, "0")) return;
++    if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) return;
 +    init_sdl();
 +    if (!sdl.get_vid || !sdl.get_pid) return;
 +
 +    uint16_t vid = sdl.get_vid(pad);
 +    uint16_t pid = sdl.get_pid(pad);
++
++    /* Steam Input's stand-in pad (host/steam_pads.h: it has a Steam handle, a real pad has none) is never claimed: Steam
++       owns the real pad's rumble then, and a second sender on it (HID grips, or SDL rumble on the stand-in) would play
++       twice. A stand-in that opens after the Steam grips started takes them back. */
++    if (sdl.get_steam_handle && sdl.get_steam_handle(pad) != 0) {
++        rh_pads_mark_stand_in(pad);
++        void *old = rh_sv_stop(NULL);
++        if (old) {
++            rh_pads_set_claimed(old, 0);
++            hos_log("renhdrum: steam stand-in pad opened, Steam controller grips go back to Steam Input");
++        }
++        return;
++    }
 +
 +    int bt = 0;
 +    if (sdl.is_sdl3 && sdl.get_conn) {
@@ -1352,11 +1714,115 @@ index 0000000..01c7557
 +        rh_ds_try_open_audio();
 +        return;
 +    }
++
++    /* Steam Controller 2026 (VID 0x28DE, PID 1302 wired / 1303 Bluetooth / 1304 dongle): grips over HID, experimental */
++    if (vid == 0x28DE && (pid == 0x1302 || pid == 0x1303 || pid == 0x1304)) {
++        if (rh_stand_in_tracked()) {
++            hos_log("renhdrum: steam controller: Steam Input's pad is open, its rumble stays with Steam");
++            return;
++        }
++        if (!rh_load()) return;
++        if (!rh.sv_create || !rh.sv_build || !rh.ds_set_half_target || !rh.ds_destroy) {
++            hos_log("renhdrum: steam controller: valve grip functions missing in renhdrum.dll, using standard rumble");
++            return;
++        }
++        if (!sdl.hid_open_path || !sdl.hid_write) return;
++
++        AcquireSRWLockExclusive(&rh_sv_lock);
++        int sv_busy = (rh_sv_dsp != NULL);
++        ReleaseSRWLockExclusive(&rh_sv_lock);
++        if (sv_busy) return;
++
++        const char *path = rh_pad_hid_path(pad);
++        void *hid = (path && *path) ? sdl.hid_open_path(path) : NULL;
++        if (!hid) {
++            hos_log("renhdrum: steam controller: no HID path or open failed, using standard rumble");
++            return;
++        }
++        RenHdcDualSenseDsp *dsp = rh.sv_create(100, true);
++        if (!dsp) {
++            if (sdl.hid_close) sdl.hid_close(hid);
++            hos_log("renhdrum: off (steam grip dsp create failed)");
++            return;
++        }
++
++        AcquireSRWLockExclusive(&rh_sv_lock);
++        rh_sv_dsp = dsp;
++        rh_sv_pad = pad;
++        rh_sv_hid = hid;
++        rh_sv_format = pid == 0x1302 ? RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K : RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K;
++        rh_sv_at[0] = rh_sv_at[1] = 0;
++        rh_sv_muted[0] = rh_sv_muted[1] = 0;
++        InterlockedExchange(&rh_sv_run, 1);
++        rh_sv_thread = CreateThread(NULL, 0, rh_sv_worker, NULL, 0, NULL);
++        const int started = rh_sv_thread != NULL;
++        ReleaseSRWLockExclusive(&rh_sv_lock);
++        if (!started) {
++            hos_log("renhdrum: off (cannot create steam grips thread)");
++            rh_sv_stop(pad);
++            return;
++        }
++        /* The grips' rumble motors would fight the audio */
++        if (sdl.rumble_pad) sdl.rumble_pad(pad, 0, 0, 0);
++        rh_pads_set_claimed(pad, 1);
++        rh_ensure_worker(); /* its watchdog mutes a rumble the game stopped sending */
++        hos_log("renhdrum: on (steam controller grips, experimental, %s kHz)", pid == 0x1302 ? "8" : "4");
++        return;
++    }
++
++    /* Xbox One S: SDL type XBOXONE, or Microsoft's vendor id (a third-party XInput pad may get another type).
++       Motor numbers and curves come from the core; the bridge sets none. */
++    const int xb_type = sdl.get_type ? sdl.get_type(pad) : 0;
++    if (xb_type == (sdl.is_sdl3 ? 3 : 2) /* XBOXONE */ || vid == 0x045E) {
++        if (!rh_load()) return;
++        if (!rh.xb_create || !rh.xb_destroy || !rh.xb_push || !rh.xb_tick) {
++            hos_log("renhdrum: xbox: rumble functions missing in renhdrum.dll, using standard rumble");
++            return;
++        }
++        if (!sdl.rumble_joy) {
++            hos_log("renhdrum: xbox: this SDL has no joystick rumble call, using standard rumble");
++            return;
++        }
++        AcquireSRWLockExclusive(&rh_xb_lock);
++        int xb_busy = (rh_xb != NULL);
++        ReleaseSRWLockExclusive(&rh_xb_lock);
++        if (xb_busy) return;
++
++        /* a connection SDL cannot tell counts as Bluetooth (the safer 20 ms ticks) */
++        const int xb_bt = (sdl.is_sdl3 && sdl.get_conn) ? sdl.get_conn(pad) != 1 /* WIRED */ : bt;
++        RenHdcXboxRumble *x = rh.xb_create(xb_bt != 0);
++        if (!x) {
++            hos_log("renhdrum: off (xbox rumble create failed)");
++            return;
++        }
++        void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
++        AcquireSRWLockExclusive(&rh_xb_lock);
++        if (rh_xb) {
++            ReleaseSRWLockExclusive(&rh_xb_lock);
++            rh.xb_destroy(x);
++            return;
++        }
++        rh_xb = x;
++        rh_xb_pad = pad;
++        rh_xb_joy = joy;
++        rh_xb_at[0] = rh_xb_at[1] = 0;
++        rh_xb_muted[0] = rh_xb_muted[1] = 0;
++        ReleaseSRWLockExclusive(&rh_xb_lock);
++
++        rh_pads_set_claimed(pad, 1);
++        rh_ensure_worker();
++        hos_log("renhdrum: on (xbox %s)", xb_bt ? "bluetooth" : "usb");
++        return;
++    }
 +}
 +
-+int rh_detach(void *pad) {
++static int rh_detach_engines(void *pad, int untrack) {
 +    int detached_any = 0;
-+    rh_pads_untrack(pad);
++    if (untrack) {
++        rh_pads_untrack(pad);
++    } else {
++        rh_pads_clear_claimed();
++    }
 +
 +    /* Pro Controller detach */
 +    AcquireSRWLockExclusive(&rh_lock);
@@ -1432,7 +1898,30 @@ index 0000000..01c7557
 +        ReleaseSRWLockExclusive(&rh_ds_lock);
 +    }
 +
-+    /* Stop worker if neither controller is active */
++    /* Xbox detach: all four motors to 0 */
++    AcquireSRWLockExclusive(&rh_xb_lock);
++    if (rh_xb_pad && (!pad || rh_xb_pad == pad)) {
++        void *joy = rh_xb_joy ? rh_xb_joy : rh_xb_pad;
++        RenHdcXboxRumble *x = rh_xb;
++        rh_xb = NULL;
++        rh_xb_pad = NULL;
++        rh_xb_joy = NULL;
++        ReleaseSRWLockExclusive(&rh_xb_lock);
++
++        if (joy && sdl.rumble_joy) {
++            sdl.rumble_joy(joy, 0, 0, 0);
++            if (sdl.rumble_joy_trig) sdl.rumble_joy_trig(joy, 0, 0, 0);
++        }
++        if (x && rh.xb_destroy) rh.xb_destroy(x);
++        detached_any = 1;
++    } else {
++        ReleaseSRWLockExclusive(&rh_xb_lock);
++    }
++
++    /* Steam grips detach: the thread turns the PCM mode off, then the handle closes (rh_sv_stop) */
++    if (rh_sv_stop(pad)) detached_any = 1;
++
++    /* Stop worker if no pad it serves is active */
 +    AcquireSRWLockExclusive(&rh_lock);
 +    int pro_active = (rh_engine != NULL);
 +    ReleaseSRWLockExclusive(&rh_lock);
@@ -1441,7 +1930,15 @@ index 0000000..01c7557
 +    int ds_active = (rh_ds_dsp != NULL);
 +    ReleaseSRWLockExclusive(&rh_ds_lock);
 +
-+    if (!pro_active && !ds_active) {
++    AcquireSRWLockExclusive(&rh_xb_lock);
++    int xb_active = (rh_xb != NULL);
++    ReleaseSRWLockExclusive(&rh_xb_lock);
++
++    AcquireSRWLockExclusive(&rh_sv_lock);
++    int sv_active = (rh_sv_dsp != NULL);
++    ReleaseSRWLockExclusive(&rh_sv_lock);
++
++    if (!pro_active && !ds_active && !xb_active && !sv_active) {
 +        HANDLE t = rh_thread;
 +        rh_thread = NULL;
 +        InterlockedExchange(&rh_run, 0);
@@ -1454,8 +1951,68 @@ index 0000000..01c7557
 +    return 1;
 +}
 +
++int rh_detach(void *pad) {
++    return rh_detach_engines(pad, 1);
++}
++
++void rh_set_enabled(int on) {
++    LONG next = on ? 1 : 0;
++    LONG prev = InterlockedExchange(&rh_enabled, next);
++    if (prev == next) return;
++    if (!next) {
++        rh_detach_engines(NULL, 0);
++        return;
++    }
++    void *pads[RH_MAX_PADS];
++    int n = 0;
++    AcquireSRWLockShared(&rh_pads_lock);
++    for (int i = 0; i < RH_MAX_PADS; i++) {
++        if (rh_conn_pads[i]) pads[n++] = rh_conn_pads[i];
++    }
++    ReleaseSRWLockShared(&rh_pads_lock);
++    for (int i = 0; i < n; i++) rh_attach(pads[i]);
++}
++
++const char *rh_status_line(void) {
++    if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) {
++        return "HD Rumble is off: using normal rumble";
++    }
++    AcquireSRWLockExclusive(&rh_lock);
++    if (rh_engine) {
++        int bt = rh_is_bt;
++        ReleaseSRWLockExclusive(&rh_lock);
++        return bt ? "Connected: Pro Controller (Bluetooth), HD Rumble" : "Connected: Pro Controller (USB), HD Rumble";
++    }
++    ReleaseSRWLockExclusive(&rh_lock);
++
++    AcquireSRWLockExclusive(&rh_ds_lock);
++    if (rh_ds_dsp && (!rh_ds_is_bt || InterlockedCompareExchange(&rh_ds_bt_run, 1, 1) == 1)) {
++        int bt = rh_ds_is_bt;
++        ReleaseSRWLockExclusive(&rh_ds_lock);
++        return bt ? "Connected: DualSense (Bluetooth), HD Rumble" : "Connected: DualSense (USB), HD Rumble";
++    }
++    ReleaseSRWLockExclusive(&rh_ds_lock);
++
++    AcquireSRWLockExclusive(&rh_xb_lock);
++    if (rh_xb) {
++        ReleaseSRWLockExclusive(&rh_xb_lock);
++        return "Connected: Xbox One S, HD Rumble (4 motors)";
++    }
++    ReleaseSRWLockExclusive(&rh_xb_lock);
++
++    AcquireSRWLockExclusive(&rh_sv_lock);
++    if (rh_sv_dsp && InterlockedCompareExchange(&rh_sv_run, 1, 1) == 1) {
++        ReleaseSRWLockExclusive(&rh_sv_lock);
++        return "Steam Controller: HD Rumble (experimental)";
++    }
++    ReleaseSRWLockExclusive(&rh_sv_lock);
++
++    return "No controller HD Rumble supports: normal rumble";
++}
++
 +int rh_vibration(int side, float al, float fl, float ah, float fh) {
 +    if (side < 0 || side > 1) return 0;
++    if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) return 0;
 +    int handled = 0;
 +    int64_t now_us = hos_now_ns() / 1000;
 +
@@ -1480,6 +2037,24 @@ index 0000000..01c7557
 +        }
 +    }
 +    ReleaseSRWLockExclusive(&rh_ds_lock);
++
++    AcquireSRWLockExclusive(&rh_xb_lock);
++    if (rh_xb) {
++        rh.xb_push(rh_xb, now_us, side == 1, al, fl, ah, fh);
++        rh_xb_at[side] = now_us;
++        rh_xb_muted[side] = 0;
++        handled = 1;
++    }
++    ReleaseSRWLockExclusive(&rh_xb_lock);
++
++    AcquireSRWLockExclusive(&rh_sv_lock);
++    if (rh_sv_dsp && InterlockedCompareExchange(&rh_sv_run, 1, 1) == 1) {
++        rh.ds_set_half_target(rh_sv_dsp, side == 1, al, fl, ah, fh);
++        rh_sv_at[side] = now_us;
++        rh_sv_muted[side] = 0;
++        handled = 1;
++    }
++    ReleaseSRWLockExclusive(&rh_sv_lock);
 +
 +    return (handled && rh_all_pads_claimed()) ? 1 : 0;
 +}
@@ -1506,6 +2081,16 @@ index 0000000..01c7557
 +        }
 +    }
 +    ReleaseSRWLockExclusive(&rh_ds_lock);
++    if (active) return 1;
++
++    AcquireSRWLockExclusive(&rh_xb_lock);
++    if (rh_xb && rh_xb_pad == pad) active = 1;
++    ReleaseSRWLockExclusive(&rh_xb_lock);
++    if (active) return 1;
++
++    AcquireSRWLockExclusive(&rh_sv_lock);
++    if (rh_sv_dsp && rh_sv_pad == pad && InterlockedCompareExchange(&rh_sv_run, 1, 1) == 1) active = 1;
++    ReleaseSRWLockExclusive(&rh_sv_lock);
 +    return active;
 +}
 +
@@ -1514,10 +2099,10 @@ index 0000000..01c7557
 +}
 diff --git a/host/rh_bridge.h b/host/rh_bridge.h
 new file mode 100644
-index 0000000..8927e42
+index 00000000..ae06fb4c
 --- /dev/null
 +++ b/host/rh_bridge.h
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,25 @@
 +/* host/rh_bridge.h - RenHDrum bridge for Hookshot (HD Rumble on Pro Controller & DualSense)
 +   MIT OR Apache-2.0 / GPL-3.0 compatibility */
 +#pragma once
@@ -1536,16 +2121,39 @@ index 0000000..8927e42
 +void rh_cleanup(void);
 +int rh_is_active(void *pad);
 +int rh_pad_claimed(int i);
++void rh_set_enabled(int on);
++const char *rh_status_line(void);
 +int rh_ds_render_frames(float *out, int frames);
 +
 +#ifdef __cplusplus
 +}
 +#endif
+diff --git a/host/rx_backend.c b/host/rx_backend.c
+index d6339405..8adb2f36 100644
+--- a/host/rx_backend.c
++++ b/host/rx_backend.c
+@@ -11,6 +11,7 @@
+ #include "../gpu/vk/vk_api.h"
+ #include "../gpu/vk/dlss_math.h"
+ #include "control.h"
++#include "rh_bridge.h"
+ 
+ /* the WebGPU renderer (gpu/render, renamed) */
+ int wgr_start(void *hwnd);
+@@ -186,7 +187,7 @@ static const MkwVkHost vk_host = {
+     hos_gpu_maps_generation, nvn_vmap_generation, hos_reserved_cpus, host_collect_in, host_guest_alloc,
+     host_watch_guest_writes, hos_pad_raw, hos_binding, hos_bind, host_aspect_ratio, host_take_key_press,
+     hos_mouse_pointer, hos_mic_count, hos_mic_name, hos_mic_select, hos_sdl_gyro_status, hos_log_flush, hos_prompts_face,
+-    host_romfs_dir, host_wide_menus, host_slept_ns, host_fps_timing, hos_prompts_live_parts,
++    host_romfs_dir, host_wide_menus, host_slept_ns, host_fps_timing, hos_prompts_live_parts, rh_status_line,
+ };
+ 
+ static const MkwVkRenderer *vk;   /* the Vulkan back end, when it was chosen and started */
 diff --git a/nx2/build.py b/nx2/build.py
-index 695dc40..a9228dd 100644
+index 8051cdcc..650d058d 100644
 --- a/nx2/build.py
 +++ b/nx2/build.py
-@@ -1129,6 +1129,12 @@ def main():
+@@ -1355,6 +1355,12 @@ def main():
          if os.path.exists(sdl3) and (not os.path.exists(sdl3_dst) or os.path.getsize(sdl3_dst) != os.path.getsize(sdl3)):
              import shutil
              shutil.copyfile(sdl3, sdl3_dst)
@@ -1555,14 +2163,14 @@ index 695dc40..a9228dd 100644
 +        if os.path.exists(rh) and (not os.path.exists(rh_dst) or os.path.getsize(rh_dst) != os.path.getsize(rh)):
 +            import shutil
 +            shutil.copyfile(rh, rh_dst)
-     if vk_prebuilt and a.standalone and not a.only:
+     if vk_prebuilt and a.standalone:
          import shutil
          shutil.copyfile(vk_prebuilt, os.path.join(out, VK_LIB))
 diff --git a/nx2/make_game.py b/nx2/make_game.py
-index 517926d..d070584 100644
+index 5354654f..f1ca5c53 100644
 --- a/nx2/make_game.py
 +++ b/nx2/make_game.py
-@@ -54,7 +54,7 @@ import disk as _disk
+@@ -57,7 +57,7 @@ import disk as _disk
  LINUX, CROSS = not _toolchain.windows(), _toolchain.windows() and os.name != "nt"
  # (SDL2.dll is sdl2-compat: it loads SDL3.dll from beside the exe. Left out of bin\ since v2.0.0, it said "Failed loading SDL3
  # library" three times and no controller worked: Discord #bug-reporting, 11-08)
@@ -1573,10 +2181,10 @@ index 517926d..d070584 100644
               ("pl", "Polish"), ("ru", "Russian"), ("ja", "Japanese"), ("ko", "Korean"), ("zh-Hans", "Chinese (Simplified)"),
 diff --git a/tests/test_rh_bridge.py b/tests/test_rh_bridge.py
 new file mode 100644
-index 0000000..b568640
+index 00000000..4942b8d2
 --- /dev/null
 +++ b/tests/test_rh_bridge.py
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,856 @@
 +"""Unit tests for host/rh_bridge.c (RenHDrum bridge) and Hookshot vibration hooks.
 +
 +Covers:
@@ -1584,6 +2192,9 @@ index 0000000..b568640
 +2. Step 2a: Per-pad claiming (rh_pad_claimed) + multi-pad non-silencing + hook ordering in pad_sdl.c / nn_hid.c.
 +3. Step 2b/2c: Strict major.minor DLL version check and missing renhdrum_version rejection in rh_load.
 +4. Step 3: Wired-only 40 ms packet resend (>= 3 repeats in 200 ms), silent packet non-resend, BT Level 4 bridge pass-through.
++
++5. Step 3 (plan 112): Xbox One S four motors (+ all four to 0 on unplug), Steam Controller 2026 grips (0x86 mode, then 64-byte
++   reports), a dll without the valve functions leaves the pad unclaimed, Steam Input's stand-in pad is never claimed.
 +
 +Run with: python -I -B tests/test_rh_bridge.py
 +"""
@@ -1711,19 +2322,46 @@ index 0000000..b568640
 +
 +MOCK_SDL3_SRC = r"""
 +#include <stdint.h>
++#include <string.h>
 +#include <windows.h>
 +
++/* pad tags: 0x1001/2 Switch Pro, 0x2001 Xbox One S, 0x2002 other vendor, 0x3001 Steam Controller wired (1302),
++   0x3003 Steam Controller Bluetooth (1303), 0x3002 Steam Input's stand-in pad (11FF, Steam handle) */
 +static volatile LONG g_effect_count = 0;
 +static int g_conn_state = 1; /* 1 = wired, 2 = wireless */
++static volatile LONG g_motor[4];
++static volatile LONG g_rumble_calls = 0;
++static volatile LONG g_trigger_calls = 0;
++static volatile LONG g_mode_writes = 0;
++static volatile LONG g_report_writes = 0;
++static volatile LONG g_hid_opens = 0;
++static volatile LONG g_hid_closes = 0;
++static volatile LONG g_first_write = -1;
++static volatile LONG g_last_mode_op = -1;
++static volatile LONG g_last_mode_format = -1;
 +
 +__declspec(dllexport) uint16_t SDL_GetGamepadVendor(void *pad) {
-+    uintptr_t tag = (uintptr_t)pad;
-+    return (tag == 0x2001) ? 0x045E : 0x057E; /* Xbox vs Switch Pro */
++    switch ((uintptr_t)pad) {
++    case 0x2001: return 0x045E;
++    case 0x2002: return 0x046D;
++    case 0x3001: case 0x3002: case 0x3003: return 0x28DE;
++    default: return 0x057E;
++    }
 +}
 +__declspec(dllexport) uint16_t SDL_GetGamepadProduct(void *pad) {
-+    uintptr_t tag = (uintptr_t)pad;
-+    return (tag == 0x2001) ? 0x028E : 0x2009;
++    switch ((uintptr_t)pad) {
++    case 0x2001: return 0x028E;
++    case 0x2002: return 0xC216;
++    case 0x3001: return 0x1302;
++    case 0x3002: return 0x11FF;
++    case 0x3003: return 0x1303;
++    default: return 0x2009;
++    }
 +}
++__declspec(dllexport) int SDL_GetGamepadType(void *pad) {
++    return (uintptr_t)pad == 0x2001 ? 3 /* XBOXONE */ : (uintptr_t)pad == 0x2002 ? 1 /* STANDARD */ : 0;
++}
++__declspec(dllexport) uint64_t SDL_GetGamepadSteamHandle(void *pad) { return (uintptr_t)pad == 0x3002 ? 0x1234 : 0; }
 +__declspec(dllexport) int SDL_GetGamepadConnectionState(void *pad) {
 +    (void)pad;
 +    return g_conn_state;
@@ -1731,15 +2369,57 @@ index 0000000..b568640
 +__declspec(dllexport) void *SDL_GetGamepadJoystick(void *pad) {
 +    return pad;
 +}
++__declspec(dllexport) const char *SDL_GetGamepadPath(void *pad) { (void)pad; return "mock-hid-path"; }
++__declspec(dllexport) const char *SDL_GetJoystickPath(void *joy) { (void)joy; return "mock-hid-path"; }
 +__declspec(dllexport) int SDL_SendJoystickEffect(void *joy, const void *data, int size) {
 +    (void)joy; (void)data; (void)size;
 +    InterlockedIncrement(&g_effect_count);
 +    return 1;
 +}
++/* SDL3 returns bool: only the low byte is set, the rest of the register is junk on purpose */
++__declspec(dllexport) int SDL_RumbleJoystick(void *joy, uint16_t lo, uint16_t hi, uint32_t ms) {
++    (void)joy; (void)ms;
++    InterlockedExchange(&g_motor[0], lo);
++    InterlockedExchange(&g_motor[1], hi);
++    InterlockedIncrement(&g_rumble_calls);
++    return (int)0x7FFFFF01;
++}
++__declspec(dllexport) int SDL_RumbleJoystickTriggers(void *joy, uint16_t l, uint16_t r, uint32_t ms) {
++    (void)joy; (void)ms;
++    InterlockedExchange(&g_motor[2], l);
++    InterlockedExchange(&g_motor[3], r);
++    InterlockedIncrement(&g_trigger_calls);
++    return (int)0x7FFFFF01;
++}
++__declspec(dllexport) void *SDL_hid_open_path(const char *path) { (void)path; InterlockedIncrement(&g_hid_opens); return (void *)0x77; }
++__declspec(dllexport) int SDL_hid_close(void *h) { (void)h; InterlockedIncrement(&g_hid_closes); return 0; }
++__declspec(dllexport) int SDL_hid_write(void *h, const void *data, size_t len) {
++    (void)h;
++    const uint8_t *d = (const uint8_t *)data;
++    InterlockedCompareExchange(&g_first_write, d[0], -1);
++    if (len == 4 && d[0] == 0x86) {
++        InterlockedIncrement(&g_mode_writes);
++        InterlockedExchange(&g_last_mode_op, d[1]);
++        InterlockedExchange(&g_last_mode_format, d[3]);
++    } else if (len == 64) {
++        InterlockedIncrement(&g_report_writes);
++    }
++    return (int)len;
++}
 +
 +__declspec(dllexport) void test_sdl_set_conn(int state) { g_conn_state = state; }
 +__declspec(dllexport) LONG test_sdl_get_effects(void) { return InterlockedCompareExchange(&g_effect_count, 0, 0); }
 +__declspec(dllexport) void test_sdl_reset_effects(void) { InterlockedExchange(&g_effect_count, 0); }
++__declspec(dllexport) LONG test_sdl_motor(int i) { return InterlockedCompareExchange(&g_motor[i], 0, 0); }
++__declspec(dllexport) LONG test_sdl_rumble_calls(void) { return InterlockedCompareExchange(&g_rumble_calls, 0, 0); }
++__declspec(dllexport) LONG test_sdl_trigger_calls(void) { return InterlockedCompareExchange(&g_trigger_calls, 0, 0); }
++__declspec(dllexport) LONG test_sdl_mode_writes(void) { return InterlockedCompareExchange(&g_mode_writes, 0, 0); }
++__declspec(dllexport) LONG test_sdl_report_writes(void) { return InterlockedCompareExchange(&g_report_writes, 0, 0); }
++__declspec(dllexport) LONG test_sdl_hid_opens(void) { return InterlockedCompareExchange(&g_hid_opens, 0, 0); }
++__declspec(dllexport) LONG test_sdl_hid_closes(void) { return InterlockedCompareExchange(&g_hid_closes, 0, 0); }
++__declspec(dllexport) LONG test_sdl_first_write(void) { return InterlockedCompareExchange(&g_first_write, 0, 0); }
++__declspec(dllexport) LONG test_sdl_last_mode_op(void) { return InterlockedCompareExchange(&g_last_mode_op, 0, 0); }
++__declspec(dllexport) LONG test_sdl_last_mode_format(void) { return InterlockedCompareExchange(&g_last_mode_format, 0, 0); }
 +"""
 +
 +MOCK_RH_DLL_TEMPLATE = r"""
@@ -1790,6 +2470,45 @@ index 0000000..b568640
 +}}
 +__declspec(dllexport) void renhdrum_set_nx2_mode(int32_t mode) {{ (void)mode; }}
 +__declspec(dllexport) int32_t test_mock_get_bt_level(void) {{ return InterlockedCompareExchange(&g_last_bt_level, 0, 0); }}
++"""
++
++MOCK_XBOX_FNS = r"""
++static volatile LONG g_xb_pending = 0;
++static volatile LONG g_xb_bt = -1;
++__declspec(dllexport) void *renhdrum_xbox_rumble_create(bool bt) { InterlockedExchange(&g_xb_bt, bt ? 1 : 0); return (void *)0xBEEF; }
++__declspec(dllexport) void renhdrum_xbox_rumble_destroy(void *x) { (void)x; }
++__declspec(dllexport) int32_t renhdrum_xbox_rumble_push_half_sample(
++    void *x, int64_t now_us, bool is_right, float al, float fl, float ah, float fh) {
++    (void)x; (void)now_us; (void)is_right; (void)al; (void)fl; (void)ah; (void)fh;
++    InterlockedExchange(&g_xb_pending, 1);
++    return 0;
++}
++__declspec(dllexport) int32_t renhdrum_xbox_rumble_tick(void *x, int64_t now_us, uint16_t *m) {
++    (void)x; (void)now_us;
++    if (InterlockedExchange(&g_xb_pending, 0) != 1) return 0;
++    m[0] = 1000; m[1] = 2000; m[2] = 3000; m[3] = 4000;
++    return 1;
++}
++__declspec(dllexport) int32_t renhdrum_xbox_rumble_resend(void *x) { (void)x; return 0; }
++__declspec(dllexport) int32_t test_mock_xbox_bt(void) { return InterlockedCompareExchange(&g_xb_bt, 0, 0); }
++"""
++
++MOCK_VALVE_FNS = r"""
++static volatile LONG g_sv_vib = 0;
++__declspec(dllexport) void *renhdrum_valve_grip_dsp_create(int32_t vol, bool crisp) { (void)vol; (void)crisp; return (void *)0xD5; }
++__declspec(dllexport) void renhdrum_dualsense_dsp_destroy(void *d) { (void)d; }
++__declspec(dllexport) int32_t renhdrum_dualsense_dsp_set_half_target(
++    void *d, bool is_right, float al, float fl, float ah, float fh) {
++    (void)d; (void)is_right; (void)fl; (void)fh;
++    InterlockedExchange(&g_sv_vib, (al > 0.0f || ah > 0.0f) ? 1 : 0);
++    return 0;
++}
++__declspec(dllexport) int32_t renhdrum_valve_grip_build_report(void *d, uint8_t format, uint8_t *out64) {
++    (void)d; (void)format;
++    memset(out64, 0, 64);
++    out64[0] = 0x88;
++    return InterlockedCompareExchange(&g_sv_vib, 0, 0) ? 1 : 0;
++}
 +"""
 +
 +TEST_VERSION_REJECT_SRC = r"""
@@ -1853,7 +2572,7 @@ index 0000000..b568640
 +
 +    /* Step 2a: Per-pad claim & non-silencing with real renhdrum.dll */
 +    void *pro = (void *)0x1001;
-+    void *xbox = (void *)0x2001;
++    void *xbox = (void *)0x2002; /* another vendor's pad: no branch takes it (Xbox One S is 0x2001, claimed since step 3) */
 +    set_conn(1); /* wired */
 +    rh_attach(pro);
 +    CHECK(rh_pad_claimed(0) == 1);
@@ -1861,7 +2580,7 @@ index 0000000..b568640
 +    CHECK(rh_is_active(pro) == 1);
 +    CHECK(rh_vibration(0, 0.5f, 160.0f, 0.5f, 320.0f) == 1);
 +
-+    /* Plug unclaimed Xbox in slot 1: rh_vibration still drives Pro, returns 0 so Xbox is not muted */
++    /* Plug an unclaimed pad in slot 1: rh_vibration still drives Pro, returns 0 so it is not muted */
 +    rh_attach(xbox);
 +    CHECK(rh_pad_claimed(0) == 1);
 +    CHECK(rh_pad_claimed(1) == 0);
@@ -1966,6 +2685,240 @@ index 0000000..b568640
 +"""
 +
 +
++
++TEST_XBOX_SRC = r"""
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <stdbool.h>
++#include <string.h>
++#include <windows.h>
++
++void hos_log(const char *fmt, ...) { (void)fmt; }
++int64_t hos_now_ns(void) {
++    LARGE_INTEGER f, c;
++    QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (c.QuadPart * 1000000000LL) / f.QuadPart;
++}
++int hos_sdl_init(uint32_t subsystems) { (void)subsystems; return 1; }
++
++#include "rh_bridge.h"
++
++#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
++
++int main(void) {
++    HMODULE sdl_m = LoadLibraryA("SDL3.dll");
++    CHECK(sdl_m != NULL);
++    LONG (*motor)(int) = (LONG (*)(int))GetProcAddress(sdl_m, "test_sdl_motor");
++    LONG (*rumbles)(void) = (LONG (*)(void))GetProcAddress(sdl_m, "test_sdl_rumble_calls");
++    LONG (*triggers)(void) = (LONG (*)(void))GetProcAddress(sdl_m, "test_sdl_trigger_calls");
++    CHECK(motor && rumbles && triggers);
++
++    /* a pad of another vendor is not an Xbox One S: not claimed */
++    rh_attach((void *)0x2002);
++    CHECK(rh_pad_claimed(0) == 0);
++    CHECK(rh_detach((void *)0x2002) == 1);
++
++    void *xbox = (void *)0x2001;
++    rh_attach(xbox);
++    CHECK(rh_pad_claimed(0) == 1);
++    CHECK(rh_is_active(xbox) == 1);
++    HMODULE rh_m = GetModuleHandleW(L"renhdrum.dll");
++    int32_t (*xb_bt)(void) = (int32_t (*)(void))GetProcAddress(rh_m, "test_mock_xbox_bt");
++    CHECK(xb_bt && xb_bt() == 0); /* the mock SDL says wired */
++
++    /* one sample: the worker plays the core's four motors, grips as rumble and triggers as trigger rumble */
++    CHECK(rh_vibration(0, 0.5f, 160.0f, 0.5f, 320.0f) == 1);
++    Sleep(60);
++    CHECK(rumbles() >= 1 && triggers() >= 1);
++    CHECK(motor(0) == 1000 && motor(1) == 2000 && motor(2) == 3000 && motor(3) == 4000);
++
++    /* unplugged: all four motors to 0 and the pad is free again */
++    CHECK(rh_detach(xbox) == 1);
++    CHECK(motor(0) == 0 && motor(1) == 0 && motor(2) == 0 && motor(3) == 0);
++    CHECK(rh_pad_claimed(0) == 0);
++    CHECK(rh_is_active(xbox) == 0);
++    rh_cleanup();
++    printf("PASS: xbox four motors\n");
++    return 0;
++}
++"""
++
++TEST_STEAM_SRC = r"""
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <stdbool.h>
++#include <string.h>
++#include <windows.h>
++
++void hos_log(const char *fmt, ...) { (void)fmt; }
++int64_t hos_now_ns(void) {
++    LARGE_INTEGER f, c;
++    QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (c.QuadPart * 1000000000LL) / f.QuadPart;
++}
++int hos_sdl_init(uint32_t subsystems) { (void)subsystems; return 1; }
++
++#include "rh_bridge.h"
++
++#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
++
++#ifndef FULL
++#define FULL 0   /* 1: the dll has the valve grip functions */
++#endif
++#define SDLFN(name) LONG (*name)(void) = (LONG (*)(void))GetProcAddress(sdl_m, "test_sdl_" #name)
++
++int main(void) {
++    HMODULE sdl_m = LoadLibraryA("SDL3.dll");
++    CHECK(sdl_m != NULL);
++    SDLFN(mode_writes); SDLFN(report_writes); SDLFN(hid_opens); SDLFN(hid_closes); SDLFN(first_write);
++    SDLFN(last_mode_op); SDLFN(last_mode_format);
++    CHECK(mode_writes && report_writes && hid_opens && hid_closes && first_write);
++
++    void *steam = (void *)0x3001;     /* wired: PID 1302 */
++    void *steam_bt = (void *)0x3003;  /* Bluetooth: PID 1303 */
++    void *stand_in = (void *)0x3002;  /* Steam Input's pad: PID 11FF, with a Steam handle */
++
++#if !FULL
++    /* (c) a dll without renhdrum_valve_grip_*: the pad stays on Hookshot's rumble, nothing opened */
++    rh_attach(steam);
++    CHECK(rh_pad_claimed(0) == 0);
++    CHECK(hid_opens() == 0);
++    rh_cleanup();
++    printf("PASS: steam without valve functions\n");
++    return 0;
++#else
++    /* (b) wired pad: the 0x86 mode packets first, then 64-byte reports while it vibrates */
++    rh_attach(steam);
++    CHECK(rh_pad_claimed(0) == 1);
++    CHECK(rh_is_active(steam) == 1);
++    CHECK(hid_opens() == 1);
++    Sleep(300); /* the thread's start-up: mode off, 10 ms, mode on, 200 ms */
++    CHECK(first_write() == 0x86);
++    CHECK(mode_writes() == 4);                 /* off and on, on channels 2 and 5 */
++    CHECK(last_mode_op() == 2 && last_mode_format() == 8);
++    CHECK(report_writes() == 0);               /* nothing vibrates yet: nothing on the wire */
++    CHECK(rh_vibration(0, 0.5f, 160.0f, 0.5f, 320.0f) == 1);
++    Sleep(60);
++    CHECK(report_writes() >= 3);
++    /* the game stops sending samples and never says "zero": the worker's watchdog (250 ms) mutes it, then 100 ms more */
++    Sleep(500);
++    LONG quiet = report_writes();
++    Sleep(100);
++    CHECK(report_writes() == quiet);
++    /* unplugged: mode off, then the handle closes */
++    CHECK(rh_detach(steam) == 1);
++    CHECK(mode_writes() == 8 && last_mode_op() == 1);
++    CHECK(hid_closes() == 1);
++    CHECK(rh_pad_claimed(0) == 0);
++    CHECK(rh_is_active(steam) == 0);
++
++    /* Bluetooth takes the 4 kHz format */
++    rh_attach(steam_bt);
++    CHECK(rh_pad_claimed(0) == 1);
++    Sleep(300);
++    CHECK(last_mode_op() == 2 && last_mode_format() == 9);
++    rh_cleanup();
++    CHECK(hid_closes() == 2);
++
++    /* Steam Input's stand-in pad is never claimed, and a real pad beside it stays with Steam */
++    LONG opens = hid_opens();
++    rh_attach(stand_in);
++    CHECK(rh_pad_claimed(0) == 0);
++    rh_attach(steam);
++    CHECK(rh_pad_claimed(1) == 0);
++    CHECK(hid_opens() == opens);
++    CHECK(rh_vibration(0, 0.5f, 160.0f, 0.5f, 320.0f) == 0);
++    rh_cleanup();
++
++    /* the real pad first, then the stand-in opens: the grips go back to Steam */
++    rh_attach(steam);
++    CHECK(rh_pad_claimed(0) == 1);
++    LONG closes = hid_closes();
++    rh_attach(stand_in);
++    CHECK(rh_pad_claimed(0) == 0);
++    CHECK(rh_pad_claimed(1) == 0);
++    CHECK(hid_closes() == closes + 1);
++    CHECK(rh_is_active(steam) == 0);
++    rh_cleanup();
++    printf("PASS: steam grips\n");
++    return 0;
++#endif
++}
++"""
++
++TEST_ENABLE_STATUS_SRC = r"""
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <stdbool.h>
++#include <string.h>
++#include <windows.h>
++
++void hos_log(const char *fmt, ...) { (void)fmt; }
++int64_t hos_now_ns(void) {
++    LARGE_INTEGER f, c;
++    QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (c.QuadPart * 1000000000LL) / f.QuadPart;
++}
++int hos_sdl_init(uint32_t subsystems) { (void)subsystems; return 1; }
++
++#include "rh_bridge.h"
++
++#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
++
++int main(void) {
++    HMODULE sdl_m = LoadLibraryA("SDL3.dll");
++    CHECK(sdl_m != NULL);
++    void (*set_conn)(int) = (void (*)(int))GetProcAddress(sdl_m, "test_sdl_set_conn");
++    CHECK(set_conn != NULL);
++
++    CHECK(strcmp(rh_status_line(), "No controller HD Rumble supports: normal rumble") == 0);
++
++    void *pro = (void *)0x1001;
++    set_conn(1);
++    rh_attach(pro);
++    CHECK(rh_pad_claimed(0) == 1);
++    CHECK(rh_is_active(pro) == 1);
++    CHECK(strcmp(rh_status_line(), "Connected: Pro Controller (USB), HD Rumble") == 0);
++    CHECK(rh_vibration(0, 0.4f, 160.0f, 0.4f, 320.0f) == 1);
++
++    /* turning HD Rumble off releases claimed pad and falls back to normal rumble */
++    rh_set_enabled(0);
++    CHECK(rh_pad_claimed(0) == 0);
++    CHECK(rh_is_active(pro) == 0);
++    CHECK(rh_vibration(0, 0.4f, 160.0f, 0.4f, 320.0f) == 0);
++    CHECK(strcmp(rh_status_line(), "HD Rumble is off: using normal rumble") == 0);
++
++    /* turning HD Rumble back on re-claims the tracked pad */
++    rh_set_enabled(1);
++    CHECK(rh_pad_claimed(0) == 1);
++    CHECK(rh_is_active(pro) == 1);
++    CHECK(strcmp(rh_status_line(), "Connected: Pro Controller (USB), HD Rumble") == 0);
++    CHECK(rh_vibration(0, 0.4f, 160.0f, 0.4f, 320.0f) == 1);
++    rh_detach(pro);
++
++    void *xbox = (void *)0x2001;
++    rh_attach(xbox);
++    CHECK(strcmp(rh_status_line(), "Connected: Xbox One S, HD Rumble (4 motors)") == 0);
++    rh_detach(xbox);
++
++    void *steam = (void *)0x3001;
++    rh_attach(steam);
++    CHECK(strcmp(rh_status_line(), "Steam Controller: HD Rumble (experimental)") == 0);
++    rh_cleanup();
++
++    CHECK(strcmp(rh_status_line(), "No controller HD Rumble supports: normal rumble") == 0);
++    printf("PASS: enable toggle and status line\n");
++    return 0;
++}
++"""
++
++
 +class RhBridgeTests(unittest.TestCase):
 +    def test_rh_bridge_behavior(self):
 +        with tempfile.TemporaryDirectory(prefix="rh-test-") as d:
@@ -2011,6 +2964,16 @@ index 0000000..b568640
 +            out, _ = compile_and_run(tmp, "test_ver.c", TEST_VERSION_REJECT_SRC)
 +            self.assertIn("incompatible", out)
 +
++    def test_dll_030x_rejected(self):
++        with tempfile.TemporaryDirectory(prefix="rh-ver-03-") as d:
++            tmp = Path(d)
++            src = MOCK_RH_DLL_TEMPLATE.format(
++                VERSION_FN="__declspec(dllexport) uint32_t renhdrum_version(void) { return 0x000302; }"
++            )
++            build_dll(tmp, "mock_rh.c", "renhdrum.dll", src)
++            out, _ = compile_and_run(tmp, "test_ver03.c", TEST_VERSION_REJECT_SRC)
++            self.assertIn("incompatible", out)
++
 +    def test_dll_missing_version_symbol_rejected(self):
 +        with tempfile.TemporaryDirectory(prefix="rh-ver-miss-") as d:
 +            tmp = Path(d)
@@ -2029,17 +2992,139 @@ index 0000000..b568640
 +            out, _ = compile_and_run(tmp, "test_real.c", TEST_REAL_BRIDGE_SRC)
 +            self.assertIn("PASS: real dll per-pad + wired resend", out)
 +
++    def _mock_dll(self, tmp, extra):
++        src = MOCK_RH_DLL_TEMPLATE.format(
++            VERSION_FN="__declspec(dllexport) uint32_t renhdrum_version(void) { return 0x000400; }"
++        ) + extra
++        build_dll(tmp, "mock_rh.c", "renhdrum.dll", src)
++        build_dll(tmp, "mock_sdl3.c", "SDL3.dll", MOCK_SDL3_SRC)
++
++    def test_xbox_one_s_four_motors(self):
++        with tempfile.TemporaryDirectory(prefix="rh-xbox-") as d:
++            tmp = Path(d)
++            self._mock_dll(tmp, MOCK_XBOX_FNS)
++            out, _ = compile_and_run(tmp, "test_xbox.c", TEST_XBOX_SRC)
++            self.assertIn("PASS: xbox four motors", out)
++
++    def test_steam_controller_grips_and_stand_in(self):
++        with tempfile.TemporaryDirectory(prefix="rh-steam-") as d:
++            tmp = Path(d)
++            self._mock_dll(tmp, MOCK_XBOX_FNS + MOCK_VALVE_FNS)
++            out, _ = compile_and_run(tmp, "test_steam.c", TEST_STEAM_SRC, ["-DFULL=1"])
++            self.assertIn("PASS: steam grips", out)
++
++    def test_steam_without_valve_functions_not_claimed(self):
++        with tempfile.TemporaryDirectory(prefix="rh-steam-none-") as d:
++            tmp = Path(d)
++            self._mock_dll(tmp, MOCK_XBOX_FNS)
++            out, _ = compile_and_run(tmp, "test_steam_none.c", TEST_STEAM_SRC)
++            self.assertIn("PASS: steam without valve functions", out)
++
 +    def test_wired_vs_bt_resend_isolation(self):
 +        with tempfile.TemporaryDirectory(prefix="rh-iso-") as d:
 +            tmp = Path(d)
 +            src = MOCK_RH_DLL_TEMPLATE.format(
-+                VERSION_FN="__declspec(dllexport) uint32_t renhdrum_version(void) { return 0x000302; }"
++                VERSION_FN="__declspec(dllexport) uint32_t renhdrum_version(void) { return 0x000400; }"
 +            )
 +            build_dll(tmp, "mock_rh.c", "renhdrum.dll", src)
 +            build_dll(tmp, "mock_sdl3.c", "SDL3.dll", MOCK_SDL3_SRC)
 +            out, _ = compile_and_run(tmp, "test_iso.c", TEST_MOCK_RESEND_ISOLATION_SRC)
 +            self.assertIn("PASS: resend isolation", out)
 +
++    def test_enable_toggle_and_status_line(self):
++        with tempfile.TemporaryDirectory(prefix="rh-toggle-") as d:
++            tmp = Path(d)
++            self._mock_dll(tmp, MOCK_XBOX_FNS + MOCK_VALVE_FNS)
++            out, _ = compile_and_run(tmp, "test_toggle.c", TEST_ENABLE_STATUS_SRC)
++            self.assertIn("PASS: enable toggle and status line", out)
++
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/tests/test_rumble_menu.py b/tests/test_rumble_menu.py
+index 4fcb7525..1507a554 100644
+--- a/tests/test_rumble_menu.py
++++ b/tests/test_rumble_menu.py
+@@ -67,7 +67,7 @@ void env_release(const int*) {}   // (the environment's hold on a row: none here
+ void vram_budget_sync() {}
+ constexpr int kVramMinimumOnly = 1;
+ /* (stand-ins for the rest of set_row, which the Rumble strength row never reaches: the Upscaler's rows, the restart offer) */
+-bool row_fixed(const int*) { return false; }
++bool row_fixed(const int* v) { return v == &opts.rumble && opts.hd_rumble != 0; }
+ int upscaler() { return 0; }
+ namespace ur {
+ int step_upscaler(int, int, bool) { return 0; }
+@@ -99,11 +99,31 @@ int step_output_choice(int id, int dir) { return id + dir; }
+ /* (menu_tick's arrows: Left, Right, and Enter as Right; a click on the value's left or right half presses them) */
+ void arrow(Row& r, bool right) { %(arrow)s }
+ int main() {
++    Row hd = {TAB_CONTROLS, "HD Rumble", &opts.hd_rumble, 0, 1, 1, nullptr, nullptr%(hd_exempt)s};
+     Row r = {TAB_CONTROLS, "Rumble strength", &opts.rumble, %(lo)s, %(hi)s, %(step)s, nullptr, nullptr%(exempt)s};
+     CHECK(r.lo == 0 && r.hi == 150 && r.step == 25);
++    CHECK(opts.hd_rumble == 1);
+     CHECK(opts.rumble == 100);
++    CHECK(!std::strcmp(ini_key(hd), "hd_rumble"));
+     CHECK(!std::strcmp(ini_key(r), "rumble_strength"));
+     opts.preset = 3;
++    /* HD Rumble on locks Rumble strength against arrows and direct set_row */
++    CHECK(row_fixed(&opts.rumble));
++    arrow(r, true);
++    CHECK(opts.rumble == 100);
++    arrow(r, false);
++    CHECK(opts.rumble == 100);
++    set_row(r, 50, -1);
++    CHECK(opts.rumble == 100);
++    /* turning HD Rumble off unlocks Rumble strength without altering its saved value (0..1 toggles wrap) */
++    arrow(hd, false);
++    CHECK(opts.hd_rumble == 0);
++    CHECK(!row_fixed(&opts.rumble));
++    CHECK(opts.rumble == 100);
++    arrow(hd, true);
++    CHECK(opts.hd_rumble == 1);
++    CHECK(row_fixed(&opts.rumble));
++    opts.hd_rumble = 0;
+     /* the arrows (and clicks): Off stays Off, 150%% stays 150%% */
+     opts.rumble = 0;
+     arrow(r, false);
+@@ -153,9 +173,21 @@ def wheel_free(menu):
+ def menu_fixture():
+     menu = MENU.read_text(encoding="utf-8")
+     header = read("gpu", "vk", "vk_menu.h")
++    hd_row = re.search(r'\{TAB_CONTROLS, "HD Rumble", &opts\.hd_rumble, 0, 1, 1, tx_onoff,', menu)
++    if not hd_row:
++        raise SystemExit("the menu lost its HD Rumble row")
++    hd_exempt = block(menu, hd_row.start()).rstrip().endswith(", true}")
++    if not hd_exempt:
++        raise SystemExit("HD Rumble must be preset_exempt")
+     row = re.search(r'\{TAB_CONTROLS, "Rumble strength", &opts\.rumble, (-?\d+), (\d+), (\d+), tx_rumble,', menu)
+     if not row:
+         raise SystemExit("the menu lost its Rumble strength row")
++    if hd_row.start() >= row.start() or "{TAB_" in menu[hd_row.end():row.start()]:
++        raise SystemExit("HD Rumble must sit directly above Rumble strength")
++    if "(value == &opts.rumble && opts.hd_rumble != 0)" not in definition(menu, "bool row_fixed"):
++        raise SystemExit("row_fixed does not lock Rumble strength when HD Rumble is on")
++    if "(fixed && r.value == &opts.rumble)" not in menu or 'std::string("-")' not in menu:
++        raise SystemExit("row_value_cell does not show '-' while Rumble strength is locked")
+     exempt = block(menu, row.start()).rstrip().endswith(", true}")   # (Row::preset_exempt: a control, not the preset's)
+     load = menu.index("bool has_resolution = false;")   # (the ini's load, not save()'s read of its other lines)
+     load = block(menu, menu.rindex('if (FILE* f = fopen(ini_path().c_str(), "r"))', 0, load))
+@@ -175,6 +207,7 @@ def menu_fixture():
+         "ini_key": definition(menu, "const char* ini_key"),
+         "set_row": definition(menu, "void set_row"),
+         "arrow": "bool press[5] = {false, false, false, !right, right}; " + arrow.group(1),
++        "hd_exempt": ", nullptr, false, true" if hd_exempt else "",
+         "exempt": ", nullptr, false, true" if exempt else "",   # (after the help: no hint, no restart)
+         "lo": row.group(1), "hi": row.group(2), "step": row.group(3),
+     }
+@@ -195,6 +228,11 @@ def option_ids():
+         raise SystemExit("vk_replay.cpp: an option id is read twice: %s" % sorted(ids))
+     if not re.search(r"\bid == 9 \? opts\.rumble\b", table):
+         raise SystemExit("vk_replay.cpp: option 9 is not the menu's Rumble strength")
++    if not re.search(r"\bid == HOS_OPT_HD_RUMBLE\)\s*return opts\.hd_rumble;", table):
++        raise SystemExit("vk_replay.cpp: HOS_OPT_HD_RUMBLE is not wired to opts.hd_rumble")
++    pad_sdl = read("host", "pad_sdl.c")
++    if "HOS_OPT_HD_RUMBLE" not in pad_sdl:
++        raise SystemExit("host/pad_sdl.c: does not read HOS_OPT_HD_RUMBLE")
+     base = int(re.search(r"#define OOT_CHEAT_ITEM_BASE (\d+)", read("gpu", "vk", "oot_cheat_items.h")).group(1))
+     if any(i >= base for i in ids):
+         raise SystemExit("vk_replay.cpp: an option id is among the cheat items'")
