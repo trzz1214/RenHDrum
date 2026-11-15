@@ -2,7 +2,7 @@
 
 A drop-in C/C++ bridge connecting Nintendo Switch static recompilation projects directly to **RenHDrum** (`renhdrum.dll` `0.4.x`), enabling authentic, low-latency **HD Rumble** for all four supported controllers, complete with a **Controls** menu toggle and per-pad compatibility with native recomp HD Rumble.
 
-For deeper architecture notes, lock-ordering rules, and standalone Pro Controller fixes, see [`docs/integration/recomp-games.md`](../../docs/integration/recomp-games.md).
+For deeper architecture notes, lock-ordering rules, standalone Pro Controller fixes, and [real-world lessons from the Hookshot and Longshot forks](../../docs/integration/recomp-games.md#11-lessons-from-two-real-forks-hookshot-v220-rc2-longshot-v300-rc3), see [`docs/integration/recomp-games.md`](../../docs/integration/recomp-games.md).
 
 > [!NOTE]
 > **Supported Controllers**: `✅ Nintendo Pro Controller` · `✅ DualSense` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
@@ -17,7 +17,8 @@ integrations/recomp-c/
 │   ├── renhdrum_recomp_bridge.c   # Worker threads, dynamic DLL/SDL loader, 4-controller bridge
 │   └── renhdrum_recomp_bridge.h   # Minimal public C interface
 ├── reference/
-│   └── recomp-c-reference.patch   # Complete reference patch against Hookshot v2.2.0-rc.2 (GPL-3.0)
+│   ├── recomp-c-reference.patch   # Complete reference patch against Hookshot v2.2.0-rc.2 (GPL-3.0)
+│   └── longshot-reference.patch   # Complete reference patch against Longshot v3.0.0-rc.3 (GPL-3.0-or-later)
 └── README.md
 ```
 
@@ -151,16 +152,19 @@ Six checks distilled from the `Goldoire/fefw-recomp#95` review (`v0.1.7`, `renhd
 
 ---
 
-## Reference Patch (`Hookshot v2.2.0-rc.2`)
+## Reference Patches (`Hookshot v2.2.0-rc.2` & `Longshot v3.0.0-rc.3`)
 
-[`reference/recomp-c-reference.patch`](reference/recomp-c-reference.patch) applies cleanly to Hookshot `v2.2.0-rc.2`:
+- [`reference/recomp-c-reference.patch`](reference/recomp-c-reference.patch) applies cleanly to Hookshot `v2.2.0-rc.2`.
+- [`reference/longshot-reference.patch`](reference/longshot-reference.patch) applies cleanly to Longshot `v3.0.0-rc.3`.
+- Before applying either patch to a fork, read [Section 11: Lessons from two real forks](../../docs/integration/recomp-games.md#11-lessons-from-two-real-forks-hookshot-v220-rc2-longshot-v300-rc3) for option IDs, `check_third_party.py` timing, `README.md` menu-row tests, and launcher packaging notes.
 
 ```bash
-git checkout v2.2.0-rc.2
-git apply integrations/recomp-c/reference/recomp-c-reference.patch
+git checkout v3.0.0-rc.3
+git apply integrations/recomp-c/reference/longshot-reference.patch
 ```
 
 ## License
 
 - Bridge implementation (`renhdrum_recomp_bridge.c`, `renhdrum_recomp_bridge.h`): **MIT OR Apache-2.0**.
 - Hookshot reference patch (`reference/recomp-c-reference.patch`): **GPL-3.0**. Credit to **NotRexed** and the Hookshot contributors.
+- Longshot reference patch (`reference/longshot-reference.patch`): **GPL-3.0-or-later**. Credit to **MagicBeanDev** and the Longshot contributors.

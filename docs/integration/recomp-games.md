@@ -265,7 +265,52 @@ Many recomp runtimes exit abruptly via `ExitProcess` without closing controllers
 
 ---
 
+## 11. Lessons from two real forks (Hookshot v2.2.0-rc.2, Longshot v3.0.0-rc.3)
+
+Porting and packaging RenHDrum across two real static recompilation forks — **Hookshot `v2.2.0-rc.2`** and **Longshot `v3.0.0-rc.3`** — surfaced practical integration and release pitfalls beyond the C bridge code itself.
+
+### 11.1 Project-Specific Naming & Logging
+- **Environment variables**: Match the host runtime's prefix instead of hardcoding `HOOKSHOT_*`. In Longshot, I renamed `HOOKSHOT_RENHDRUM` and `HOOKSHOT_BT_LEVEL` to `HOS_RENHDRUM` and `HOS_BT_LEVEL`, while preserving the host's native `HOS_HD_RUMBLE=0` switch whenever the menu's **HD Rumble** option is turned off.
+- **Logs & user-facing strings**: Route every diagnostic through the host logger (`hos_log` into `logs\`) and replace project branding in menu hints and error messages (`Hookshot` -> `Longshot`).
+
+### 11.2 Option IDs & Host Tables
+- **Pick an unused option ID and run the ID-collision test**: Hookshot used `HOS_OPT_HD_RUMBLE = 52`, whereas Longshot already assigned IDs `52` and `53`, so I moved `HOS_OPT_HD_RUMBLE` to `70` and verified it with `test_option_ids.py`.
+- **Keep host struct ordering stable**: Append new host callbacks (such as `hd_rumble_status`) at the end of the backend interface struct (after `prompts_live` in Hookshot, after `host_screen_size` in Longshot) so existing tests like `test_device_lost_exit.py` do not break.
+
+### 11.3 Frequently Missed Integration Files
+Three non-obvious touchpoints are easy to overlook when applying a reference patch to another recomp:
+- **Host backend function table (`host/rx_backend.c`)**: Register `rh_status_line` in the backend export table alongside `host_screen_size`, otherwise the menu cannot query controller status.
+- **Executable packaging list (`nx2/make_game.py` `BESIDE` / `nx2/build.py`)**: Add `renhdrum.dll` to the `BESIDE` list so the build copies it next to the game executable alongside `SDL2.dll` and `SDL3.dll`.
+- **Menu documentation tests (`README.md`)**: Longshot's `test_readme_menu_rows.py` checks that `README.md` documents every menu row; adding `"HD Rumble"` to the Controls menu required adding the matching row and explanation to `README.md`.
+
+### 11.4 Applying Reference Patches with `git apply --3way`
+- `git apply --3way` needs the base Git blobs from the original reference tag in the target repo's object store. Before applying [`recomp-c-reference.patch`](../../integrations/recomp-c/reference/recomp-c-reference.patch) onto Longshot `v3.0.0-rc.3`, I had to `git fetch` the `v2.2.0-rc.2` tag from Hookshot first.
+- Clean machine-local `.gitignore` entries (such as `*.bat` or local builder directories) out of shared patches so downstream forks only receive build-relevant ignores (for example `cpm/`).
+
+### 11.5 Build, Test & `third_party` Gotchas on Windows
+- **Run `scripts/check_third_party.py` before building**: Compiling a game places runtime DLLs and caches inside `third_party\` (`SDL2.dll`, `SDL3.dll`, `zbic.dll`, `a64emit.dll`, and `__pycache__`), which causes `check_third_party.py` to fail after a build even when no tracked `third_party` source was modified.
+- **Compare failures against a clean tag before debugging**: On Windows, `test_release.py` (CRLF mismatch), `test_check_third_party`, and `test_display_pointer` already failed identically on a clean `v3.0.0-rc.3` checkout; `test_prepare_seed_stamp.py` failed identically on clean Hookshot `v2.2.0-rc.2`; and `test_launcher_core.py` failed on a clean `LongshotLauncher` `v1.0.0-rc.4` checkout.
+- **Toolchain & parallel test quirks**: Put `Llvm\x64\bin` ahead of `Llvm\bin` on `PATH` (32-bit `Llvm\bin` caused over 90 false failures in `run_all.py`), ensure a compiler is on `PATH` for `test_rumble_menu` / `test_option_ids`, and re-run timing-sensitive bridge tests standalone if parallel workers cause contention (`test_rh_bridge` passed `3/3` standalone after a 12-worker timing flake). Also keep a fresh `--work` directory if an older incompatible `hookshot_pieces.prof` PGO profile exists.
+
+### 11.6 Packaging & Distribution Notes
+- **Disable every auto-update path**: Upstream builders, launchers, and in-game update checks will download official binaries or overwrite forked `tools\`, erasing RenHDrum:
+  - *Hookshot*: Gate `Updater.cs` with a `tools/no-update` marker (returning `null` for `LatestTag` and hiding Repair), remove the upstream setup binary that fetches latest releases, and write `HOOKSHOT_NO_UPDATE_CHECK=1` to `hookshot_env.txt` in `nx2/make_game.py`.
+  - *Longshot*: `v3.0.0-rc.3` already removed `hos_update.c`, so only the separate Launcher needed an offline fork (see below).
+- **Shader cache, paths, build times & disk budget**:
+  - When rebuilding into an existing output folder, delete the cached shader binary (`*_programs.bin`, such as `hookshot_programs.bin`) or build into a fresh folder.
+  - Extract and build in a **short root path** to stay well under the Windows 260-character path limit.
+  - Expect real full-game builds to take roughly **26–75 minutes** (26–31 minutes observed on Longshot `v3.0.0-rc.3`; 28 minutes direct / ~75 minutes clean offline pack on Hookshot `v2.2.0-rc.2`, vs. 26s–3m18s for incremental `--update` builds) and occupy **~27–35 GB** on disk (~27 GB for Longshot, ~35 GB for Hookshot).
+
+### 11.7 Longshot-Specific Launcher Architecture
+Unlike Hookshot's single bundled builder, **LongshotLauncher** (`v1.0.0-rc.4`) is a separate .NET 10 Avalonia app whose **Build** button stays disabled whenever `Service.NewestOf(channel)` is `null` (which only populates online), and which downloads upstream toolchains when online:
+1. **Minimal 4-file offline fork**: In `LauncherService.cs`, populate `newest` for all channels from `Service.Tools.Installed()` (`Checked = true`), turn `CheckReleasesAsync` into an offline no-op, and stop `PruneTools` from deleting the sole pre-installed toolchain. In `App.axaml.cs`, force offline mode at startup; in `MainWindow.axaml` and `LongshotLauncher.csproj`, rename the window title/product to `"Longshot + RenHDrum"`.
+2. **Disable self-update & enable portable layout**: Publish without `-p:LongshotTag=...` (a `"dev"` build keeps `SelfUpdate` disabled) and place an empty `portable` marker file beside `LongshotLauncher.exe` so everything lives in `LongshotLauncher-data\`.
+3. **Swap only the forked source folders**: Pre-install the signed `v3.0.0-rc.3` toolchain (`436 MB` download, `1.5 GB` unpacked) so `ToolsSource.EnsureAsync` finds `toolchain.json` and skips network checks, then replace `tools\gpu\`, `tools\host\`, `tools\nx2\`, and `tools\scripts\` with git-tracked files from the fork plus `tools\renhdrum.dll` (`make_game.py` compiles directly from `tools\` without per-file hash verification).
+4. **Saves, optional SDKs & GPL compliance**: Keep `--user %APPDATA%\Longshot` unchanged so players share saves with official Longshot builds. Do **not** pre-bundle NVIDIA DLSS or AMD FSR SDKs (users opt in once via the Wizard). Strip `sdk\`, `work\`, settings, logs, and build registries before zipping (`~483 MB` compressed, `1,539 MB` unpacked), and include upstream `LICENSE` files plus the forked Launcher source archive (`source\LongshotLauncher-renhdrum-src`) for GPL-3.0-or-later compliance.
+
+---
+
 ## Prebuilt Builds & Reference Kit
 
-- Ready-to-use C bridge and Hookshot `v2.2.0-rc.2` reference patch: [`integrations/recomp-c/`](../../integrations/recomp-c/).
+- Ready-to-use C bridge and reference patches (`Hookshot v2.2.0-rc.2` and `Longshot v3.0.0-rc.3`): [`integrations/recomp-c/`](../../integrations/recomp-c/).
 - End-user test builds and downloads: see the [website](https://ryuhdr.threedola.workers.dev/).
