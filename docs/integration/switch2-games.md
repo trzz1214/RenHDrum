@@ -151,4 +151,4 @@ Instead:
 
 ## 4. Prebuilt Test Builds
 
-To try the result without integrating anything, see the personal test builds listed in the [README](../../README.md#prebuilt-test-builds). Downloads and notes are on the website only.
+To try the result without integrating anything, see the personal test builds on the [website](https://ryuhdr.threedola.workers.dev/#download).
