@@ -86,7 +86,8 @@ if (hd_poll(i, side, now)) continue;
 
 1. **Nintendo Switch Pro Controller (`057E:2009`)**:
    - Matched by VID `0x057E`, PID `0x2009`.
-   - Uses `RenHdcEngine` with `SDL_SendJoystickEffect` (`0x10` packets), 40 ms wired resend (`RH_RESEND_US`), and Bluetooth **Level 4 (Compatible)** by default (`HOOKSHOT_BT_LEVEL=1..4` override) so it works on unpatched SDL3.
+   - Uses `RenHdcEngine` with `SDL_SendJoystickEffect` (`0x10` packets) and a 40 ms resend on wired connections (`RH_RESEND_US`).
+   - **Bluetooth has two modes in 0.4.0**: **Detailed (5 ms)** (host sets `bt_fast`, needs patched SDL3) and **Compatible** (Level 4: newest value at least 32 ms apart, resent every 40 ms while rumbling, handled inside the core). The bridge keeps `bt_fast = false`, so it always runs Compatible and works on unpatched SDL3. `HOOKSHOT_BT_LEVEL=1..4` is a testing override only; Levels 1-3 remain in the core for Ryuhdr compatibility and no longer affect the 5 ms envelope.
 2. **Sony DualSense / DualSense Edge (`054C:0CE6` / `0x0DF2`)**:
    - Matched by VID `0x054C`, PID `0x0CE6` or `0x0DF2`.
    - **USB**: Opens a 4-channel 48 kHz `SDL_AUDIO_F32` playback stream on `"DualSense"` / `"Wireless Controller"` (`channels >= 4`). Calls `SDL_PumpEvents()` before device enumeration so hotplugged pads appear without an SDL window, and retries every 2 seconds if the speaker endpoint arrives late.
@@ -147,7 +148,7 @@ Six checks distilled from the `Goldoire/fefw-recomp#95` review (`v0.1.7`, `renhd
 2. **`crt-static` builds**: Avoid `VCRUNTIME140.dll` dependency so players without VC++ Redistributable do not lose haptics silently.
 3. **Honor the master rumble-off toggle**: Stop both RenHDrum and motor rumble at the single dispatch gate.
 4. **Scale intensity once & reuse streams**: `volume_percent` in `renhdrum_dualsense_dsp_create` is already the final gain; never multiply samples again, and keep the audio stream open if recreating the DSP.
-5. **Bluetooth through the core's limiter**: Always pace Pro Bluetooth inside `RenHdcEngine` (default Level 4 Compatible on unpatched SDL3) to prevent input lag.
+5. **Bluetooth through the core's limiter**: Always pace Pro Bluetooth inside `RenHdcEngine` (Compatible mode, Level 4, on unpatched SDL3; Detailed 5 ms only with patched SDL3) to prevent input lag.
 6. **Layered fallbacks & lock order**: Never hold the host controller mutex while waiting on worker threads, and fall back to standard rumble across every device failure path.
 
 ---
