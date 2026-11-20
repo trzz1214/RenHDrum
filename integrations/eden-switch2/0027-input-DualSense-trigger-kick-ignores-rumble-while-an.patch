@@ -1,0 +1,87 @@
+From bf5112a8af1de20ebf7798608e7f5289269972ca Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 20:24:33 +0700
+Subject: [PATCH] input: DualSense trigger kick ignores rumble while another
+ button is pressed (plan 118 step 10a)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ externals/renhdrum/renhdrum.h             |  2 ++
+ src/input_common/drivers/renhdrum_pad.cpp | 27 ++++++++++++++++++++++-
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/externals/renhdrum/renhdrum.h b/externals/renhdrum/renhdrum.h
+index 88741d71e8..bb5370367b 100644
+--- a/externals/renhdrum/renhdrum.h
++++ b/externals/renhdrum/renhdrum.h
+@@ -323,6 +323,8 @@ int32_t renhdrum_tri_trigger_update(
+     bool fresh,
+     uint8_t *out11
+ );
++/* Player pressed another button: no new pulse until 500 ms after the last call (same clock as update). */
++void renhdrum_tri_trigger_note_action(RenHdcTriTrigger *h, uint32_t now_ms);
+ 
+ /* Switch 2 rumble mode: 0 = Switch 1 default / untouched, 2 = Switch 2 Mode 2 translation */
+ void renhdrum_set_nx2_mode(int32_t mode);
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index d573bbb6bb..dba60f2b8b 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -73,6 +73,8 @@ struct RenHDrumApi {
+     decltype(&renhdrum_tri_trigger_create) tri_create{};
+     decltype(&renhdrum_tri_trigger_destroy) tri_destroy{};
+     decltype(&renhdrum_tri_trigger_update) tri_update{};
++    // Optional (plan 118 step 10a): other buttons pressed mute the trigger kick
++    decltype(&renhdrum_tri_trigger_note_action) tri_note_action{};
+     bool HasTriTrigger() const {
+         return tri_create && tri_destroy && tri_update;
+     }
+@@ -133,6 +135,7 @@ const RenHDrumApi& Api() {
+             (void)a.library.GetSymbol("renhdrum_tri_trigger_create", &a.tri_create);
+             (void)a.library.GetSymbol("renhdrum_tri_trigger_destroy", &a.tri_destroy);
+             (void)a.library.GetSymbol("renhdrum_tri_trigger_update", &a.tri_update);
++            (void)a.library.GetSymbol("renhdrum_tri_trigger_note_action", &a.tri_note_action);
+             LOG_INFO(Input, "RenHDrum: loaded {}", name);
+         } else {
+             LOG_WARNING(Input, "RenHDrum: {} is missing functions, using the standard rumble", name);
+@@ -764,6 +767,24 @@ struct RenHDrumPad::Impl {
+                                             : SDL_GAMEPAD_AXIS_LEFT_TRIGGER),
+             0, 32767);
+         const auto depth = static_cast<Uint8>(axis * 255 / 32767);
++        // Plan 118 step 10a: another button (or the other trigger) held means rumble belongs to
++        // that action, so the trigger must not follow it. START/BACK/GUIDE/TOUCHPAD/MISC/paddles
++        // do not count.
++        static constexpr std::array<SDL_GamepadButton, 12> action_buttons{
++            SDL_GAMEPAD_BUTTON_SOUTH,         SDL_GAMEPAD_BUTTON_EAST,
++            SDL_GAMEPAD_BUTTON_WEST,          SDL_GAMEPAD_BUTTON_NORTH,
++            SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
++            SDL_GAMEPAD_BUTTON_LEFT_STICK,    SDL_GAMEPAD_BUTTON_RIGHT_STICK,
++            SDL_GAMEPAD_BUTTON_DPAD_UP,       SDL_GAMEPAD_BUTTON_DPAD_DOWN,
++            SDL_GAMEPAD_BUTTON_DPAD_LEFT,     SDL_GAMEPAD_BUTTON_DPAD_RIGHT};
++        bool other_action =
++            SDL_GetGamepadAxis(gp, is_right ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
++                                            : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) *
++                    255 / 32767 >
++                12;
++        for (std::size_t i = 0; !other_action && i < action_buttons.size(); ++i) {
++            other_action = SDL_GetGamepadButton(gp, action_buttons[i]);
++        }
+         std::array<Uint8, 11> effect{};
+         int changed = 0;
+         {
+@@ -773,7 +794,11 @@ struct RenHDrumPad::Impl {
+             }
+             const bool fresh = std::exchange(tri_fresh[side], false);
+             const auto& s = tri_sample[side];
+-            changed = Api().tri_update(tri[side], static_cast<std::uint32_t>(now_us / 1000),
++            const auto now_ms = static_cast<std::uint32_t>(now_us / 1000);
++            if (other_action && Api().tri_note_action) {
++                Api().tri_note_action(tri[side], now_ms);
++            }
++            changed = Api().tri_update(tri[side], now_ms,
+                                        depth, s[0], s[1], s[2], s[3], fresh, effect.data());
+         }
+         if (changed == 1) {
+-- 
+2.55.0.windows.5
+

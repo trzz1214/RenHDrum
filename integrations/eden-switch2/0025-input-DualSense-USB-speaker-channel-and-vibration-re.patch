@@ -1,0 +1,381 @@
+From 2f33ac72e7769ea267f3278dc26a02112362d541 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 14:16:56 +0700
+Subject: [PATCH] input: DualSense USB speaker channel and vibration-reactive
+ trigger kick (plan 118)
+
+---
+ externals/renhdrum/renhdrum.h             |  20 +++
+ src/input_common/drivers/renhdrum_pad.cpp | 205 ++++++++++++++++++++++
+ 2 files changed, 225 insertions(+)
+
+diff --git a/externals/renhdrum/renhdrum.h b/externals/renhdrum/renhdrum.h
+index 330c8c0..88741d7 100644
+--- a/externals/renhdrum/renhdrum.h
++++ b/externals/renhdrum/renhdrum.h
+@@ -304,6 +304,26 @@ int32_t renhdrum_xbox_rumble_push_half_sample(
+ int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
+ int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
+ 
++/* DualSense speaker channel (RenHDrum 0.4.x+): percent 0..100, 0 = off (channel 1 stays silent). */
++int32_t renhdrum_dualsense_dsp_set_speaker(RenHdcDualSenseDsp *dsp, int32_t percent);
++
++/* Vibration-reactive trigger (one handle per trigger). update: 1 = changed (11 bytes written to
++   out11, pack with the DS5 effects state), 0 = unchanged, <0 = error. */
++typedef struct RenHdcTriTrigger RenHdcTriTrigger;
++RenHdcTriTrigger *renhdrum_tri_trigger_create(void);
++void renhdrum_tri_trigger_destroy(RenHdcTriTrigger *h);
++int32_t renhdrum_tri_trigger_update(
++    RenHdcTriTrigger *h,
++    uint32_t now_ms,
++    uint8_t depth,
++    float amp_low,
++    float freq_low,
++    float amp_high,
++    float freq_high,
++    bool fresh,
++    uint8_t *out11
++);
++
+ /* Switch 2 rumble mode: 0 = Switch 1 default / untouched, 2 = Switch 2 Mode 2 translation */
+ void renhdrum_set_nx2_mode(int32_t mode);
+ 
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 3e25747..34181ff 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -10,6 +10,7 @@
+ #include <atomic>
+ #include <cmath>
+ #include <cstring>
++#include <fstream>
+ #include <mutex>
+ #include <string>
+ #include <thread>
+@@ -67,6 +68,14 @@ struct RenHDrumApi {
+     decltype(&renhdrum_valve_grip_build_report) valve_build_report{};
+     // Optional (RenHDrum 0.4.0+): runtime library version
+     decltype(&renhdrum_version) version{};
++    // Optional (plan 118): DualSense speaker channel and the vibration-reactive trigger
++    decltype(&renhdrum_dualsense_dsp_set_speaker) dsp_set_speaker{};
++    decltype(&renhdrum_tri_trigger_create) tri_create{};
++    decltype(&renhdrum_tri_trigger_destroy) tri_destroy{};
++    decltype(&renhdrum_tri_trigger_update) tri_update{};
++    bool HasTriTrigger() const {
++        return tri_create && tri_destroy && tri_update;
++    }
+     bool HasValve() const {
+         return valve_create && valve_build_report;
+     }
+@@ -120,6 +129,10 @@ const RenHDrumApi& Api() {
+             (void)a.library.GetSymbol("renhdrum_valve_grip_build_report",
+                                       &a.valve_build_report);
+             (void)a.library.GetSymbol("renhdrum_version", &a.version);
++            (void)a.library.GetSymbol("renhdrum_dualsense_dsp_set_speaker", &a.dsp_set_speaker);
++            (void)a.library.GetSymbol("renhdrum_tri_trigger_create", &a.tri_create);
++            (void)a.library.GetSymbol("renhdrum_tri_trigger_destroy", &a.tri_destroy);
++            (void)a.library.GetSymbol("renhdrum_tri_trigger_update", &a.tri_update);
+             LOG_INFO(Input, "RenHDrum: loaded {}", name);
+         } else {
+             LOG_WARNING(Input, "RenHDrum: {} is missing functions, using the standard rumble", name);
+@@ -172,6 +185,72 @@ constexpr int HdRumbleMaxInitialSendFails = 8;
+ // SDL no-queue gap while the 5 ms envelope runs (Ryuhdr AmFmNoQueueGapMs)
+ [[maybe_unused]] constexpr int NoQueueEnvelopeGapMs = 10;
+ 
++/// DualSense "trio" tier 1 over USB (plan 118): a speaker channel and a trigger that kicks on
++/// strong hits. Off unless `dualsense_bo3.txt` sits next to the executable: line 1 = speaker
++/// percent (0..100, 60 when missing or invalid), line 2 = `1` turns the trigger kick on.
++struct Bo3Config {
++    bool present{};
++    int speaker_percent{};
++    bool trigger{};
++};
++
++Bo3Config ReadBo3Config() {
++    Bo3Config config;
++    const char* base = SDL_GetBasePath();
++    if (!base) {
++        return config;
++    }
++    std::ifstream file{std::string{base} + "dualsense_bo3.txt"};
++    if (!file.is_open()) {
++        return config;
++    }
++    config.present = true;
++    config.speaker_percent = 60;
++    std::string line;
++    if (std::getline(file, line)) {
++        try {
++            config.speaker_percent = std::clamp(std::stoi(line), 0, 100);
++        } catch (const std::exception&) {
++            config.speaker_percent = 60;
++        }
++    }
++    if (std::getline(file, line)) {
++        config.trigger = line.find('1') != std::string::npos;
++    }
++    return config;
++}
++
++constexpr std::size_t Ds5EffectsSize = 47;
++
++/// Opens the speaker (route "speaker only", volume 100), as proven by ds_loa_thu.
++std::array<Uint8, Ds5EffectsSize> Bo3SpeakerOnBlock() {
++    std::array<Uint8, Ds5EffectsSize> block{};
++    block[0] = 0xA0;
++    block[1] = 0x80;
++    block[5] = 100;
++    block[7] = 0x30;
++    block[37] = 0x02;
++    return block;
++}
++
++std::array<Uint8, Ds5EffectsSize> Bo3SpeakerOffBlock() {
++    std::array<Uint8, Ds5EffectsSize> block{};
++    block[0] = 0x80;
++    block[7] = 0x00;
++    return block;
++}
++
++/// Right trigger effect sits at [10..21], left at [21..32]; only that side's enable bit is set.
++std::array<Uint8, Ds5EffectsSize> Bo3TriggerBlock(bool is_right,
++                                                  const std::array<Uint8, 11>& effect) {
++    std::array<Uint8, Ds5EffectsSize> block{};
++    block[0] = is_right ? 0x04 : 0x08;
++    std::copy(effect.begin(), effect.end(), block.begin() + (is_right ? 10 : 21));
++    return block;
++}
++
++constexpr std::array<Uint8, 11> Bo3TriggerOff{0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++
+ bool IsSwitchHdController(Uint16 vid, Uint16 pid) {
+     return vid == NintendoVendorId && (pid == 0x2009 || pid == 0x2006 || pid == 0x2007);
+ }
+@@ -382,6 +461,15 @@ struct RenHDrumPad::Impl {
+     bool stop_sdl_rumble{}; // haptics just switched on: SDL rumble would keep audio haptics off
+     UserSettings user{};
+ 
++    // Plan 118 (DualSense over USB, only with dualsense_bo3.txt): speaker + trigger kick
++    Bo3Config bo3{};
++    bool bo3_speaker_on{};
++    bool bo3_speaker_logged{};
++    bool bo3_restore_speaker{}; // set by Release(): Shutdown sends the speaker-off block
++    bool bo3_restore_trigger{}; // set by Release(): Shutdown sends Off to both triggers
++    std::array<RenHdcTriTrigger*, 2> tri{};
++    std::array<std::array<float, 4>, 2> tri_sample{};
++
+     RenHdcXboxRumble* xbox{};
+     bool xbox_triggers{};
+     bool official_no_triggers{};
+@@ -537,6 +625,9 @@ struct RenHDrumPad::Impl {
+                 const auto& api = Api();
+                 api.dsp_destroy(dsp);
+                 dsp = api.dsp_create(now.dualsense_volume, now.dualsense_crisp_notes);
++                if (dsp && bo3_speaker_on && api.dsp_set_speaker) {
++                    api.dsp_set_speaker(dsp, bo3.speaker_percent);
++                }
+             }
+             if (audio_stream) {
+                 SDL_UnlockAudioStream(audio_stream);
+@@ -623,6 +714,70 @@ struct RenHDrumPad::Impl {
+             } else {
+                 SDL_RumbleJoystick(js, 0, 0, 0);
+             }
++            OpenBo3Speaker(js);
++        }
++    }
++
++    /// Plan 118: opens the pad speaker and gives the DSP its speaker gain. No-op without
++    /// dualsense_bo3.txt. Called without the mutex.
++    void OpenBo3Speaker(SDL_Joystick* js) {
++        bool log = false;
++        {
++            std::scoped_lock lock{mutex};
++            const auto& api = Api();
++            if (!dsp || is_bluetooth || bo3.speaker_percent <= 0 || !api.dsp_set_speaker) {
++                return;
++            }
++            api.dsp_set_speaker(dsp, bo3.speaker_percent);
++            bo3_speaker_on = true;
++            log = !std::exchange(bo3_speaker_logged, true);
++        }
++        const auto block = Bo3SpeakerOnBlock();
++        SDL_SendJoystickEffect(js, block.data(), static_cast<int>(block.size()));
++        if (log) {
++            LOG_INFO(Input, "RenHDrum: DualSense speaker on ({}%)", bo3.speaker_percent);
++        }
++    }
++
++    /// Plan 118: one step of the trigger kick for one side. `sample` is the newest raw vibration
++    /// of that side, or nullptr on a periodic Tick (so the effect can fall back to Off). Called
++    /// without the mutex.
++    void Bo3TriggerStep(std::int64_t now_us, bool is_right,
++                        const std::array<float, 4>* sample) {
++        const std::size_t side = is_right ? 1 : 0;
++        SDL_Joystick* js = nullptr;
++        SDL_Gamepad* gp = nullptr;
++        {
++            std::scoped_lock lock{mutex};
++            if (!tri[side] || !joystick || !gamepad) {
++                return;
++            }
++            js = joystick;
++            gp = gamepad;
++            if (sample) {
++                tri_sample[side] = *sample;
++            }
++        }
++        const int axis = std::clamp<int>(
++            SDL_GetGamepadAxis(gp, is_right ? SDL_GAMEPAD_AXIS_RIGHT_TRIGGER
++                                            : SDL_GAMEPAD_AXIS_LEFT_TRIGGER),
++            0, 32767);
++        const auto depth = static_cast<Uint8>(axis * 255 / 32767);
++        std::array<Uint8, 11> effect{};
++        int changed = 0;
++        {
++            std::scoped_lock lock{mutex};
++            if (!tri[side]) {
++                return;
++            }
++            const auto& s = tri_sample[side];
++            changed = Api().tri_update(tri[side], static_cast<std::uint32_t>(now_us / 1000),
++                                       depth, s[0], s[1], s[2], s[3], sample != nullptr,
++                                       effect.data());
++        }
++        if (changed == 1) {
++            const auto block = Bo3TriggerBlock(is_right, effect);
++            SDL_SendJoystickEffect(js, block.data(), static_cast<int>(block.size()));
+         }
+     }
+ 
+@@ -1003,6 +1158,17 @@ struct RenHDrumPad::Impl {
+             api.engine_destroy(engine);
+             engine = nullptr;
+         }
++        for (auto& handle : tri) {
++            if (handle) {
++                api.tri_destroy(handle);
++                handle = nullptr;
++                bo3_restore_trigger = true;
++            }
++        }
++        if (bo3_speaker_on) {
++            bo3_restore_speaker = true;
++            bo3_speaker_on = false;
++        }
+         if (dsp) {
+             api.dsp_destroy(dsp);
+             dsp = nullptr;
+@@ -1142,6 +1308,15 @@ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gam
+             return nullptr;
+         }
+         LOG_INFO(Input, "RenHDrum: DualSense haptics for {:04X}:{:04X}", vid, pid);
++        if (!state->is_bluetooth) {
++            state->bo3 = ReadBo3Config();
++            if (state->bo3.present && state->bo3.trigger && api.HasTriTrigger() && gamepad) {
++                for (auto& handle : state->tri) {
++                    handle = api.tri_create();
++                }
++                LOG_INFO(Input, "RenHDrum: DualSense trigger kick on");
++            }
++        }
+         state->OpenDualSenseAudio();
+     }
+     state->kind = xbox_pad ? 2 : switch_pad ? 0 : 1;
+@@ -1205,6 +1380,8 @@ void RenHDrumPad::Shutdown() {
+     bool had_engine = false;
+     bool had_xbox = false;
+     bool triggers = false;
++    bool restore_speaker = false;
++    bool restore_trigger = false;
+     {
+         std::scoped_lock lock{impl->mutex};
+         if (!impl->joystick) {
+@@ -1213,6 +1390,8 @@ void RenHDrumPad::Shutdown() {
+         joystick = impl->joystick;
+         had_engine = impl->Release();
+         had_xbox = impl->had_xbox;
++        restore_speaker = std::exchange(impl->bo3_restore_speaker, false);
++        restore_trigger = std::exchange(impl->bo3_restore_trigger, false);
+         if (impl->kind >= 0) {
+             --connected_count[impl->kind];
+             if (impl->xbox_triggers) {
+@@ -1231,6 +1410,16 @@ void RenHDrumPad::Shutdown() {
+     if (had_engine) {
+         SendNeutralPacket(joystick);
+     }
++    if (restore_trigger) {
++        for (const bool is_right : {false, true}) {
++            const auto block = Bo3TriggerBlock(is_right, Bo3TriggerOff);
++            SDL_SendJoystickEffect(joystick, block.data(), static_cast<int>(block.size()));
++        }
++    }
++    if (restore_speaker) {
++        const auto block = Bo3SpeakerOffBlock();
++        SDL_SendJoystickEffect(joystick, block.data(), static_cast<int>(block.size()));
++    }
+     if (had_xbox) {
+         SDL_RumbleJoystick(joystick, 0, 0, 0);
+         if (triggers) {
+@@ -1259,6 +1448,7 @@ bool RenHDrumPad::Vibrate(std::int64_t now_us, bool is_right,
+     std::array<std::uint16_t, 2> direct{};
+     bool send_trigger = false;
+     std::array<std::uint16_t, 2> trigger{};
++    bool bo3_step = false;
+     {
+         std::scoped_lock lock{impl->mutex};
+         if (!impl->joystick) {
+@@ -1379,6 +1569,7 @@ bool RenHDrumPad::Vibrate(std::int64_t now_us, bool is_right,
+                                         ShapeAmplitude(status.high_amplitude, u),
+                                         status.high_frequency);
+                 handled = impl->audio_stream != nullptr || impl->bt_running.load();
++                bo3_step = impl->tri[0] != nullptr;
+             } else {
+                 // Haptics off: silence the voice coils, the standard rumble takes over
+                 api.dsp_set_half_target(impl->dsp, is_right, 0.0f, status.low_frequency, 0.0f,
+@@ -1390,6 +1581,11 @@ bool RenHDrumPad::Vibrate(std::int64_t now_us, bool is_right,
+         // Same one-off stop as after opening the speaker (OpenDualSenseAudio)
+         SDL_RumbleJoystick(joystick, 0, 0, 0);
+     }
++    if (bo3_step) {
++        const std::array<float, 4> sample{status.low_amplitude, status.low_frequency,
++                                          status.high_amplitude, status.high_frequency};
++        impl->Bo3TriggerStep(now_us, is_right, &sample);
++    }
+     if (send_direct) {
+         // A stop always arrives as a zero; the duration only guards a lost one
+         SDL_RumbleJoystick(joystick, direct[0], direct[1], 2000);
+@@ -1516,6 +1712,7 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+         SDL_free(devices);
+         if (!present) {
+             bool lost = false;
++            bool lost_speaker = false;
+             {
+                 std::scoped_lock lock{impl->mutex};
+                 if (impl->audio_stream == check_audio_stream) {
+@@ -1525,14 +1722,22 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+                     impl->ReleaseAudioDevice();
+                     impl->audio_attempts = DualSenseAudioMaxAttempts;
+                     lost = true;
++                    lost_speaker = std::exchange(impl->bo3_speaker_on, false);
+                 }
+             }
++            if (lost_speaker) {
++                const auto block = Bo3SpeakerOffBlock();
++                SDL_SendJoystickEffect(joystick, block.data(), static_cast<int>(block.size()));
++            }
+             if (lost) {
+                 LOG_INFO(Input, "RenHDrum: DualSense speaker went away, standard rumble until "
+                                 "it is back");
+             }
+         }
+     }
++    // Plan 118: the trigger kick falls back to Off from here when no new sample arrives
++    impl->Bo3TriggerStep(now_us, false, nullptr);
++    impl->Bo3TriggerStep(now_us, true, nullptr);
+     if (send) {
+         if (SDL_SendJoystickEffect(joystick, packet.data(), static_cast<int>(packet.size()))) {
+             impl->engine_ever_sent.store(true, std::memory_order_relaxed);
+-- 
+2.55.0.windows.5
+

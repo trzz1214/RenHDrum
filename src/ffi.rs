@@ -4,8 +4,10 @@ use std::slice;
 
 use crate::backend::NintendoHdEngine;
 use crate::dualsense::{
-    pack_ds5_effects_state, DualSenseBtPacker, DualSenseHapticsDsp, DualSenseTriggerInput,
-    DualSenseTriggerProfile, DualSenseTriggerProfileConfig, DS5_BT_HAPTICS_REPORT_SIZE,
+    hd_haptics_speaker_block, hd_haptics_trigger_block, pack_ds5_effects_state, DualSenseBtPacker,
+    DualSenseHapticsDsp, DualSenseTriggerEffect, DualSenseTriggerInput, DualSenseTriggerProfile,
+    DualSenseTriggerProfileConfig, DS5_BT36_REPORT_SIZE, DS5_BT_HAPTICS_REPORT_SIZE,
+    DS5_EFFECTS_STATE_SIZE,
 };
 use crate::encoding::amfm::HdAmFmEncoding;
 use crate::encoding::click::{HdClickEncoding, HdClickKind, HdClickSide};
@@ -14,11 +16,13 @@ use crate::encoding::standard::{hd_encode_packet, hd_encode_side};
 use crate::preset::{HdRumblePreset, HdRumblePresetKind};
 use crate::settings::{HdRumbleSettings, RumbleConfigController};
 use crate::valve::{
-    ValveGripPacker, VALVE_GRIP_FORMAT_MULAW_4K, VALVE_GRIP_FORMAT_MULAW_8K, VALVE_GRIP_REPORT_SIZE,
+    build_valve_grip_mode_off, ValveGripState, VALVE_GRIP_FORMAT_MULAW_4K,
+    VALVE_GRIP_FORMAT_MULAW_8K, VALVE_GRIP_MODE_REPORT_COUNT, VALVE_GRIP_MODE_REPORT_SIZE,
+    VALVE_GRIP_REPORT_SIZE,
 };
 use crate::xbox::{XboxRumbleMapper, XboxRumbleTuning};
 
-pub const RENHDRUM_VERSION: u32 = 0x000400; // 0.4.0
+pub const RENHDRUM_VERSION: u32 = 0x000500; // 0.5.0
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
@@ -74,6 +78,7 @@ pub struct RenHdcConfig {
     pub dualsense_haptics_volume: i32,
     pub dualsense_crisp_notes: bool,
     pub dualsense_bt_crisp_notes: bool,
+    pub dualsense_hd_haptics_off: bool,
 }
 
 impl From<&HdRumbleSettings> for RenHdcSettings {
@@ -166,6 +171,7 @@ impl From<&RenHdcConfig> for RumbleConfigController {
             dualsense_haptics_volume: c.dualsense_haptics_volume,
             dualsense_crisp_notes: c.dualsense_crisp_notes,
             dualsense_bt_crisp_notes: c.dualsense_bt_crisp_notes,
+            dualsense_hd_haptics_off: c.dualsense_hd_haptics_off,
         }
     }
 }
@@ -199,6 +205,7 @@ impl From<&RumbleConfigController> for RenHdcConfig {
             dualsense_haptics_volume: c.dualsense_haptics_volume,
             dualsense_crisp_notes: c.dualsense_crisp_notes,
             dualsense_bt_crisp_notes: c.dualsense_bt_crisp_notes,
+            dualsense_hd_haptics_off: c.dualsense_hd_haptics_off,
         }
     }
 }
@@ -728,6 +735,9 @@ pub struct RenHdcDualSenseDsp {
     pub(crate) bt_packer: std::sync::Mutex<DualSenseBtPacker>,
     /// Crisp notes on the Bluetooth path (report 0x32), a setting apart from the wired one
     pub(crate) bt_crisp_notes: bool,
+    pub(crate) speaker_explicit: std::sync::atomic::AtomicBool,
+    pub(crate) bt_auto_speaker: std::sync::atomic::AtomicBool,
+    pub(crate) valve_grip: std::sync::Mutex<ValveGripState>,
     pub(crate) trace: Option<std::sync::Mutex<crate::trace::RumbleTrace>>,
 }
 
@@ -967,17 +977,33 @@ pub extern "C" fn renhdrum_dualsense_dsp_create(
         inner: std::sync::Mutex::new(DualSenseHapticsDsp::new(vol, crisp)),
         bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
         bt_crisp_notes: bt_crisp,
+        speaker_explicit: std::sync::atomic::AtomicBool::new(false),
+        bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+        valve_grip: std::sync::Mutex::new(ValveGripState::default()),
         trace: crate::trace::RumbleTrace::open_in("dualsense", None).map(std::sync::Mutex::new),
     }))
 }
 
 /// Experimental (Steam Controller 2026 grips, built from iafx's measurements in RenHDrum#5).
 /// Same handle and arguments as `renhdrum_dualsense_dsp_create`, with the Valve grip profile.
+/// Leaves 40 ppm drift packet-skipping disabled so older hosts that check `>= 0` stay safe.
 /// Use `renhdrum_dualsense_dsp_set_half_target` and `renhdrum_dualsense_dsp_destroy` on it.
 #[no_mangle]
 pub extern "C" fn renhdrum_valve_grip_dsp_create(
     volume_percent: i32,
     crisp_notes: bool,
+) -> *mut RenHdcDualSenseDsp {
+    renhdrum_valve_grip_dsp_create_ex(volume_percent, crisp_notes, false)
+}
+
+/// Experimental (Steam Controller 2026 grips). Like `renhdrum_valve_grip_dsp_create`, plus
+/// `drift_compensation`: when true, `renhdrum_valve_grip_build_report` returns `2` once per
+/// 25,000 continuous packets so the host skips sending that `0x88` report (40 ppm drift fix).
+#[no_mangle]
+pub extern "C" fn renhdrum_valve_grip_dsp_create_ex(
+    volume_percent: i32,
+    crisp_notes: bool,
+    drift_compensation: bool,
 ) -> *mut RenHdcDualSenseDsp {
     let (vol, crisp) = if let Some(app) = crate::ipc::app_config() {
         (app.dualsense_haptics_volume, app.dualsense_crisp_notes)
@@ -988,6 +1014,9 @@ pub extern "C" fn renhdrum_valve_grip_dsp_create(
         inner: std::sync::Mutex::new(DualSenseHapticsDsp::new_grip(vol, crisp)),
         bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
         bt_crisp_notes: crisp,
+        speaker_explicit: std::sync::atomic::AtomicBool::new(false),
+        bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+        valve_grip: std::sync::Mutex::new(ValveGripState::new(drift_compensation)),
         trace: crate::trace::RumbleTrace::open_in("valve-grip", None).map(std::sync::Mutex::new),
     }))
 }
@@ -1060,6 +1089,129 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_half_target(
     }
 }
 
+/// Speaker channel (channel 1) level, 0..100 percent. 0 = off (default).
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_speaker(
+    dsp: *mut RenHdcDualSenseDsp,
+    percent: i32,
+) -> i32 {
+    if dsp.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    if let Ok(mut guard) = (*dsp).inner.lock() {
+        (*dsp)
+            .speaker_explicit
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        (*dsp)
+            .bt_auto_speaker
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        guard.set_speaker(percent);
+        RENHDRUM_OK
+    } else {
+        RENHDRUM_ERR_INVALID_ARG
+    }
+}
+
+/// Vibration-reactive trigger state machine (plan 118). One handle per trigger.
+pub struct RenHdcTriTrigger {
+    inner: std::sync::Mutex<crate::dualsense::TriTrigger>,
+}
+
+#[no_mangle]
+pub extern "C" fn renhdrum_tri_trigger_create() -> *mut RenHdcTriTrigger {
+    Box::into_raw(Box::new(RenHdcTriTrigger {
+        inner: std::sync::Mutex::new(crate::dualsense::TriTrigger::new()),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_tri_trigger_destroy(h: *mut RenHdcTriTrigger) {
+    if !h.is_null() {
+        drop(Box::from_raw(h));
+    }
+}
+
+/// Returns 1 and writes 11 bytes to `out11` when the effect changed, 0 when unchanged, <0 on error.
+/// `fresh` = the rumble sample is new since the previous call. Never emits mode bytes 0xFC..0xFE.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_tri_trigger_update(
+    h: *mut RenHdcTriTrigger,
+    now_ms: u32,
+    depth: u8,
+    amp_low: f32,
+    freq_low: f32,
+    amp_high: f32,
+    freq_high: f32,
+    fresh: bool,
+    out11: *mut u8,
+) -> i32 {
+    if h.is_null() || out11.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    let Ok(mut guard) = (*h).inner.lock() else {
+        return RENHDRUM_ERR_INVALID_ARG;
+    };
+    let mut buf = [0u8; 11];
+    let changed = guard.update(
+        now_ms,
+        depth,
+        (amp_low, freq_low, amp_high, freq_high),
+        fresh,
+        &mut buf,
+    );
+    if changed {
+        slice::from_raw_parts_mut(out11, 11).copy_from_slice(&buf);
+        1
+    } else {
+        0
+    }
+}
+
+/// The player is pressing another button: the trigger ignores rumble for 500 ms after the last call.
+/// Same monotonic clock as `renhdrum_tri_trigger_update`. Null-safe.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_tri_trigger_note_action(h: *mut RenHdcTriTrigger, now_ms: u32) {
+    if h.is_null() {
+        return;
+    }
+    if let Ok(mut guard) = (*h).inner.lock() {
+        guard.note_action(now_ms);
+    }
+}
+
+/// Builds a 47-byte `DS5EffectsState_t` USB block to open (`on != 0`) or release (`on == 0`) the
+/// DualSense speaker. Returns `0` on success, `-1` (`RENHDRUM_ERR_NULL_PTR`) if `out47` is null.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_hd_haptics_speaker_block(on: i32, out47: *mut u8) -> i32 {
+    if out47.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    let out = &mut *(out47 as *mut [u8; DS5_EFFECTS_STATE_SIZE]);
+    hd_haptics_speaker_block(on != 0, out);
+    RENHDRUM_OK
+}
+
+/// Builds a 47-byte `DS5EffectsState_t` USB block for one trigger (`is_right != 0` = R2 at `[10..21]`,
+/// `0` = L2 at `[21..32]`). `effect11_or_null == NULL` writes the `Off` (`0x05`) effect.
+/// Returns `0` on success, `-1` (`RENHDRUM_ERR_NULL_PTR`) if `out47` is null.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_hd_haptics_trigger_block(
+    is_right: i32,
+    effect11_or_null: *const u8,
+    out47: *mut u8,
+) -> i32 {
+    if out47.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    let effect = if effect11_or_null.is_null() {
+        None
+    } else {
+        Some(&*(effect11_or_null as *const [u8; DualSenseTriggerEffect::SIZE]))
+    };
+    let out = &mut *(out47 as *mut [u8; DS5_EFFECTS_STATE_SIZE]);
+    hd_haptics_trigger_block(is_right != 0, effect, out);
+    RENHDRUM_OK
+}
 #[no_mangle]
 pub extern "C" fn renhdrum_set_nx2_mode(mode: i32) {
     crate::nx2::set_nx2_mode(mode);
@@ -1181,6 +1333,15 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt_report(
     let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
         return RENHDRUM_ERR_INVALID_ARG;
     };
+    if (*dsp)
+        .bt_auto_speaker
+        .swap(false, std::sync::atomic::Ordering::Relaxed)
+        && !(*dsp)
+            .speaker_explicit
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        inner.set_speaker(0);
+    }
     if inner.crisp_notes != (*dsp).bt_crisp_notes {
         inner.set_crisp_notes((*dsp).bt_crisp_notes);
     }
@@ -1188,9 +1349,59 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt_report(
     i32::from(packer.build(&mut inner, buffer_length, out))
 }
 
+/// Builds one combined DualSense Bluetooth report 0x36 (398 bytes: rumble + adaptive triggers +
+/// speaker Opus sub-packet `0x93` when HD Haptics speaker is enabled) from the next 10.667 ms of
+/// the DSP. `state47_or_null` is a 47-byte block (trigger enable bits 0x04/0x08 in byte 0, R2
+/// `[10..21]`, L2 `[21..32]`); NULL leaves triggers untouched. `seq` is unused (the DSP keeps its
+/// own sequence) and reserved.
+/// Returns 1 when `out_report398` holds a report to send, 0 when nothing needs sending (rumble,
+/// speaker, and triggers idle for over 2 s; the DSP still advanced), < 0 on error.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt36_report(
+    dsp: *mut RenHdcDualSenseDsp,
+    state47_or_null: *const u8,
+    _seq: u8,
+    out_report398: *mut u8,
+) -> i32 {
+    if dsp.is_null() || out_report398.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
+        return RENHDRUM_ERR_INVALID_ARG;
+    };
+    if inner.crisp_notes != (*dsp).bt_crisp_notes {
+        inner.set_crisp_notes((*dsp).bt_crisp_notes);
+    }
+    let hd_off = crate::ipc::app_config().is_some_and(|c| c.dualsense_hd_haptics_off);
+    if !(*dsp)
+        .speaker_explicit
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        let target_pct = if hd_off {
+            0
+        } else {
+            crate::dualsense::HD_HAPTICS_SPEAKER_PERCENT
+        };
+        if inner.speaker_enabled() != (target_pct > 0) {
+            inner.set_speaker(target_pct);
+        }
+        (*dsp)
+            .bt_auto_speaker
+            .store(target_pct > 0, std::sync::atomic::Ordering::Relaxed);
+    }
+    let state = if state47_or_null.is_null() {
+        None
+    } else {
+        Some(&*(state47_or_null as *const [u8; DS5_EFFECTS_STATE_SIZE]))
+    };
+    let out = &mut *(out_report398 as *mut [u8; DS5_BT36_REPORT_SIZE]);
+    i32::from(packer.build36_with_speaker(&mut inner, state, !hd_off, out) != 0)
+}
+
 /// Experimental. Builds one Steam Controller (2026) grip report 0x88 (64 bytes) from the next
-/// 31 samples of a DSP made by `renhdrum_valve_grip_dsp_create`; format 8 = mu-law 8 kHz, 9 = 4 kHz.
-/// Returns 1 when the block carries vibration, 0 when silent, < 0 on error.
+/// 31 samples of a DSP made by `renhdrum_valve_grip_dsp_create[_ex]`; format 8 = mu-law 8 kHz, 9 = 4 kHz.
+/// Returns 1 when vibrating, 0 when silent, 2 when drift compensation skips this packet
+/// (only if created with `drift_compensation = true`; do not send, DSP phase unchanged), < 0 on error.
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_valve_grip_build_report(
     dsp: *mut RenHdcDualSenseDsp,
@@ -1203,11 +1414,59 @@ pub unsafe extern "C" fn renhdrum_valve_grip_build_report(
     if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
         return RENHDRUM_ERR_INVALID_ARG;
     }
-    let Ok(mut inner) = (*dsp).inner.lock() else {
+    let (Ok(mut inner), Ok(mut grip)) = ((*dsp).inner.lock(), (*dsp).valve_grip.lock()) else {
         return RENHDRUM_ERR_INVALID_ARG;
     };
     let out = &mut *(out_report64 as *mut [u8; VALVE_GRIP_REPORT_SIZE]);
-    i32::from(ValveGripPacker::default().build(&mut inner, format, out))
+    match grip.build_report(&mut inner, format, out) {
+        Some(outcome) => outcome as i32,
+        None => RENHDRUM_ERR_INVALID_ARG,
+    }
+}
+
+/// Experimental. Evaluates the Steam Controller (2026) `0x86` PCM mode keep-alive state at `now_ns`:
+/// sends "on" on first vibration, refreshes "on" every 3 s while active or immediately when `stalled`
+/// is true, and sends "off" after 100 ms of silence (also resetting the drift counter).
+/// `out_reports8` receives two 4-byte `0x86` reports (channels 2 and 5). Returns `2` or `0`, or < 0 on error.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_valve_grip_mode_tick(
+    dsp: *mut RenHdcDualSenseDsp,
+    format: u8,
+    now_ns: u64,
+    stalled: bool,
+    out_reports8: *mut u8,
+) -> i32 {
+    if dsp.is_null() || out_reports8.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
+        return RENHDRUM_ERR_INVALID_ARG;
+    }
+    let (Ok(inner), Ok(mut grip)) = ((*dsp).inner.lock(), (*dsp).valve_grip.lock()) else {
+        return RENHDRUM_ERR_INVALID_ARG;
+    };
+    let out = &mut *(out_reports8
+        as *mut [[u8; VALVE_GRIP_MODE_REPORT_SIZE]; VALVE_GRIP_MODE_REPORT_COUNT]);
+    match grip.mode_tick(&inner, format, now_ns, stalled, out) {
+        Some(n) => n as i32,
+        None => RENHDRUM_ERR_INVALID_ARG,
+    }
+}
+
+/// Experimental. Writes two 4-byte `0x86` "off" reports (channels 2 and 5) into `out_reports8`
+/// for detach / shutdown / error-exit paths. Accepts `format` `0`, `8`, or `9`; returns `2`, or < 0 on error.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_valve_grip_mode_off(format: u8, out_reports8: *mut u8) -> i32 {
+    if out_reports8.is_null() {
+        return RENHDRUM_ERR_NULL_PTR;
+    }
+    let out = &mut *(out_reports8
+        as *mut [[u8; VALVE_GRIP_MODE_REPORT_SIZE]; VALVE_GRIP_MODE_REPORT_COUNT]);
+    if build_valve_grip_mode_off(format, out) {
+        VALVE_GRIP_MODE_REPORT_COUNT as i32
+    } else {
+        RENHDRUM_ERR_INVALID_ARG
+    }
 }
 
 #[no_mangle]
@@ -1260,7 +1519,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000400);
+        assert_eq!(renhdrum_version(), 0x000500);
     }
 
     #[test]
@@ -1461,6 +1720,209 @@ mod tests {
     }
 
     #[test]
+    fn test_valve_grip_mode_and_drift_ffi() {
+        unsafe {
+            let mut mode_reports = [0u8; 8];
+            assert_eq!(
+                renhdrum_valve_grip_mode_tick(
+                    std::ptr::null_mut(),
+                    8,
+                    0,
+                    false,
+                    mode_reports.as_mut_ptr()
+                ),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            assert_eq!(
+                renhdrum_valve_grip_mode_off(8, std::ptr::null_mut()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            assert_eq!(
+                renhdrum_valve_grip_mode_off(7, mode_reports.as_mut_ptr()),
+                RENHDRUM_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                renhdrum_valve_grip_mode_off(9, mode_reports.as_mut_ptr()),
+                2
+            );
+            assert_eq!(mode_reports, [0x86, 1, 2, 9, 0x86, 1, 5, 9]);
+
+            let dsp = renhdrum_valve_grip_dsp_create_ex(100, false, true);
+            assert!(!dsp.is_null());
+            assert_eq!(
+                renhdrum_valve_grip_mode_tick(dsp, 8, 0, false, std::ptr::null_mut()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            assert_eq!(
+                renhdrum_valve_grip_mode_tick(dsp, 7, 0, false, mode_reports.as_mut_ptr()),
+                RENHDRUM_ERR_INVALID_ARG
+            );
+
+            assert_eq!(
+                renhdrum_dualsense_dsp_set_half_target(dsp, false, 0.5, 160.0, 0.0, 320.0),
+                RENHDRUM_OK
+            );
+            assert_eq!(
+                renhdrum_valve_grip_mode_tick(dsp, 8, 0, false, mode_reports.as_mut_ptr()),
+                2
+            );
+            assert_eq!(mode_reports, [0x86, 2, 2, 8, 0x86, 2, 5, 8]);
+            assert_eq!(
+                renhdrum_valve_grip_mode_tick(
+                    dsp,
+                    8,
+                    3_000_000_000,
+                    false,
+                    mode_reports.as_mut_ptr()
+                ),
+                2
+            );
+            assert_eq!(mode_reports, [0x86, 2, 2, 8, 0x86, 2, 5, 8]);
+
+            let mut report = [0u8; VALVE_GRIP_REPORT_SIZE];
+            let mut skips = 0;
+            for _ in 0..25_000 {
+                if renhdrum_valve_grip_build_report(dsp, 8, report.as_mut_ptr()) == 2 {
+                    skips += 1;
+                }
+            }
+            assert_eq!(skips, 1);
+
+            renhdrum_dualsense_dsp_destroy(dsp);
+
+            // Default create() keeps drift compensation off so legacy hosts never get return code 2.
+            let legacy_dsp = renhdrum_valve_grip_dsp_create(100, false);
+            assert_eq!(
+                renhdrum_dualsense_dsp_set_half_target(legacy_dsp, false, 0.5, 160.0, 0.0, 320.0),
+                RENHDRUM_OK
+            );
+            let mut legacy_skips = 0;
+            for _ in 0..25_000 {
+                if renhdrum_valve_grip_build_report(legacy_dsp, 8, report.as_mut_ptr()) == 2 {
+                    legacy_skips += 1;
+                }
+            }
+            assert_eq!(legacy_skips, 0);
+            renhdrum_dualsense_dsp_destroy(legacy_dsp);
+        }
+    }
+
+    #[test]
+    fn test_dualsense_dsp_build_bt36_report_ffi() {
+        unsafe {
+            let mut report = [0u8; DS5_BT36_REPORT_SIZE];
+            assert_eq!(
+                renhdrum_dualsense_dsp_build_bt36_report(
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    0,
+                    report.as_mut_ptr()
+                ),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            let dsp = renhdrum_dualsense_dsp_create(100, true);
+            assert!(!dsp.is_null());
+            assert_eq!(
+                renhdrum_dualsense_dsp_build_bt36_report(
+                    dsp,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut()
+                ),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            assert_eq!(
+                renhdrum_dualsense_dsp_build_bt36_report(
+                    dsp,
+                    std::ptr::null(),
+                    0,
+                    report.as_mut_ptr()
+                ),
+                1
+            );
+            assert_eq!(report[0], 0x36);
+            renhdrum_dualsense_dsp_destroy(dsp);
+        }
+    }
+
+    #[test]
+    fn test_dualsense_dsp_bt36_auto_speaker_and_explicit_off_ffi() {
+        unsafe {
+            let dsp = renhdrum_dualsense_dsp_create(100, true);
+            assert!(!dsp.is_null());
+            let mut report = [0u8; DS5_BT36_REPORT_SIZE];
+
+            // Host did not call set_speaker yet (e.g. brontide-ns2.exe over BT): auto-enables 60%.
+            assert_eq!(
+                renhdrum_dualsense_dsp_build_bt36_report(
+                    dsp,
+                    std::ptr::null(),
+                    0,
+                    report.as_mut_ptr()
+                ),
+                1
+            );
+            assert_eq!(report[13] & 0xA0, 0xA0);
+            assert_eq!(report[14] & 0x80, 0x80);
+            assert_eq!(report[18], 100);
+            assert_eq!(report[20], 0x30);
+            assert_eq!(report[50], 0x02);
+            assert_eq!(&report[142..144], &[0x93, 200]);
+            assert_eq!(&report[144..147], &[0xF4, 0xFF, 0xFE]);
+
+            // Trigger an impact -> encoded speaker frame differs from silence.
+            assert_eq!(
+                renhdrum_dualsense_dsp_set_target(
+                    dsp, 0.0, 160.0, 0.8, 300.0, 0.0, 160.0, 0.8, 300.0
+                ),
+                RENHDRUM_OK
+            );
+            let mut active_opus = false;
+            for _ in 0..3 {
+                assert_eq!(
+                    renhdrum_dualsense_dsp_build_bt36_report(
+                        dsp,
+                        std::ptr::null(),
+                        0,
+                        report.as_mut_ptr()
+                    ),
+                    1
+                );
+                if report[144..344]
+                    != [0xF4, 0xFF, 0xFE]
+                        .into_iter()
+                        .chain(std::iter::repeat_n(0u8, 197))
+                        .collect::<Vec<_>>()[..]
+                {
+                    active_opus = true;
+                }
+            }
+            assert!(active_opus, "expected active Opus packet over FFI 0x36");
+
+            // Falling back to 0x32 turns off the auto-enabled speaker + studio motor.
+            let mut report142 = [0u8; DS5_BT_HAPTICS_REPORT_SIZE];
+            assert!(renhdrum_dualsense_dsp_build_bt_report(dsp, 0xFF, report142.as_mut_ptr()) >= 0);
+            assert!(!(*dsp).inner.lock().unwrap().speaker_enabled());
+
+            // Calling set_speaker(0) explicitly keeps 0x36 without speaker sub-packet 0x93.
+            assert_eq!(renhdrum_dualsense_dsp_set_speaker(dsp, 0), RENHDRUM_OK);
+            assert_eq!(
+                renhdrum_dualsense_dsp_build_bt36_report(
+                    dsp,
+                    std::ptr::null(),
+                    0,
+                    report.as_mut_ptr()
+                ),
+                1
+            );
+            assert_eq!(report[13] & 0xA0, 0);
+            assert_eq!(&report[142..394], &[0u8; 252]);
+
+            renhdrum_dualsense_dsp_destroy(dsp);
+        }
+    }
+
+    #[test]
     fn test_dualsense_dsp_build_bt_report_ffi() {
         unsafe {
             let mut report = [0u8; DS5_BT_HAPTICS_REPORT_SIZE];
@@ -1654,6 +2116,9 @@ mod tests {
                 inner: std::sync::Mutex::new(DualSenseHapticsDsp::new(100, false)),
                 bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
                 bt_crisp_notes: false,
+                speaker_explicit: std::sync::atomic::AtomicBool::new(false),
+                bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+                valve_grip: std::sync::Mutex::new(ValveGripState::default()),
                 trace,
             };
             let ptr = &dsp as *const RenHdcDualSenseDsp as *mut RenHdcDualSenseDsp;
@@ -1802,5 +2267,158 @@ mod tests {
     #[test]
     fn xbox_nan_amplitude_is_silent_in_mode_0() {
         assert_eq!(xbox_motor_sum(0, f32::NAN), 0);
+    }
+
+    #[test]
+    fn config_size_stays_48_and_hd_haptics_defaults_on() {
+        assert_eq!(std::mem::size_of::<RenHdcConfig>(), 48);
+        let ctrl = RumbleConfigController::default();
+        assert!(!ctrl.dualsense_hd_haptics_off);
+        let ffi_cfg = RenHdcConfig::from(&ctrl);
+        assert!(!ffi_cfg.dualsense_hd_haptics_off);
+    }
+
+    #[test]
+    fn hd_haptics_blocks_match_lichii_hd_118_and_guard_bits() {
+        // Expected 47-byte blocks copied directly from lichii hd-118 renhdrum_pad.cpp:229-255.
+        let mut expected_speaker_on = [0u8; 47];
+        expected_speaker_on[0] = 0xA0;
+        expected_speaker_on[1] = 0x80;
+        expected_speaker_on[5] = 100;
+        expected_speaker_on[7] = 0x30;
+        expected_speaker_on[37] = 0x02;
+
+        let mut expected_speaker_off = [0u8; 47];
+        expected_speaker_off[0] = 0x80;
+        expected_speaker_off[7] = 0x00;
+
+        let sample_effect: [u8; 11] = [
+            0x26, 0xFC, 0x03, 0x00, 0x02, 0x1E, 0x00, 0x00, 0x00, 0x20, 0x00,
+        ];
+        let mut expected_right = [0u8; 47];
+        expected_right[0] = 0x04;
+        expected_right[10..21].copy_from_slice(&sample_effect);
+
+        let mut expected_left = [0u8; 47];
+        expected_left[0] = 0x08;
+        expected_left[21..32].copy_from_slice(&sample_effect);
+
+        let off_effect: [u8; 11] = [0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut expected_right_off = [0u8; 47];
+        expected_right_off[0] = 0x04;
+        expected_right_off[10..21].copy_from_slice(&off_effect);
+
+        let mut expected_left_off = [0u8; 47];
+        expected_left_off[0] = 0x08;
+        expected_left_off[21..32].copy_from_slice(&off_effect);
+
+        unsafe {
+            // Null output guards return -1 without writing.
+            assert_eq!(
+                renhdrum_hd_haptics_speaker_block(1, std::ptr::null_mut()),
+                -1
+            );
+            assert_eq!(
+                renhdrum_hd_haptics_speaker_block(0, std::ptr::null_mut()),
+                -1
+            );
+            assert_eq!(
+                renhdrum_hd_haptics_trigger_block(1, sample_effect.as_ptr(), std::ptr::null_mut()),
+                -1
+            );
+            assert_eq!(
+                renhdrum_hd_haptics_trigger_block(0, std::ptr::null(), std::ptr::null_mut()),
+                -1
+            );
+
+            // Pre-fill buffers with 0xFF to verify full zero-clearing of unused bytes.
+            let mut out = [0xFFu8; 47];
+            assert_eq!(renhdrum_hd_haptics_speaker_block(1, out.as_mut_ptr()), 0);
+            assert_eq!(out, expected_speaker_on);
+            assert_eq!(out[0] & 0x03, 0);
+
+            out = [0xFFu8; 47];
+            assert_eq!(renhdrum_hd_haptics_speaker_block(0, out.as_mut_ptr()), 0);
+            assert_eq!(out, expected_speaker_off);
+            assert_eq!(out[0] & 0x03, 0);
+
+            out = [0xFFu8; 47];
+            assert_eq!(
+                renhdrum_hd_haptics_trigger_block(1, sample_effect.as_ptr(), out.as_mut_ptr()),
+                0
+            );
+            assert_eq!(out, expected_right);
+            assert_eq!(out[0] & 0x03, 0);
+
+            out = [0xFFu8; 47];
+            assert_eq!(
+                renhdrum_hd_haptics_trigger_block(0, sample_effect.as_ptr(), out.as_mut_ptr()),
+                0
+            );
+            assert_eq!(out, expected_left);
+            assert_eq!(out[0] & 0x03, 0);
+
+            out = [0xFFu8; 47];
+            assert_eq!(
+                renhdrum_hd_haptics_trigger_block(1, std::ptr::null(), out.as_mut_ptr()),
+                0
+            );
+            assert_eq!(out, expected_right_off);
+            assert_eq!(out[0] & 0x03, 0);
+            assert!(!(0xFC..=0xFE).contains(&out[10]));
+
+            out = [0xFFu8; 47];
+            assert_eq!(
+                renhdrum_hd_haptics_trigger_block(0, std::ptr::null(), out.as_mut_ptr()),
+                0
+            );
+            assert_eq!(out, expected_left_off);
+            assert_eq!(out[0] & 0x03, 0);
+            assert!(!(0xFC..=0xFE).contains(&out[21]));
+
+            // Roundtrip from renhdrum_tri_trigger_update -> renhdrum_hd_haptics_trigger_block:
+            // never sets motor rumble bits 0x01/0x02 and never emits trigger mode bytes 0xFC..0xFE.
+            let tri = renhdrum_tri_trigger_create();
+            assert!(!tri.is_null());
+            let mut eff = [0u8; 11];
+            assert_eq!(
+                renhdrum_tri_trigger_update(
+                    tri,
+                    0,
+                    200,
+                    0.0,
+                    160.0,
+                    0.0,
+                    320.0,
+                    true,
+                    eff.as_mut_ptr()
+                ),
+                0
+            );
+            assert_eq!(
+                renhdrum_tri_trigger_update(
+                    tri,
+                    10,
+                    200,
+                    0.5,
+                    160.0,
+                    0.0,
+                    320.0,
+                    true,
+                    eff.as_mut_ptr()
+                ),
+                1
+            );
+            assert!(!(0xFC..=0xFE).contains(&eff[0]));
+            assert_eq!(
+                renhdrum_hd_haptics_trigger_block(1, eff.as_ptr(), out.as_mut_ptr()),
+                0
+            );
+            assert_eq!(out[0], 0x04);
+            assert_eq!(out[0] & 0x03, 0);
+            assert_eq!(&out[10..21], &eff);
+            assert!(!(0xFC..=0xFE).contains(&out[10]));
+            renhdrum_tri_trigger_destroy(tri);
+        }
     }
 }

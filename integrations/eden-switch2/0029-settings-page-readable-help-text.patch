@@ -1,0 +1,36 @@
+From 8cfc8f7177cdcdaa94d65bbc0cb242266f6215a1 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:50:08 +0700
+Subject: [PATCH] settings page: readable help text
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/lichii/configuration/renhdrum_settings_dialog.cpp | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/lichii/configuration/renhdrum_settings_dialog.cpp b/src/lichii/configuration/renhdrum_settings_dialog.cpp
+index 5ff1e9935d..9842b564dd 100644
+--- a/src/lichii/configuration/renhdrum_settings_dialog.cpp
++++ b/src/lichii/configuration/renhdrum_settings_dialog.cpp
+@@ -6,6 +6,7 @@
+ #include <utility>
+ 
+ #include <QCheckBox>
++#include <QColor>
+ #include <QComboBox>
+ #include <QGroupBox>
+ #include <QHBoxLayout>
+@@ -33,7 +34,9 @@ QLabel* MutedLabel(const QString& text, int indent = 0) {
+     auto* label = new QLabel(text);
+     label->setWordWrap(true);
+     label->setContentsMargins(indent, 0, 0, 0);
+-    label->setStyleSheet(QStringLiteral("color: palette(mid);"));
++    // Help text: the theme's own text colour, a little lighter (palette(mid) is too faint on dark themes)
++    const QColor c = label->palette().color(QPalette::WindowText);
++    label->setStyleSheet(QStringLiteral("color: rgba(%1, %2, %3, 175);").arg(c.red()).arg(c.green()).arg(c.blue()));
+     return label;
+ }
+ 
+-- 
+2.55.0.windows.5
+

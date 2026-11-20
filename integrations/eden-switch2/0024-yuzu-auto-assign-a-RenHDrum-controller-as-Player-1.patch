@@ -1,0 +1,236 @@
+From 58cb5425cd2d555a411497f5746a25c6e13885fa Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 22:50:02 +0700
+Subject: [PATCH] yuzu: auto-assign a RenHDrum controller as Player 1 (from
+ Brontide)
+
+---
+ src/yuzu/CMakeLists.txt                |   2 +
+ src/yuzu/configuration/auto_assign.cpp | 114 +++++++++++++++++++++++
+ src/yuzu/configuration/auto_assign.h   |  52 +++++++++++
+ src/yuzu/main_window.cpp               |   9 ++
+ 4 files changed, 177 insertions(+)
+ create mode 100644 src/yuzu/configuration/auto_assign.cpp
+ create mode 100644 src/yuzu/configuration/auto_assign.h
+
+diff --git a/src/yuzu/CMakeLists.txt b/src/yuzu/CMakeLists.txt
+index c15eee492c..9a7debce29 100644
+--- a/src/yuzu/CMakeLists.txt
++++ b/src/yuzu/CMakeLists.txt
+@@ -154,6 +154,8 @@ add_executable(lichii
+     configuration/configure_hd_rumble.h
+     configuration/hd_rumble_dialog.cpp
+     configuration/hd_rumble_dialog.h
++    configuration/auto_assign.cpp
++    configuration/auto_assign.h
+     configuration/configure_vibration.cpp
+     configuration/configure_vibration.h
+     configuration/configure_vibration.ui
+diff --git a/src/yuzu/configuration/auto_assign.cpp b/src/yuzu/configuration/auto_assign.cpp
+new file mode 100644
+index 0000000000..38840949fa
+--- /dev/null
++++ b/src/yuzu/configuration/auto_assign.cpp
+@@ -0,0 +1,114 @@
++// SPDX-FileCopyrightText: Copyright 2026 Brontide
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#include <QString>
++#include <QTimer>
++
++#include "common/logging.h"
++#include "common/param_package.h"
++#include "hid_core/frontend/emulated_controller.h"
++#include "hid_core/hid_core.h"
++#include "input_common/main.h"
++#include "yuzu/configuration/auto_assign.h"
++
++namespace Brontide {
++
++namespace {
++
++bool IsPad(const Common::ParamPackage& device, const InputCommon::RenHDrumPadInfo& pad) {
++    return device.Get("engine", "") == "sdl" &&
++           (device.Get("guid", "") == pad.guid || device.Get("guid2", "") == pad.guid);
++}
++
++} // namespace
++
++int PlayerIndexUsing(const Core::HID::HIDCore& hid_core, const InputCommon::RenHDrumPadInfo& pad) {
++    if (pad.guid.empty()) {
++        return -1;
++    }
++    for (std::size_t index = 0; index < 9; ++index) { // 8 players, then handheld
++        const auto* controller = hid_core.GetEmulatedControllerByIndex(index);
++        if (!controller || !controller->IsConnected(true)) {
++            continue;
++        }
++        for (const auto& device : controller->GetMappedDevices()) {
++            if (IsPad(device, pad)) {
++                return static_cast<int>(index);
++            }
++        }
++    }
++    return -1;
++}
++
++AutoAssign::AutoAssign(QObject* parent, Core::HID::HIDCore& hid_core_,
++                       InputCommon::InputSubsystem& input_subsystem_, std::function<bool()> busy_,
++                       std::function<void()> save_)
++    : QObject(parent), hid_core{hid_core_}, input_subsystem{input_subsystem_},
++      busy{std::move(busy_)}, save{std::move(save_)} {
++    auto* timer = new QTimer(this);
++    connect(timer, &QTimer::timeout, this, &AutoAssign::Tick);
++    timer->start(1000);
++}
++
++void AutoAssign::Tick() {
++    if (busy()) {
++        return; // new pads are looked at once the dialog closes
++    }
++    const auto pads = InputCommon::GetRenHDrumPads();
++    std::set<std::string> now;
++    for (const auto& pad : pads) {
++        now.emplace(pad.guid);
++    }
++
++    // Player 1 counts as "on a controller" when a mapped SDL device is plugged in right now.
++    bool player1_on_pad = false;
++    const auto* player1 = hid_core.GetEmulatedController(Core::HID::NpadIdType::Player1);
++    for (const auto& device : player1->GetMappedDevices()) {
++        for (const auto& pad : pads) {
++            player1_on_pad |= IsPad(device, pad);
++        }
++    }
++
++    for (const auto& pad : pads) {
++        if (pad.guid.empty() || seen.contains(pad.guid)) {
++            continue;
++        }
++        if (player1_on_pad || PlayerIndexUsing(hid_core, pad) >= 0) {
++            continue;
++        }
++        if (Assign(pad)) {
++            player1_on_pad = true;
++            emit Assigned(QString::fromStdString(pad.name));
++        }
++    }
++    seen = std::move(now); // an unplugged pad counts as new when it comes back
++}
++
++bool AutoAssign::Assign(const InputCommon::RenHDrumPadInfo& pad) {
++    for (const auto& device : input_subsystem.GetInputDevices()) {
++        if (!IsPad(device, pad)) {
++            continue;
++        }
++        auto* controller = hid_core.GetEmulatedController(Core::HID::NpadIdType::Player1);
++        controller->EnableConfiguration();
++        for (const auto& [index, param] : input_subsystem.GetButtonMappingForDevice(device)) {
++            controller->SetButtonParam(index, param);
++        }
++        for (const auto& [index, param] : input_subsystem.GetAnalogMappingForDevice(device)) {
++            controller->SetStickParam(index, param);
++        }
++        for (const auto& [index, param] : input_subsystem.GetMotionMappingForDevice(device)) {
++            controller->SetMotionParam(index, param);
++        }
++        controller->SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
++        controller->Connect();
++        controller->DisableConfiguration();
++        controller->SaveCurrentConfig(); // left disabled: outside Settings the pad must stay live
++        save();
++        LOG_INFO(Frontend, "Brontide: {} set as Player 1", pad.name);
++        return true;
++    }
++    return false;
++}
++
++} // namespace Brontide
+diff --git a/src/yuzu/configuration/auto_assign.h b/src/yuzu/configuration/auto_assign.h
+new file mode 100644
+index 0000000000..af09491101
+--- /dev/null
++++ b/src/yuzu/configuration/auto_assign.h
+@@ -0,0 +1,52 @@
++// SPDX-FileCopyrightText: Copyright 2026 Brontide
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <functional>
++#include <set>
++#include <string>
++
++#include <QObject>
++
++#include "input_common/drivers/renhdrum_pad.h"
++
++namespace Core::HID {
++class HIDCore;
++}
++namespace InputCommon {
++class InputSubsystem;
++}
++
++namespace Brontide {
++
++/// 0-7 for Player 1-8, 8 for handheld, -1 when the pad is not mapped to any of them.
++int PlayerIndexUsing(const Core::HID::HIDCore& hid_core, const InputCommon::RenHDrumPadInfo& pad);
++
++/// Makes a newly plugged controller Player 1 when Player 1 is not on a connected controller
++/// so HD Rumble works without a visit to Settings → Controls.
++class AutoAssign : public QObject {
++    Q_OBJECT
++
++public:
++    /// `busy` says the Settings dialog is open (do not touch the mappings then).
++    AutoAssign(QObject* parent, Core::HID::HIDCore& hid_core,
++               InputCommon::InputSubsystem& input_subsystem, std::function<bool()> busy,
++               std::function<void()> save);
++
++signals:
++    void Assigned(const QString& pad_name);
++
++private:
++    void Tick();
++    bool Assign(const InputCommon::RenHDrumPadInfo& pad);
++
++    Core::HID::HIDCore& hid_core;
++    InputCommon::InputSubsystem& input_subsystem;
++    std::function<bool()> busy;
++    std::function<void()> save;
++    // ponytail: two pads with the same guid count as one; add the port once RenHDrumPadInfo has it
++    std::set<std::string> seen;
++};
++
++} // namespace Brontide
+diff --git a/src/yuzu/main_window.cpp b/src/yuzu/main_window.cpp
+index dbe213fe7b..1b949a4add 100644
+--- a/src/yuzu/main_window.cpp
++++ b/src/yuzu/main_window.cpp
+@@ -66,6 +66,7 @@
+ #include "configuration/configure_per_game.h"
+ #include "configuration/configure_tas.h"
+ #include "configuration/hd_rumble_dialog.h"
++#include "yuzu/configuration/auto_assign.h"
+ #include "input_common/drivers/renhdrum_pad.h"
+ 
+ #include "util/clickable_label.h"
+@@ -556,6 +557,14 @@ MainWindow::MainWindow(bool has_broken_vulkan)
+ 
+     SetupPrepareForSleep();
+ 
++    auto* auto_assign = new Brontide::AutoAssign(
++        this, QtCommon::system->HIDCore(), *input_subsystem,
++        [] { return QApplication::activeModalWidget() != nullptr; },
++        [this] { config->SaveAllValues(); });
++    connect(auto_assign, &Brontide::AutoAssign::Assigned, this, [this](const QString& name) {
++        statusBar()->showMessage(tr("%1 is now Player 1 · HD Rumble ready").arg(name), 5000);
++    });
++
+     // Some moron added a race condition to the status bar
+     // so now we have to make this completely unnecessary call
+     // to prevent the UI from blowing up.
+-- 
+2.55.0.windows.5
+

@@ -8,6 +8,7 @@ pub mod encoding;
 pub mod ffi;
 pub mod ipc;
 pub mod nx2;
+pub mod options;
 pub mod planner;
 pub mod play_report;
 pub mod preset;
@@ -34,6 +35,7 @@ pub use encoding::standard::{
     hd_is_small_change, HdBtLevel, HD_AMP_THRESHOLDS, HD_BT_LEVELS,
 };
 pub use ffi::*;
+pub use options::*;
 pub use planner::{
     am_fm_measure_changes_amplitude, am_fm_measure_codes, format_steps, hd_am_fm_measure_segments,
     AmFmSegment, HdAmFmFallbackKind, HdAmFmPlanner, HdAmFmSideKind, AM_FM_AMPLITUDE,

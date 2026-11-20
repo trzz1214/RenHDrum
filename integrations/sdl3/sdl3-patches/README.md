@@ -1,6 +1,6 @@
 # SDL3 HD Rumble Integration Patches
 
-This directory contains upstream patches for [Simple DirectMedia Layer (SDL)](https://github.com/libsdl-org/SDL) target tag `release-3.4.8` (commit `d9d5536704d585616d4db3c8ba3c4ff6fc2757e1`).
+This directory contains upstream patches for [Simple DirectMedia Layer (SDL)](https://github.com/libsdl-org/SDL). Applies cleanly to every `release-3.4.x` from 3.4.8 to 3.4.20 (checked 2026-11-19), built on 3.4.14 and 3.4.20.
 
 ## Overview of Patches
 
@@ -24,7 +24,7 @@ To apply these patches to your SDL source tree:
 
 ```bash
 cd /path/to/SDL
-git checkout release-3.4.8
+git checkout release-3.4.20
 git am /path/to/RenHDrum/integrations/sdl3/sdl3-patches/0001-hdrumble.patch
 git am /path/to/RenHDrum/integrations/sdl3/sdl3-patches/0002-hdrumble-idle-write.patch
 ```

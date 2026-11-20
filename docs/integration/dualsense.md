@@ -1,6 +1,6 @@
-# DualSense USB Audio Haptics Integration
+# DualSense HD Haptics Integration
 
-This guide details how to integrate PlayStation 5 DualSense (`0x054C:0x0CE6` / `0x0DF2`) 4-channel 48 kHz audio haptics over a wired USB connection using SDL3 and `renhdrum.dll`.
+This guide details how to integrate PlayStation 5 DualSense (`0x054C:0x0CE6` / `0x0DF2`) with `renhdrum.dll`: 4-channel 48 kHz audio haptics over a wired USB connection using SDL3 (sections 1-5), and **HD Haptics**, the motors, speaker and L2/R2 triggers driven together, over USB and Bluetooth (section 6).
 
 > [!NOTE]
 > **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
@@ -18,7 +18,7 @@ The DualSense controller features dual voice coil motors (VCM) driven by a dedic
 - **Audio Channels 2 & 3 (Rear Left / Rear Right / Channels 3 & 4 in 1-indexed notation)**: Left and Right VCM haptic actuators.
 
 > [!IMPORTANT]
-> Audio haptics on DualSense requires a **wired USB connection**. Over standard Bluetooth, Windows and generic Bluetooth stacks do not expose the multichannel USB Audio Class endpoint.
+> The 4-channel audio path below needs a **wired USB connection**: Windows and generic Bluetooth stacks do not expose the multichannel USB Audio Class endpoint. Over Bluetooth, RenHDrum sends the same three parts inside one HID report instead (section 6.3).
 
 ---
 
@@ -143,3 +143,60 @@ renhdrum_dualsense_dsp_set_half_target(dsp, is_right, al, fl, ah, fh);
 
 ### Switch 2 Mode Routing
 When dispatching Switch 2 guest IPC command 214 (`SendNx2VibrationValues`), call `renhdrum_set_nx2_mode(2)`. The DSP automatically maps vibration amplitudes through the fixed Mode 2 law (`a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`, no EQ) before audio synthesis, matching physical voice-coil dynamics. For classic Switch 1 games, set `renhdrum_set_nx2_mode(0)` to keep amplitudes 100% bit-exact and untouched.
+
+---
+
+## 6. HD Haptics: motors, speaker and triggers
+
+HD Haptics upgrades HD Rumble on the DualSense. The game still sends only HD Rumble; RenHDrum splits that one signal between the three parts of the controller. It is **on by default** and has one switch (`dualsense_hd_haptics`, shown as **HD Haptics** in the settings page; in `RenHdcConfig` the field is `dualsense_hd_haptics_off`, `false` = on). With the switch off the DualSense rumbles exactly like before.
+
+| | Wired USB | Bluetooth |
+|---|---|---|
+| Motors | Yes (audio channels 2-3) | Yes (report `0x36`) |
+| Speaker | Yes (audio channel 1) | Yes (Opus inside report `0x36`) |
+| L2/R2 triggers | Yes | Yes |
+| Switch | HD Haptics | same switch |
+| Restart needed | No | No |
+
+### 6.1 What each part does
+- **Motors, studio style.** The usual rumble law, plus heavy hits and explosions pulled down to 75 Hz for a deeper thump (lowered only, never raised).
+- **Speaker.** The speaker taps by kind of sound (rain and menu clicks, gravel, metal, long friction as noise), with four variants of each so it does not repeat. It stays quiet when the game plays music notes. The level is `RENHDRUM_HD_HAPTICS_SPEAKER_PERCENT` (`60`).
+- **Triggers.** They kick back only while the player holds them, with one rule for every game (sharp hit, heavy hit, explosion). The rule uses only the rumble signal and the buttons the player presses; nothing is read from the game. Music and constant rumble leave the triggers quiet.
+
+### 6.2 Wired USB
+Keep the 4-channel stream of sections 3-5. The speaker and the triggers are opened and driven by 47-byte effects blocks that the core builds and the host sends with HID:
+
+```c
+uint8_t block[47];
+renhdrum_hd_haptics_speaker_block(1 /* on, 0 = release */, block);   // open the speaker
+renhdrum_dualsense_dsp_set_speaker(dsp, RENHDRUM_HD_HAPTICS_SPEAKER_PERCENT);
+
+// Triggers: one RenHdcTriTrigger per pad, updated from the rumble and the trigger buttons.
+RenHdcTriTrigger *tri = renhdrum_tri_trigger_create();
+// renhdrum_tri_trigger_update(...) fills an 11-byte effect per trigger (1 = changed, 0 = unchanged);
+// renhdrum_hd_haptics_trigger_block(is_right, effect11_or_null, block) turns it into the block (NULL = release).
+// Call renhdrum_tri_trigger_note_action(tri, now_ms) every tick while the player holds another button.
+```
+
+Send trigger blocks from **one thread only**, release the speaker and the triggers on unplug and on exit, and give each wired DualSense its own audio stream. Signatures: [c-abi-reference.md](c-abi-reference.md) and `include/renhdrum.h`.
+
+### 6.3 Bluetooth
+There is no audio device over Bluetooth, so everything goes into the combined HID report `0x36` (398 bytes, one every `RENHDRUM_DS5_BT_PERIOD_NS`, 10.667 ms): rumble, triggers and the speaker. The host only calls one function:
+
+```c
+uint8_t report[RENHDRUM_DS5_BT36_REPORT_SIZE];
+int32_t n = renhdrum_dualsense_dsp_build_bt36_report(dsp, state47_or_null, 0 /* seq, unused */, report);
+if (n == 1) { /* send report with HID output report 0x36 */ }
+// 0 = nothing to send (idle for 2 s), < 0 = error.
+```
+
+- `state47_or_null` carries the trigger block (the same 47-byte block as USB); `NULL` leaves the triggers alone.
+- Also call `renhdrum_dualsense_dsp_set_speaker` on Bluetooth. If you never do, the core turns the speaker on by itself at the HD Haptics level, and turns it off again when you go back to the plain `0x32` builder.
+- The speaker audio is compressed with Opus (48 kHz stereo, constant 160 kb/s, exactly 200 bytes per report) inside the core. The encoder (libopus 1.5.2, BSD-3-Clause) is linked into `renhdrum.dll`: nothing extra to install, no extra DLL, and the send path allocates no memory.
+- With HD Haptics off, or the speaker at 0, the report is the same as before the speaker was added.
+- If a Bluetooth write fails, restart the Bluetooth worker.
+
+The `0x36` layout and the Opus speaker framing were learned from Enhanced-PS5-DualSense-Haptics-Bridge by ragnarok179 (MIT), then written again in Rust. See [CREDITS](../CREDITS.md).
+
+### 6.4 Where it runs
+Brontide-NS2, Brontide-oot, Brontide (Switch 1), totk-pc-recomp and Longshot, through the `recomp-c` bridge or the Eden patch series. The host pages are the [recompiled PC ports guide](recomp-games.md) and [Switch 2 games](switch2-games.md).

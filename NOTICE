@@ -6,7 +6,7 @@ This product includes software developed by Three-Dola (https://github.com/trzz1
 The RenHDrum core library (src/, include/, tests/, examples/, and docs/) is dual-licensed
 under either:
   * MIT License (LICENSE-MIT or http://opensource.org/licenses/MIT)
-  * Apache License, Version 2.0 (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
+  * Apache License, Version 2.0 (LICENSE-APACHE or http://opensource.org/licenses/LICENSE-2.0)
 at your option.
 
 --------------------------------------------------------------------------------
@@ -102,3 +102,17 @@ Attributions & Third-Party Credits
     by LiveHaptics (MIT); Bluetooth newest-sample fallback pacing idea from
     Hookshot PR #1213 by hckrman101 (GPL-3.0).
     Referenced only; no code copied.
+
+16. ragnarok179 (Enhanced-PS5-DualSense-Haptics-Bridge)
+    DualSense Bluetooth combined output report 0x36 layout (sub-packets 0x11 / 0x10 / 0x12 / 0x13,
+    CRC32 seed 0xA2, 10 ms / 480-sample Opus CBR 160 kb/s speaker framing), from
+    Source/bluetooth_audio_packets.go, Source/dualsense_reports.go,
+    Source/bluetooth_opus_ffmpeg_windows.go, and Source/speaker_opus_assets.go.
+    Layout and resampling reimplemented in Rust. Licensed under the MIT License.
+    https://github.com/ragnarok179/Enhanced-PS5-DualSense-Haptics-Bridge
+
+17. Xiph.Org Foundation, Skype Limited, Jean-Marc Valin, Koen Vos & Opus Contributors (libopus)
+    Reference Opus audio codec (xiph/opus v1.5.2), vendored in vendor/opus/ and statically linked
+    for DualSense Bluetooth speaker encoding (48 kHz stereo CBR 160 kb/s).
+    Licensed under the 3-Clause BSD License (see vendor/opus/COPYING).
+    https://opus-codec.org/ · https://github.com/xiph/opus

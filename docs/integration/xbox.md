@@ -97,3 +97,22 @@ Each call takes an internal lock, so the functions are safe to call from differe
 `✅ Xbox One S`
 
 Built and tested on the Xbox One S controller (Switch 1 games, and Switch 2 games via the Pro curve followed by the four-motor converter—confirmed in *Ocarina of Time*, *Donkey Kong Bananza*, and *Mario Kart World*). Other Microsoft Xbox One and Series X|S controllers share the same four-motor design and should work too, but they have not been tested yet.
+
+---
+
+## 8. Direct mode (store key `xbox_mode` = 1)
+
+Direct skips the rotor model: the two bands of each Switch side drive the grip motors and the triggers straight. The host no longer computes anything; it feeds raw amplitudes and sends what the core returns. Settings (`gain`, `low_boost`, `xbox_strength`, `xbox_detail`, `xbox_accents`, `xbox_trigger_mix`) are read from the `RenHdcStore` (see `c-abi-reference.md`, "Settings table").
+
+```c
+RenHdcXboxDirect *d = renhdrum_xbox_direct_create();   // one per pad
+uint16_t m[4];
+// per half sample (is_right = which Switch side):
+int32_t mask = renhdrum_xbox_direct_push(d, store, now_us, is_right, low_amp, high_amp, has_triggers, m);
+// on your timer (a burst ends 25 ms after a sudden rise):
+int32_t mask2 = renhdrum_xbox_direct_tick(d, now_us, has_triggers, m);
+// mask bit 0: SDL_RumbleJoystick(joy, m[0], m[1], 2000); bit 1: SDL_RumbleJoystickTriggers(joy, m[2], m[3], 2000)
+```
+
+`xbox_mode` = 0 (RenHDrum, default) keeps using `renhdrum_xbox_rumble_*` above, unchanged; apply `renhdrum_store_shape_amplitude` to the amplitudes you push there. Send a final zero rumble on removal as in section 5.
+

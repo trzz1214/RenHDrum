@@ -1,0 +1,328 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Song Rung thin QSS layer over Fusion + QPalette (brand/theme/palette.md). */
+
+QToolTip {
+    background-color: @SURFACE@;
+    color: @TEXT@;
+    border: 1px solid @LINE@;
+    border-radius: 6px;
+    padding: 5px 8px;
+}
+
+QGroupBox,
+QFrame[songRungCard="true"] {
+    background-color: @SURFACE@;
+    border: 1px solid @LINE@;
+    border-radius: 6px;
+}
+
+QGroupBox {
+    margin-top: 14px;
+    padding: 14px 12px 10px 12px;
+    font-weight: 600;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+    color: @MUTED@;
+}
+
+QPushButton {
+    background-color: @SURFACE@;
+    color: @TEXT@;
+    border: 1px solid @LINE@;
+    border-radius: 4px;
+    padding: 5px 14px;
+    min-height: 26px;
+}
+
+QPushButton:hover {
+    background-color: @ACCENT_SOFT@;
+    border-color: @ACCENT@;
+}
+
+QPushButton:pressed {
+    background-color: @ACCENT_SOFT@;
+}
+
+QPushButton:default,
+QPushButton[songRungPrimary="true"] {
+    background-color: @ACCENT@;
+    border-color: @ACCENT@;
+    color: @ON_ACCENT@;
+    font-weight: 600;
+}
+
+QPushButton:default:hover,
+QPushButton[songRungPrimary="true"]:hover {
+    background-color: @ACCENT_HOVER@;
+    border-color: @ACCENT_HOVER@;
+}
+
+QPushButton:disabled,
+QPushButton:default:disabled,
+QPushButton[songRungPrimary="true"]:disabled {
+    background-color: @WINDOW@;
+    border-color: @LINE@;
+    color: @DISABLED@;
+}
+
+QDialogButtonBox QPushButton {
+    min-width: 72px;
+}
+
+QLineEdit,
+QComboBox,
+QAbstractSpinBox {
+    background-color: @SURFACE@;
+    color: @TEXT@;
+    border: 1px solid @LINE@;
+    border-radius: 4px;
+    min-height: 26px;
+    padding: 2px 8px;
+}
+
+QLineEdit:focus,
+QComboBox:focus,
+QAbstractSpinBox:focus {
+    border-color: @ACCENT@;
+}
+
+QLineEdit:disabled,
+QComboBox:disabled,
+QAbstractSpinBox:disabled {
+    background-color: @WINDOW@;
+    border-color: @LINE@;
+    color: @DISABLED@;
+}
+
+QSlider {
+    background-color: transparent;
+}
+
+QSlider::groove:horizontal {
+    height: 4px;
+    border-radius: 2px;
+    background-color: @LINE@;
+}
+
+QSlider::sub-page:horizontal {
+    height: 4px;
+    border-radius: 2px;
+    background-color: @ACCENT@;
+}
+
+QSlider::sub-page:horizontal:disabled {
+    background-color: @DISABLED@;
+}
+
+QSlider::handle:horizontal {
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+    background-color: @ACCENT@;
+}
+
+QSlider::handle:horizontal:disabled {
+    background-color: @DISABLED@;
+}
+
+QTabWidget::pane {
+    border-top: 1px solid @LINE@;
+}
+
+QTabBar::tab {
+    background: transparent;
+    color: @MUTED@;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 7px 12px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:hover {
+    color: @TEXT@;
+}
+
+QTabBar::tab:selected {
+    color: @TEXT@;
+    border-bottom: 2px solid @ACCENT@;
+    font-weight: 600;
+}
+
+QScrollArea,
+QScrollArea > QWidget > QWidget {
+    background: transparent;
+    border: none;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 2px;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 8px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical,
+QScrollBar::handle:horizontal {
+    background-color: @LINE@;
+    border-radius: 4px;
+    min-height: 28px;
+    min-width: 28px;
+}
+
+QScrollBar::handle:vertical:hover,
+QScrollBar::handle:horizontal:hover {
+    background-color: @MUTED@;
+}
+
+QScrollBar::add-line,
+QScrollBar::sub-line,
+QScrollBar::add-page,
+QScrollBar::sub-page {
+    background: transparent;
+    border: none;
+    width: 0;
+    height: 0;
+}
+
+QMenuBar {
+    background-color: @WINDOW@;
+    color: @MUTED@;
+    border: none;
+    padding: 2px 6px;
+}
+
+QMenuBar::item {
+    background: transparent;
+    color: @MUTED@;
+    padding: 4px 9px;
+    border-radius: 4px;
+}
+
+QMenuBar::item:selected,
+QMenuBar::item:pressed {
+    background-color: @ACCENT_SOFT@;
+    color: @TEXT@;
+}
+
+QMenu {
+    background-color: @SURFACE@;
+    color: @TEXT@;
+    border: 1px solid @LINE@;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 5px 22px 5px 10px;
+    border-radius: 4px;
+}
+
+QMenu::item:selected {
+    background-color: @ACCENT_SOFT@;
+    color: @TEXT@;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: @LINE@;
+    margin: 4px 6px;
+}
+
+QStatusBar {
+    background-color: @WINDOW@;
+    color: @MUTED@;
+    border-top: 1px solid @LINE@;
+}
+
+QStatusBar::item {
+    border: none;
+}
+
+QStatusBar QPushButton {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 2px 8px;
+    min-height: 18px;
+    color: @MUTED@;
+}
+
+QStatusBar QPushButton:hover {
+    background-color: @ACCENT_SOFT@;
+    border-color: @LINE@;
+    color: @TEXT@;
+}
+
+QStatusBar QPushButton#RenHDrumStatusChip,
+QPushButton#RenHDrumStatusChip {
+    background-color: @ACCENT_SOFT@;
+    color: @TEXT@;
+    border: 1px solid @LINE@;
+    border-radius: 10px;
+    padding: 2px 10px;
+    min-height: 18px;
+}
+
+QStatusBar QPushButton#RenHDrumStatusChip:hover,
+QPushButton#RenHDrumStatusChip:hover {
+    border-color: @ACCENT@;
+}
+
+QLabel[songRungPill="true"] {
+    background-color: @ACCENT_SOFT@;
+    color: @TEXT@;
+    border: 1px solid @LINE@;
+    border-radius: 9px;
+    padding: 2px 9px;
+}
+
+GameTree,
+GameGrid,
+GameCarousel {
+    background: transparent;
+    alternate-background-color: transparent;
+    border: none;
+    outline: 0;
+}
+
+GameTree::item {
+    border-bottom: 1px solid @ROW_LINE@;
+    padding: 3px 4px;
+}
+
+GameTree::item:hover,
+GameTree::branch:hover {
+    background-color: @HOVER_ROW@;
+}
+
+GameTree::item:selected,
+GameTree::item:selected:active,
+GameTree::item:selected:!active,
+GameTree::branch:selected {
+    background-color: @SEL_ROW@;
+    color: @TEXT@;
+}
+
+QHeaderView,
+QHeaderView::section {
+    background: transparent;
+    border: none;
+    color: @MUTED@;
+    padding: 4px 8px;
+    min-height: 28px;
+}
+
+QHeaderView::section {
+    border-bottom: 1px solid @LINE@;
+}

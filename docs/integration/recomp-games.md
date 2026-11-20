@@ -1,6 +1,6 @@
 # Static Recompilation Games HD Rumble Integration Guide
 
-This guide explains how I integrate `renhdrum.dll` (`0.4.x`) into C and C++ static recompilation runtimes using SDL3 (or SDL2) to deliver authentic HD Rumble across all four controllers supported by the core. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
+This guide explains how I integrate `renhdrum.dll` (`0.5.0`) into C and C++ static recompilation runtimes using SDL3 (or SDL2) to deliver authentic HD Rumble across all four controllers supported by the core. I have shipped it this way in Longshot and in totk-pc-recomp. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
 
 > [!NOTE]
 > **Supported Controllers**: `✅ Nintendo Pro Controller` · `✅ DualSense` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
@@ -9,30 +9,32 @@ This guide explains how I integrate `renhdrum.dll` (`0.4.x`) into C and C++ stat
 
 ## Integration Checklist
 
-Five checks I run before shipping any recomp integration. They come from real PR review lessons (`Goldoire/fefw-recomp#95`) and hardware testing across Hookshot `v2.2.0-rc.2`, `totk-pc-recomp`, and `LASRecomp`:
+Seven checks I run before shipping any recomp integration. They come from real PR review lessons (`Goldoire/fefw-recomp#95`) and hardware testing across Hookshot, Longshot, `totk-pc-recomp`, and `LASRecomp`:
 
-1. **Load `renhdrum.dll` by full path beside the executable.** Never pass a bare filename that searches CWD or `PATH`. Verify `(renhdrum_version() >> 8) == (RENHDRUM_VERSION >> 8)` (`0x0004xx`), and resolve optional per-controller functions as "use if present".
+1. **Load `renhdrum.dll` by full path beside the executable.** Never pass a bare filename that searches CWD or `PATH`. Verify `(renhdrum_version() >> 8) == (RENHDRUM_VERSION >> 8)` (`0x0005xx` for `0.5.0`), and resolve optional functions as "use if present". When the core's `major.minor` changes, copy the new `renhdrum.h` into your tree and rebuild; otherwise the bridge refuses the DLL and the game keeps its normal rumble (safe on purpose).
 2. **Apply intensity in one place only.** `volume_percent` in `renhdrum_dualsense_dsp_create` is already the final output gain; never scale samples again before pushing them. To change volume at runtime, recreate the DSP handle while keeping the audio stream open.
 3. **Respect the host's rumble and HD Rumble switches everywhere.** Turning rumble off must stop both RenHDrum haptics and plain motor rumble; turning HD Rumble off must release all claimed pads cleanly back to the host's built-in rumble.
 4. **Always route Switch Pro Bluetooth through the core's limiter.** **Compatible** (level 4, default) runs on unpatched SDL3 out of the box (newest value, 32 ms minimum spacing, 40 ms resend while rumbling). **Detailed (5 ms)** (`bt_fast`) requires idle-gated SDL3 transport patches. Never push raw unthrottled HID packets over Bluetooth.
 5. **Fall back in layers and avoid lock inversion.** Missing DLL, version mismatch, missing optional exports, missing DualSense speaker, or repeated write failures must degrade cleanly per pad. Always drop host locks before joining worker threads.
+6. **Call `rh_shutdown()` on every exit path while playing.** `ExitProcess` / `TerminateProcess` skip `atexit`, so a handler is not enough (see section 11, lesson 1). Do not call it from a crash handler.
+7. **Never claim a virtual pad.** Skip Steam Input stand-in pads and the host's own virtual pads, or the rumble fires twice (see section 11, lesson 4).
 
 ---
 
-## 1. What You Need (`renhdrum.dll` 0.4.x and Header)
+## 1. What You Need (`renhdrum.dll` 0.5.0 and Header)
 
 To integrate RenHDrum into a C/C++ recomp runtime:
 
-- **`renhdrum.dll` (`0.4.x`)** placed directly beside the compiled game executable (Windows x64).
-- **[`include/renhdrum.h`](../../include/renhdrum.h)** (with `RENHDRUM_VERSION` in branch `0x0004xx`).
+- **`renhdrum.dll` (`0.5.0`)** placed directly beside the compiled game executable (Windows x64).
+- **[`include/renhdrum.h`](../../include/renhdrum.h)** (with `RENHDRUM_VERSION` in branch `0x0005xx`).
 - Optional drop-in reference implementation:
   - [`integrations/recomp-c/bridge/renhdrum_recomp_bridge.c`](../../integrations/recomp-c/bridge/renhdrum_recomp_bridge.c)
   - [`integrations/recomp-c/bridge/renhdrum_recomp_bridge.h`](../../integrations/recomp-c/bridge/renhdrum_recomp_bridge.h)
-  - [`integrations/recomp-c/reference/recomp-c-reference.patch`](../../integrations/recomp-c/reference/recomp-c-reference.patch) (complete reference patch against Hookshot `v2.2.0-rc.2`, GPL-3.0).
+  - [`integrations/recomp-c/reference/recomp-c-reference.patch`](../../integrations/recomp-c/reference/recomp-c-reference.patch) (reference patch against Hookshot `v2.2.0-rc.2`, GPL-3.0) and [`integrations/recomp-c/reference/longshot-reference.patch`](../../integrations/recomp-c/reference/longshot-reference.patch) (Longshot, GPL-3.0-or-later). The bridge is the same in both; only the hook sites differ.
 
 You do **not** need to link against `renhdrum.dll.lib` or `SDL3.lib` at compile time. The reference bridge resolves `renhdrum.dll` with `LoadLibraryExW` and resolves SDL3/SDL2 functions at runtime with `GetModuleHandleA` + `GetProcAddress`.
 
-For Switch 2 titles (where guest commands use audio-range amplitudes and frequencies), call `renhdrum_set_nx2_mode(2)` right after loading the DLL. For Switch 1 titles, keep mode `0`.
+With the bridge, call `rh_set_switch_gen(1)` for a Switch 1 title or `rh_set_switch_gen(2)` for a Switch 2 title **before** `rh_load()` (it sets `renhdrum_set_nx2_mode` to `0` or `2`). Switch 2 guest commands use audio-range amplitudes and frequencies; Switch 1 commands do not.
 
 ---
 
@@ -61,26 +63,38 @@ After loading:
    ```c
    uint32_t ver = rh.version();
    if ((ver >> 8) != ((uint32_t)RENHDRUM_VERSION >> 8)) {
-       hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected branch 0x%04xxx)",
+       hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected branch 0x%04x)",
                (unsigned)ver, (unsigned)((uint32_t)RENHDRUM_VERSION >> 8));
        FreeLibrary(rh.dll);
        /* zero rh struct, mark tried = 1, fall back to host rumble */
        return 0;
    }
    ```
-   A `0.3.x` DLL (`0x0003xx`) is rejected cleanly so structural or ABI mismatches never cause crashes.
+   A DLL from another `major.minor` branch (for example `0.3.x`, `0x0003xx`) is rejected cleanly so structural or ABI mismatches never cause crashes.
 3. **Load optional device exports as "use if present"**:
    - DualSense DSP: `renhdrum_dualsense_dsp_create`, `renhdrum_dualsense_dsp_destroy`, `renhdrum_dualsense_dsp_set_half_target`, `renhdrum_dualsense_dsp_fill_f32`, `renhdrum_dualsense_dsp_build_bt_report`.
    - Xbox One S 4-motor converter: `renhdrum_xbox_rumble_create`, `renhdrum_xbox_rumble_destroy`, `renhdrum_xbox_rumble_push_half_sample`, `renhdrum_xbox_rumble_tick`, `renhdrum_xbox_rumble_resend`.
    - Steam Controller 2026 grips: `renhdrum_valve_grip_dsp_create`, `renhdrum_valve_grip_build_report`.
+   - New in `0.5.0`: `renhdrum_options` and the `renhdrum_store_*` functions (settings), DualSense HD Haptics (speaker, adaptive triggers, combined Bluetooth report `0x36`), Xbox Direct mode, Steam `renhdrum_valve_grip_mode_tick` / `renhdrum_valve_grip_mode_off`.
    If an optional symbol is missing, only that controller type stays unclaimed and uses the host's standard rumble.
 4. **Support an environment kill switch** (e.g., `HOOKSHOT_RENHDRUM=0`) so users or testers can compare native vs. RenHDrum rumble without deleting the DLL.
 
 ---
 
-## 3. The Two Hook Points (`vibration_send` and Per-Pad Loop)
+## 3. The Four Hook Points of the `recomp-c` Bridge
 
-Beyond lifecycle hooks (`rh_attach(gc)` on controller open, `rh_detach(gc)` on disconnect, and `atexit` cleanup before `SDL_CloseGamepad`), all runtime vibration routing goes through two hook points:
+The [`recomp-c` bridge](../../integrations/recomp-c/README.md) is the one piece of C I reuse for every recomp. Wiring a host to it takes four hooks:
+
+| Hook | Where | Calls |
+|---|---|---|
+| Load | Startup, before the first pad opens | `rh_set_switch_gen(1 or 2)`, then `rh_load()` |
+| Open / close a pad | Where the host opens and closes `SDL_Gamepad` | `rh_attach(pad)`, `rh_detach(pad)` |
+| Rumble values | Guest vibration entry and the per-pad poll loop (3.1, 3.2) | `rh_vibration(...)`, `rh_permit(on)`, `rh_pad_claimed(i)`, `rh_set_enabled(on)` |
+| Exit | Every path that ends the process while playing | `rh_shutdown()` (section 11, lesson 1) |
+
+The host's HD Rumble settings page calls `rh_status_line()` and the `rh_option_*` functions (section 11, lesson 6). All runtime vibration routing goes through the two hook points below.
+
+Sections 3.1 and 3.2 show the minimal pattern (the host asks `rh_pad_claimed(i)` each poll; totk-pc-recomp works this way). My current Longshot port goes one step further: it calls `rh_attach(gc)` once per pad when HD Rumble is on, records a claimed pad as its own vibration backend (`VIB_RH_BRIDGE` in `host/vibration.h`) and skips it in the poll loop, so its existing Motors / HD Rumble choice stays untouched for every other pad. Both work; pick the one that fits the host's own rumble routing.
 
 ### 3.1 Hook 1: Guest Vibration Entry (`host/nn_hid.c:vibration_send`)
 
@@ -135,6 +149,7 @@ Follow strict lock discipline:
 - **Detection**: `vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)`.
 - **Wired USB**: Create `renhdrum_dualsense_dsp_create(100, true)`. Initialize SDL audio (`hos_sdl_init(0x10)`), **call `SDL_PumpEvents()` first** (Windows recomp builds with Vulkan windows often never pump SDL events, so SDL3 audio hotplug never registers a DualSense plugged in after startup without pumping), then enumerate playback devices matching `"DualSense"` or `"Wireless Controller"` with `channels >= 4`. Open a 4-channel `48000 Hz` `SDL_AUDIO_F32` stream (`0x8120`). Retry every 2 seconds if the audio endpoint appears late, and clear SDL's HID rumble (`SDL_RumbleGamepad(pad, 0, 0, 0)`) once opened.
 - **Bluetooth**: Create `renhdrum_dualsense_dsp_create(100, false)` (`crisp_notes = false` for cleaner Bluetooth notes). Open the controller's HID path via `SDL_GetGamepadPath` / `SDL_GetJoystickPath` (falling back to `SDL_hid_enumerate(vid, pid)`), stop SDL's motor rumble, and spawn a dedicated high-resolution timer thread sending `142`-byte report `0x32` every `RENHDRUM_DS5_BT_PERIOD_NS` (`10666666` ns) via `renhdrum_dualsense_dsp_build_bt_report(dsp, RENHDRUM_DS5_BT_BUFFER_LENGTH_DEFAULT, report)`. Gate transmission 2 seconds after the last active vibration so the Bluetooth radio stays idle when silent.
+  With HD Haptics on (the default) the bridge sends the combined report `0x36` instead, built by `renhdrum_dualsense_dsp_build_bt36_report`: rumble, triggers and the speaker in one report (see [dualsense.md](dualsense.md), section 6).
 
 ### 4.3 Microsoft Xbox One S / Xbox Series (`XBOXONE` or VID `0x045E`)
 - **Detection**: `SDL_GetGamepadType(pad) == 3` (`SDL_GAMEPAD_TYPE_XBOXONE` in SDL3; `2` in SDL2) **or** `vid == 0x045E` (third-party XInput pads may report another SDL type).
@@ -146,16 +161,18 @@ Follow strict lock discipline:
 ### 4.4 Steam Controller 2026 (`0x28DE`, PIDs `0x1302` / `0x1303` / `0x1304`, Experimental)
 - **Detection**: `vid == 0x28DE` and `pid == 0x1302` (wired, 8 kHz mu-law `RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K`, `3.875 ms` period), `0x1303` (Bluetooth, 4 kHz `RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K`, `7.75 ms`), or `0x1304` (dongle, 4 kHz).
 - **Steam Input stand-in avoidance**: Always check `SDL_GetGamepadSteamHandle(pad) != 0`. Steam Input creates a virtual stand-in gamepad alongside the physical HID device; **never** claim the stand-in pad. If a stand-in pad is already tracked, skip claiming the real Steam Controller; if a stand-in opens after grips already started, stop the grip worker (`rh_sv_stop`) and clear its claim bit so rumble does not double-fire.
-- **Output**: Open the HID path (`SDL_hid_open_path`), create `renhdrum_valve_grip_dsp_create(100, true)`, clear SDL motor rumble, and run a dedicated high-resolution thread:
-  1. Send HID report `0x86` `{0x86, op, ch, format}` on channels `2` and `5` (`op = 1` off, sleep `10 ms`, `op = 2` on with `format`, sleep `200 ms` settle).
-  2. Call `renhdrum_valve_grip_build_report(dsp, format, report)` and `SDL_hid_write` (`64` bytes, report `0x88`) at the format period while active plus a `100 ms` tail (`RH_STEAM_TAIL_NS`).
-  3. On `100` consecutive write failures (`RH_STEAM_FAILS_MAX`), stop and release the claim bit (`rh_pads_set_claimed(pad, 0)`) so the pad falls back to host rumble.
-  4. On stop, send `0x86` `op = 1` (off) on channels `2` and `5` before closing the HID handle.
+- **Output**: Open the HID path (`SDL_hid_open_path`), create `renhdrum_valve_grip_dsp_create_ex(100, true, true)` (enabling 40 ppm drift packet-skipping; fall back to `renhdrum_valve_grip_dsp_create` when the export is missing), clear SDL motor rumble, and run a dedicated high-resolution thread:
+  1. Call `renhdrum_valve_grip_build_report(dsp, format, report)` every format period (`1` = vibrating, `0` = silent, `2` / `RENHDRUM_VALVE_GRIP_SKIP` = skip writing `0x88` this tick for 40 ppm drift compensation).
+  2. Call `renhdrum_valve_grip_mode_tick(dsp, format, now_ns, stalled, mode_reports)` (passing `stalled = true` if the previous write failed or timed out, then clearing `stalled`). If it returns `2`, write both 4-byte `0x86` reports (`mode_reports` and `mode_reports + 4`); the core sends `"on"` on first vibration, refreshes `"on"` every `3 s` or immediately on `stalled`, and emits `"off"` after `100 ms` of silence.
+  3. Write the `64`-byte `0x88` report (`SDL_hid_write`) while active plus the `100 ms` tail (`RH_STEAM_TAIL_NS`), skipping the write when `build_report` returns `RENHDRUM_VALVE_GRIP_SKIP` (`2`). On `100` consecutive write failures (`RH_STEAM_FAILS_MAX`), stop and release the claim bit (`rh_pads_set_claimed(pad, 0)`) so the pad falls back to host rumble.
+  4. On stop, detach, or any exit path, call `renhdrum_valve_grip_mode_off(format, mode_reports)` and write both `0x86` off reports before closing the HID handle.
 - Always label Steam Controller 2026 support as **experimental** in UI text and docs.
 
 ---
 
 ## 5. Toggling HD Rumble & Locking Intensity
+
+This section describes the first integration, Hookshot. A host with a settings page of its own should also read section 11, lesson 6.
 
 In the reference Hookshot integration (`gpu/vk/vk_menu.cpp`, `gpu/vk/vk_replay.cpp`):
 
@@ -215,8 +232,8 @@ When building from source:
 Before considering an integration complete, verify every case below (using mock DLL tests for automated CI plus hardware checks where available):
 
 - [ ] **Missing DLL**: Removing `renhdrum.dll` falls back to host rumble with zero crashes.
-- [ ] **Incompatible DLL version**: A `0.3.x` DLL (`0x000302`) or a DLL missing `renhdrum_version` is rejected and unloaded (`FreeLibrary`).
-- [ ] **Missing optional exports**: A `0.4.x` DLL lacking `renhdrum_valve_grip_*` or `renhdrum_xbox_rumble_*` leaves only that controller unclaimed while Pro/DualSense still work.
+- [ ] **Incompatible DLL version**: A DLL from another branch (for example `0.3.x`, `0x000302`) or a DLL missing `renhdrum_version` is rejected and unloaded (`FreeLibrary`).
+- [ ] **Missing optional exports**: A `0.5.0` DLL lacking `renhdrum_valve_grip_*` or `renhdrum_xbox_rumble_*` leaves only that controller unclaimed while Pro/DualSense still work.
 - [ ] **Controls menu & INI**: `"HD Rumble"` appears directly above `"Rumble strength"`, defaults to on, locks `"Rumble strength"` to `"-"`, preserves saved `rumble_strength` in INI, and updates `rh_status_line()`.
 - [ ] **Runtime toggle**: Turning HD Rumble off mid-session detaches engines and restores host rumble; turning it back on re-attaches connected pads.
 - [ ] **Multi-pad isolation**: With one claimed pad and one unclaimed pad, `rh_vibration` returns `0` and `rh_pad_claimed` skips only the claimed slot.
@@ -225,6 +242,8 @@ Before considering an integration complete, verify every case below (using mock 
 - [ ] **Xbox One S**: Verified 4-motor tick (`grips` + `triggers`), `xb_resend` retry on failure, and all 4 motors zeroed on detach.
 - [ ] **Steam Controller 2026 (experimental)**: Verified `0x86` mode on/off + 64-byte `0x88` reports, and verified Steam Input stand-in pad prevents double rumble in both attach orders.
 - [ ] **250 ms silence watchdog**: Pausing or entering a static menu stops rumble cleanly within ~250 ms.
+- [ ] **Exit**: Closing the game by every route (window close, in-game quit, guest exit) leaves no stuck button, no stuck rumble, no DualSense speaker or trigger left on, and a wired Pro back in its normal mode.
+- [ ] **Virtual pads**: With Steam Input on, the rumble does not double up.
 - [ ] **`crt-static` check**: `dumpbin /dependents renhdrum.dll` shows no `VCRUNTIME140.dll`.
 
 ---
@@ -257,7 +276,7 @@ if (fabsf(offset_y) > 0.5f) offset_y = 0.0f;
 ### 10.2 Stuck Left Stick / Errant Inputs on Exit (`SDL_CloseGamepad` / `ClearUSB`)
 Many recomp runtimes exit abruptly via `ExitProcess` without closing controllers. Because a wired Switch Pro Controller runs in proprietary mode `0x30`, leaving it open traps it in `0x30` until physically unplugged, which Windows DirectInput misreads as a stuck upper-left stick (`Y = 9472` instead of `32767`) and spurious button presses.
 
-1. **Always call `SDL_CloseGamepad` at exit** (for example inside an `atexit` handler after detaching RenHDrum).
+1. **Always call `SDL_CloseGamepad` at exit**, on the thread that owns the pad and on every exit path (an `atexit` handler alone is not enough: `ExitProcess` skips it). Call `rh_shutdown()` first. See section 11, lesson 1.
 2. If you ship a custom SDL3 build, ensure `HIDAPI_DriverSwitch_CloseJoystick` issues `ClearUSB`:
    ```c
    WriteProprietary(ctx, k_eSwitchProprietaryCommandIDs_ClearUSB, NULL, 0, false);
@@ -265,52 +284,49 @@ Many recomp runtimes exit abruptly via `ExitProcess` without closing controllers
 
 ---
 
-## 11. Lessons from two real forks (Hookshot v2.2.0-rc.2, Longshot v3.0.0-rc.3)
+## 11. Lessons from the Longshot and totk-pc-recomp ports
 
-Porting and packaging RenHDrum across two real static recompilation forks — **Hookshot `v2.2.0-rc.2`** and **Longshot `v3.0.0-rc.3`** — surfaced practical integration and release pitfalls beyond the C bridge code itself.
+I ported the `0.5.0` bridge to Longshot and to totk-pc-recomp (a Switch 1 game). These are the things that cost me time, in the order I would check them.
 
-### 11.1 Project-Specific Naming & Logging
-- **Environment variables**: Match the host runtime's prefix instead of hardcoding `HOOKSHOT_*`. In Longshot, I renamed `HOOKSHOT_RENHDRUM` and `HOOKSHOT_BT_LEVEL` to `HOS_RENHDRUM` and `HOS_BT_LEVEL`, while preserving the host's native `HOS_HD_RUMBLE=0` switch whenever the menu's **HD Rumble** option is turned off.
-- **Logs & user-facing strings**: Route every diagnostic through the host logger (`hos_log` into `logs\`) and replace project branding in menu hints and error messages (`Hookshot` -> `Longshot`).
+1. **Exit.** `ExitProcess` and `TerminateProcess` skip `atexit`, so call `rh_shutdown()` on every exit path while the game is playing. Without it a wired Pro Controller is left in its special mode and the player sees stuck buttons after quitting (the "stuck key after exit" bug). `rh_shutdown()` releases the DualSense speaker and triggers, sends the Steam grip "off" report and closes the HID handles; it is safe to call more than once. Do not call it from a crash handler (it can wait on a lock the crashed thread holds).
+   - Closing the pads as well is only safe on the thread that owns them. In totk, `input_shutdown()` calls `rh_shutdown()` and then closes the gamepad, ahead of each of the five `plat_exit(0)` calls.
+   - In Longshot the pad poll loop runs on another thread, so closing pads from the exit path would race with it. There I call only `rh_shutdown()`, in `hos_close_finish()` (`host/hos_relaunch.c`).
+2. **The header travels with the DLL.** The bridge compares `RENHDRUM_VERSION >> 8` of the header you copied with the DLL's `renhdrum_version() >> 8`. When the DLL's `major.minor` moves, copy the new `renhdrum.h` and rebuild, or the bridge refuses the DLL and the player gets normal rumble. That is deliberate and safe. The `0.5.0` functions are loaded as "use if present": if one is missing, only that feature drops back to the normal path.
+3. **When upstream has already added RenHDrum.** Longshot vendored RenHDrum on its own in `third_party/renhdrum/` (pinned tag plus a `tree-sha256`). I replaced its private RenHDrum path with the shared bridge and kept its own Motors and HD Rumble paths for pads RenHDrum does not claim. Bump `third_party/` only the way the project's `PROVENANCE.md` says, and put the new DLL beside the game without breaking the integrity check.
+4. **Virtual pads.** Do not claim a Steam Input stand-in (`SDL_GetGamepadSteamHandle(pad) != 0`, or `0x28DE:0x11FF`), nor a pad the host creates itself (Longshot's `pad_switch2.c`). Claiming both the real and the virtual pad rumbles twice.
+5. **Switch generation.** Call `rh_set_switch_gen(1)` for a Switch 1 game (totk) and `rh_set_switch_gen(2)` for a Switch 2 game, before `rh_load()`.
+6. **Settings.** Keep the HD Rumble on/off switch in the game's own settings file. Everything per controller lives in `renhdrum.ini` beside the executable, read and written through `rh_option_*`. Draw the page from the core's option list and keep no rumble keys of your own (see [ui-guidelines.md](ui-guidelines.md)).
+   - A host whose menu has a static model (a fixed table of rows) declares the HD Rumble rows by the keys `renhdrum_options` returns.
+   - Longshot's menu lives in a separate DLL that talks to the host only through a function table (`MkwVkHost`). I added one function to it, `rh_option(op, key, value, text, cap)`, with operations get, set, reset, status line and "name of option number i", and raised the table version to 36. The menu checks the table version before calling it.
+   - The page declares its rows statically by key. It reloads every value from the host each time it opens, and a change goes through `rh_option_set` and into `renhdrum.ini`.
+   - If the host's menu already saves every keyed row into the game's own settings file, the duplicate is harmless as long as loading that file never pushes values back into the core. Push to the core only when the player changes a row.
+7. **DualSense and Steam threads.** Send adaptive-trigger packets from one thread only. Give each wired DualSense its own audio stream; when its audio device disappears, destroy the stream under its lock and look for the device again. If a Bluetooth write fails, restart the Bluetooth worker. For the Steam Controller, keep the `0x86` mode report alive and send "off" on unplug and on exit.
+8. **Upstream platform checks.** totk's `check_platform.py` flags Win32 calls outside `runtime/platform/`. The bridge is Windows-only. If you want to send it upstream as a PR, move its Win32 calls into the project's platform layer first.
+9. **Packaging.** Build `renhdrum.dll` with `+crt-static` and check `dumpbin /dependents` (no `VCRUNTIME140.dll`; section 7). Never ship game dumps or keys.
+10. **Start from the newest upstream.** Take the latest upstream at the time you work. If upstream changes a lot between your survey and your build (Longshot reworked its menu within one day), survey again instead of applying an old patch blindly. `git apply --3way` needs the reference tag's blobs in the target repository.
 
-### 11.2 Option IDs & Host Tables
-- **Pick an unused option ID and run the ID-collision test**: Hookshot used `HOS_OPT_HD_RUMBLE = 52`, whereas Longshot already assigned IDs `52` and `53`, so I moved `HOS_OPT_HD_RUMBLE` to `70` and verified it with `test_option_ids.py`.
-- **Keep host struct ordering stable**: Append new host callbacks (such as `hd_rumble_status`) at the end of the backend interface struct (after `prompts_live` in Hookshot, after `host_screen_size` in Longshot) so existing tests like `test_device_lost_exit.py` do not break.
+11. **Lessons from the Eden-based Switch 2 and Switch 1 builds (Brontide-NS2, Brontide-oot).** These are C++/Qt emulators, not recomps, but the same mistakes show up:
+    - **One writer per trigger.** Trigger commands from two threads undo each other. Send them from one thread.
+    - **Take the settings from the core.** Build the HD Rumble page from `renhdrum_options` and keep the values in a `renhdrum_store_*` store; do not keep your own copy of each key. A new core row then needs no host rebuild (see [ui-guidelines.md](ui-guidelines.md), `integrations/qt/`).
+    - **Call `renhdrum_dualsense_dsp_set_speaker` on Bluetooth too.** The `0x36` report carries the speaker; the core turns it on by itself if you forget, but the host should set it so the switch is honoured in one place.
+    - **Each wired DualSense gets its own speaker.** Do not share the first pad's audio stream between two pads.
+    - **Controls page.** Put the **HD Rumble** button below the controller picture, not on top of the stick test circles.
 
-### 11.3 Frequently Missed Integration Files
-Three non-obvious touchpoints are easy to overlook when applying a reference patch to another recomp:
-- **Host backend function table (`host/rx_backend.c`)**: Register `rh_status_line` in the backend export table alongside `host_screen_size`, otherwise the menu cannot query controller status.
-- **Executable packaging list (`nx2/make_game.py` `BESIDE` / `nx2/build.py`)**: Add `renhdrum.dll` to the `BESIDE` list so the build copies it next to the game executable alongside `SDL2.dll` and `SDL3.dll`.
-- **Menu documentation tests (`README.md`)**: Longshot's `test_readme_menu_rows.py` checks that `README.md` documents every menu row; adding `"HD Rumble"` to the Controls menu required adding the matching row and explanation to `README.md`.
+### Which controller is wired in where
 
-### 11.4 Applying Reference Patches with `git apply --3way`
-- `git apply --3way` needs the base Git blobs from the original reference tag in the target repo's object store. Before applying [`recomp-c-reference.patch`](../../integrations/recomp-c/reference/recomp-c-reference.patch) onto Longshot `v3.0.0-rc.3`, I had to `git fetch` the `v2.2.0-rc.2` tag from Hookshot first.
-- Clean machine-local `.gitignore` entries (such as `*.bat` or local builder directories) out of shared patches so downstream forks only receive build-relevant ignores (for example `cpm/`).
+| Controller | Brontide-NS2 / oot / Brontide | Longshot | totk-pc-recomp |
+|---|:---:|:---:|:---:|
+| Switch Pro Controller | yes | yes | yes |
+| DualSense, wired (motors + speaker + triggers) | yes | yes | yes |
+| DualSense, Bluetooth (rumble + triggers + speaker) | yes | yes | yes |
+| Xbox One S / Series | yes | yes | yes |
+| Steam Controller (2026) | yes | yes | yes |
 
-### 11.5 Build, Test & `third_party` Gotchas on Windows
-- **Run `scripts/check_third_party.py` before building**: Compiling a game places runtime DLLs and caches inside `third_party\` (`SDL2.dll`, `SDL3.dll`, `zbic.dll`, `a64emit.dll`, and `__pycache__`), which causes `check_third_party.py` to fail after a build even when no tracked `third_party` source was modified.
-- **Compare failures against a clean tag before debugging**: On Windows, `test_release.py` (CRLF mismatch), `test_check_third_party`, and `test_display_pointer` already failed identically on a clean `v3.0.0-rc.3` checkout; `test_prepare_seed_stamp.py` failed identically on clean Hookshot `v2.2.0-rc.2`; and `test_launcher_core.py` failed on a clean `LongshotLauncher` `v1.0.0-rc.4` checkout.
-- **Toolchain & parallel test quirks**: Put `Llvm\x64\bin` ahead of `Llvm\bin` on `PATH` (32-bit `Llvm\bin` caused over 90 false failures in `run_all.py`), ensure a compiler is on `PATH` for `test_rumble_menu` / `test_option_ids`, and re-run timing-sensitive bridge tests standalone if parallel workers cause contention (`test_rh_bridge` passed `3/3` standalone after a 12-worker timing flake). Also keep a fresh `--work` directory if an older incompatible `hookshot_pieces.prof` PGO profile exists.
-
-### 11.6 Packaging & Distribution Notes
-- **Disable every auto-update path**: Upstream builders, launchers, and in-game update checks will download official binaries or overwrite forked `tools\`, erasing RenHDrum:
-  - *Hookshot*: Gate `Updater.cs` with a `tools/no-update` marker (returning `null` for `LatestTag` and hiding Repair), remove the upstream setup binary that fetches latest releases, and write `HOOKSHOT_NO_UPDATE_CHECK=1` to `hookshot_env.txt` in `nx2/make_game.py`.
-  - *Longshot*: `v3.0.0-rc.3` already removed `hos_update.c`, so only the separate Launcher needed an offline fork (see below).
-- **Shader cache, paths, build times & disk budget**:
-  - When rebuilding into an existing output folder, delete the cached shader binary (`*_programs.bin`, such as `hookshot_programs.bin`) or build into a fresh folder.
-  - Extract and build in a **short root path** to stay well under the Windows 260-character path limit.
-  - Expect real full-game builds to take roughly **26–75 minutes** (26–31 minutes observed on Longshot `v3.0.0-rc.3`; 28 minutes direct / ~75 minutes clean offline pack on Hookshot `v2.2.0-rc.2`, vs. 26s–3m18s for incremental `--update` builds) and occupy **~27–35 GB** on disk (~27 GB for Longshot, ~35 GB for Hookshot).
-
-### 11.7 Longshot-Specific Launcher Architecture
-Unlike Hookshot's single bundled builder, **LongshotLauncher** (`v1.0.0-rc.4`) is a separate .NET 10 Avalonia app whose **Build** button stays disabled whenever `Service.NewestOf(channel)` is `null` (which only populates online), and which downloads upstream toolchains when online:
-1. **Minimal 4-file offline fork**: In `LauncherService.cs`, populate `newest` for all channels from `Service.Tools.Installed()` (`Checked = true`), turn `CheckReleasesAsync` into an offline no-op, and stop `PruneTools` from deleting the sole pre-installed toolchain. In `App.axaml.cs`, force offline mode at startup; in `MainWindow.axaml` and `LongshotLauncher.csproj`, rename the window title/product to `"Longshot + RenHDrum"`.
-2. **Disable self-update & enable portable layout**: Publish without `-p:LongshotTag=...` (a `"dev"` build keeps `SelfUpdate` disabled) and place an empty `portable` marker file beside `LongshotLauncher.exe` so everything lives in `LongshotLauncher-data\`.
-3. **Swap only the forked source folders**: Pre-install the signed `v3.0.0-rc.3` toolchain (`436 MB` download, `1.5 GB` unpacked) so `ToolsSource.EnsureAsync` finds `toolchain.json` and skips network checks, then replace `tools\gpu\`, `tools\host\`, `tools\nx2\`, and `tools\scripts\` with git-tracked files from the fork plus `tools\renhdrum.dll` (`make_game.py` compiles directly from `tools\` without per-file hash verification).
-4. **Saves, optional SDKs & GPL compliance**: Keep `--user %APPDATA%\Longshot` unchanged so players share saves with official Longshot builds. Do **not** pre-bundle NVIDIA DLSS or AMD FSR SDKs (users opt in once via the Wizard). Strip `sdk\`, `work\`, settings, logs, and build registries before zipping (`~483 MB` compressed, `1,539 MB` unpacked), and include upstream `LICENSE` files plus the forked Launcher source archive (`source\LongshotLauncher-renhdrum-src`) for GPL-3.0-or-later compliance.
+Every host here calls the same core functions, so a new core release reaches all of them by replacing `renhdrum.dll` (and the header for the recomp bridge).
 
 ---
 
 ## Prebuilt Builds & Reference Kit
 
-- Ready-to-use C bridge and reference patches (`Hookshot v2.2.0-rc.2` and `Longshot v3.0.0-rc.3`): [`integrations/recomp-c/`](../../integrations/recomp-c/).
+- Ready-to-use C bridge and reference patches (Hookshot `v2.2.0-rc.2` and Longshot): [`integrations/recomp-c/`](../../integrations/recomp-c/).
 - End-user test builds and downloads: see the [website](https://ryuhdr.threedola.workers.dev/).

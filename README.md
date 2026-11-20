@@ -26,10 +26,33 @@ flowchart LR
 
 | Controller | USB | Bluetooth | What you feel |
 |---|:---:|:---:|---|
+| Sony DualSense | ✅ | ✅ | **HD Haptics**: rumble, speaker and L2/R2 triggers together, on by default ([details](docs/integration/dualsense.md#6-hd-haptics-motors-speaker-and-triggers)) |
 | Nintendo Switch Pro Controller | ✅ | ✅ | Full HD Rumble ([how Bluetooth is handled](docs/research/03-bluetooth-congestion-and-pacing.md)) |
-| Sony DualSense | ✅ | ✅ | Voice-coil [audio haptics](docs/research/05-dualsense-audio-haptics.md), richest over USB |
 | Xbox One / Series | ✅ | ✅ | HD Rumble [translated to four motors](docs/research/10-xbox-one-rumble.md) (tested on Xbox One S) |
 | Steam Controller (2026) | ✅ | ✅ | Grips only, experimental |
+
+### HD Haptics on the DualSense
+
+HD Haptics is HD Rumble upgraded for the DualSense. The game still only sends HD Rumble; RenHDrum splits it between the three parts of the controller, with one rule for every game:
+
+- **Motors**, studio style: heavy hits and explosions sink to 75 Hz for a deeper thump.
+- **Speaker**: taps by kind of sound (rain, gravel, metal) and stays quiet when the game plays music notes.
+- **L2/R2 triggers**: kick back only while you hold them.
+
+| | Wired | Bluetooth |
+|---|:---:|:---:|
+| Rumble | ✅ | ✅ |
+| Triggers | ✅ | ✅ |
+| Speaker | ✅ | ✅ |
+
+DualSense over Bluetooth still gets rumble, speaker and triggers, with nothing extra to install: the speaker sound is compressed with Opus inside the controller report, and the encoder is built into `renhdrum.dll`. HD Haptics is on by default; turn it off in the HD Rumble settings to get exactly the previous DualSense rumble.
+
+<p align="center">
+<img src="docs/assets/hd-rumble-panel-dark.png" alt="The HD Rumble settings panel, dark theme" width="48%">
+<img src="docs/assets/hd-rumble-panel-light.png" alt="The HD Rumble settings panel, light theme" width="48%">
+</p>
+
+Where it runs today: Brontide-NS2, Brontide-oot, Brontide (Switch 1), totk-pc-recomp and Longshot. The builds are on the [website](https://ryuhdr.threedola.workers.dev/#download).
 
 Switch 2 Pro Controller, Steam Controller (2015) and Steam Deck are still in research, so please hold issues for them for now.
 
@@ -40,7 +63,7 @@ Switch 2 Pro Controller, Steam Controller (2015) and Steam Deck are still in res
 
 ## For developers
 
-RenHDrum is written in Rust with no external dependencies and exposes a small C ABI (`renhdrum.dll` + [`include/renhdrum.h`](include/renhdrum.h)), so any C, C++ or C# host can load it.
+RenHDrum is written in Rust (the Opus encoder for the DualSense speaker is built into the DLL, nothing extra to install) and exposes a small C ABI (`renhdrum.dll` + [`include/renhdrum.h`](include/renhdrum.h)), so any C, C++ or C# host can load it.
 
 - Start here: [C++ / SDL3 host guide](docs/integration/sdl3-host.md) (the hook in 6 steps) or [C# host guide](docs/integration/csharp-host.md)
 - Other hosts: [recompiled PC ports](docs/integration/recomp-games.md) · [Switch 2 games](docs/integration/switch2-games.md)
@@ -70,8 +93,8 @@ RenHDrum/
 RenHDrum exists thanks to people who measured, decoded and shared before me:
 
 - **HD Rumble research**: [dekuNukem](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering), [Switchbrew](https://switchbrew.org/wiki/Joy-Con) contributors, rei-github, ClearlyClaire, [CTCaer](https://github.com/CTCaer/jc_toolkit), felipearmat
-- **DualSense research**: [Nielk1](https://gist.github.com/Nielk1/6d54cc2c00d2201ccb8c2720ad7538db) and the DualSense community, [egormanga (SAxense)](https://github.com/egormanga/SAxense)
-- **Emulators and libraries**: the Ryujinx team, Ryubing (GreemDev), Eden / yuzu contributors, [SDL](https://github.com/libsdl-org/SDL) (Sam Lantinga, Valve and contributors)
+- **DualSense research**: [Nielk1](https://gist.github.com/Nielk1/6d54cc2c00d2201ccb8c2720ad7538db) and the DualSense community, [egormanga (SAxense)](https://github.com/egormanga/SAxense), [ragnarok179 (Enhanced-PS5-DualSense-Haptics-Bridge)](https://github.com/ragnarok179/Enhanced-PS5-DualSense-Haptics-Bridge) for the idea of the Bluetooth speaker report (ideas only, the code is my own)
+- **Emulators and libraries**: the Ryujinx team, [Xiph.Org (libopus)](https://github.com/xiph/opus), Ryubing (GreemDev), Eden / yuzu contributors, [SDL](https://github.com/libsdl-org/SDL) (Sam Lantinga, Valve and contributors)
 - **Switch 2 and PC ports**: neo Luigi (Eglantine), Franseven (PokeDinner), [samaBR85](https://github.com/samaBR85/renhdrum-eden), Frizti (Fritchii), zortos293 (Lichii), Dark (Dynamic FPS), [NotRexed (Hookshot)](https://github.com/NotRexed/Hookshot), [MagicBeanDev (Longshot)](https://git.magicbean.dev/MagicBeanDev)
 
 What each person contributed, and what was copied or only referenced: [docs/CREDITS.md](docs/CREDITS.md) and [`NOTICE`](NOTICE).

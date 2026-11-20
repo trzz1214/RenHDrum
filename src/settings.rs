@@ -66,6 +66,7 @@ pub struct RumbleConfigController {
     pub dualsense_haptics_volume: i32,
     pub dualsense_crisp_notes: bool,
     pub dualsense_bt_crisp_notes: bool,
+    pub dualsense_hd_haptics_off: bool,
 }
 
 impl RumbleConfigController {
@@ -105,6 +106,7 @@ impl Default for RumbleConfigController {
             dualsense_crisp_notes: true,
             // Over Bluetooth the 3 kHz s8 stream over-drives the accent (owner test 29/10): off by default
             dualsense_bt_crisp_notes: false,
+            dualsense_hd_haptics_off: false,
         }
     }
 }
@@ -465,6 +467,9 @@ impl std::fmt::Display for HdRumbleSettings {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     struct TempFlagDir {
         path: PathBuf,
@@ -472,7 +477,8 @@ mod tests {
 
     impl TempFlagDir {
         fn new() -> Self {
-            let unique = format!("renhdrum_test_{}_{}", std::process::id(), fastrand());
+            let seq = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let unique = format!("renhdrum_test_{}_{}", std::process::id(), seq);
             let path = std::env::temp_dir().join("RenHDrum.Tests").join(unique);
             fs::create_dir_all(&path).unwrap();
             Self { path }
@@ -499,14 +505,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
-    }
-
-    fn fastrand() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
     }
 
     #[test]

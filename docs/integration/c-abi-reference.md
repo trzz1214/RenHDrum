@@ -16,7 +16,7 @@ Library name: `renhdrum.dll` (Windows), `librenhdrum.so` (Linux), `librenhdrum.d
 
 | Constant | Value | Description |
 |---|---|---|
-| `RENHDRUM_VERSION` | `0x000300` | Encoded as `0xMMNNPP` (Major 0, Minor 3, Patch 0). |
+| `RENHDRUM_VERSION` | `0x000500` | Encoded as `0xMMNNPP` (Major 0, Minor 5, Patch 0). |
 | `RENHDRUM_OK` | `0` | Call completed successfully. |
 | `RENHDRUM_ERR_NULL_PTR` | `-1` | A required pointer argument was null. |
 | `RENHDRUM_ERR_INVALID_ARG` | `-2` | An argument value was outside acceptable bounds. |
@@ -71,6 +71,25 @@ int32_t renhdrum_settings_resolve_pure(const RenHdcConfig *config, RenHdcSetting
 Use this when the host is not Brontide. It reads no IPC shared memory and no flag files; out-of-range values fall back to defaults. A `NULL` config gives the same result as `renhdrum_settings_default`.
 `renhdrum_settings_resolve` (Brontide) additionally lets `Brontide-App` and flag files override the config.
 
+## 2c. Settings table
+
+The core lists every HD Rumble setting (key, label, range, default, controller, tier) so a host can draw its page from the table (layout rules: `ui-guidelines.md`). Values live in a host-owned `RenHdcStore`; `renhdrum_store_to_config` turns them into `RenHdcConfig` (unchanged, 48 bytes).
+
+```c
+int32_t n, stride;
+const RenHdcOption *base = renhdrum_options(&n, &stride);
+for (int i = 0; i < n; i++) {
+    const RenHdcOption *o = (const RenHdcOption *)((const char *)base + i * stride);
+}
+```
+
+- `kind` 2 (CHOICE): `choices` is `A|B|C`, the value is the index. `usb_interval_ms` values 0..3 mean 10 / 15 / 20 / 30 ms.
+- `requires_row` (Rust field `requires`; C++20 reserves that word): index of a row that must be non-zero for this row to matter (grey it out otherwise); `link` 1 = USB only, 2 = Bluetooth only.
+- `renhdrum_store_set` clamps to `[min, max]`; an unknown key returns `RENHDRUM_ERR_INVALID_ARG`. Never rename a key after release.
+- `switch_bt_mode` 0 (Detailed) writes level 4 + `hd_rumble_experimental_bt_fast = true`; 1 (Compatible) writes level 4 + false.
+- `renhdrum_store_is_recommended`: true when every value equals its default. Keys with no `RenHdcConfig` field (`gain`, `low_boost`, `xbox_*`) are host settings: the host reads them with `renhdrum_store_get`.
+- `RenHdcStore` is not thread-safe; the host keeps it on one thread.
+
 ## 3. Stateless Encoders
 
 These functions perform pure mathematical transformations and packet encoding without maintaining state or allocating memory.
@@ -79,7 +98,7 @@ These functions perform pure mathematical transformations and packet encoding wi
 ```c
 uint32_t renhdrum_version(void);
 ```
-Returns the integer library version `0x000300`.
+Returns the integer library version `0x000500`.
 
 ### `renhdrum_set_nx2_mode`
 ```c
@@ -225,13 +244,20 @@ Fills `out_buffer` with interleaved 4-channel 48 kHz float samples (Channels 0 &
 ### `renhdrum_valve_grip_dsp_create` / `renhdrum_valve_grip_build_report` (experimental)
 ```c
 RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create(int32_t volume_percent, bool crisp_notes);
+RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create_ex(int32_t volume_percent, bool crisp_notes, bool drift_compensation);
 int32_t renhdrum_valve_grip_build_report(RenHdcDualSenseDsp *dsp, uint8_t format, uint8_t *out_report64);
+int32_t renhdrum_valve_grip_mode_tick(RenHdcDualSenseDsp *dsp, uint8_t format, uint64_t now_ns, bool stalled, uint8_t *out_reports8);
+int32_t renhdrum_valve_grip_mode_off(uint8_t format, uint8_t *out_reports8);
 ```
 Steam Controller (2026) grip haptics. Experimental: I built this from iafx's hardware measurements in RenHDrum#5; I do not own the controller.
 
-`renhdrum_valve_grip_dsp_create` returns the same handle type as the DualSense DSP, with a grip profile (per-band gain of -5 dB flat from 40 to 500 Hz, falling to -20 dB at 800 Hz, applied after the same amplitude law). Feed it with `renhdrum_dualsense_dsp_set_half_target` and free it with `renhdrum_dualsense_dsp_destroy`.
+`renhdrum_valve_grip_dsp_create` returns the same handle type as the DualSense DSP, with a grip profile (per-band gain of -5 dB flat from 40 to 500 Hz, falling to -20 dB at 800 Hz, applied after the same amplitude law) and leaves 40 ppm drift packet-skipping disabled so older callers that treat any `>= 0` return as sendable stay safe. Use `renhdrum_valve_grip_dsp_create_ex(..., true)` to opt into 40 ppm drift compensation. Feed the handle with `renhdrum_dualsense_dsp_set_half_target` and free it with `renhdrum_dualsense_dsp_destroy`.
 
-`renhdrum_valve_grip_build_report` fills `out_report64` (64 bytes, `RENHDRUM_VALVE_GRIP_REPORT_SIZE`) with HID report `0x88`: byte 0 = `0x88`, byte 1 = 31 samples, bytes 2..32 = left grip, bytes 33..63 = right grip, mu-law coded. `format` 8 = mu-law 8 kHz (USB cable, call every `RENHDRUM_VALVE_GRIP_PERIOD_NS_8K`), 9 = mu-law 4 kHz (wireless dongle, Bluetooth on Windows, every `RENHDRUM_VALVE_GRIP_PERIOD_NS_4K`). Returns 1 when the block carries vibration, 0 when silent, a negative code on error (unknown format gives `RENHDRUM_ERR_INVALID_ARG`, NULL pointers give `RENHDRUM_ERR_NULL_PTR`). The host sends the report with its own HID handle and its own steady timer.
+`renhdrum_valve_grip_build_report` fills `out_report64` (64 bytes, `RENHDRUM_VALVE_GRIP_REPORT_SIZE`) with HID report `0x88`: byte 0 = `0x88`, byte 1 = 31 samples, bytes 2..32 = left grip, bytes 33..63 = right grip, mu-law coded. `format` 8 = mu-law 8 kHz (USB cable, call every `RENHDRUM_VALVE_GRIP_PERIOD_NS_8K`), 9 = mu-law 4 kHz (wireless dongle, Bluetooth on Windows, every `RENHDRUM_VALVE_GRIP_PERIOD_NS_4K`). Returns `1` when the block carries vibration, `0` when silent, `2` (`RENHDRUM_VALVE_GRIP_SKIP`, only when created with `drift_compensation = true`) once every 25,000 continuous packets so the host skips sending `out_report64` without advancing DSP phase (resets after a `>= 100 ms` silence pause), or a negative code on error (`RENHDRUM_ERR_INVALID_ARG` / `RENHDRUM_ERR_NULL_PTR`).
+
+`renhdrum_valve_grip_mode_tick` manages the HID `0x86` PCM mode state in the core without heap allocation. Call it once per report period with the monotonic clock `now_ns` and `stalled` (`true` if the previous HID write failed or stalled). It writes `0` or `2` consecutive 4-byte `0x86` reports (`RENHDRUM_VALVE_GRIP_MODE_REPORTS_SIZE` = `8` bytes; bytes `0..4` channel `2`, bytes `4..8` channel `5`) and returns the report count (`0` or `2`, or `< 0` on error): `"on"` (`op = 2`) when vibration starts, `"on"` refreshed every `3 s` while active or immediately on `stalled = true`, and `"off"` (`op = 1`) after `100 ms` of silence (also resetting the drift counter).
+
+`renhdrum_valve_grip_mode_off` writes the two 4-byte `0x86` `"off"` reports (channels `2` and `5`, accepting `format` `0`, `8`, or `9`) into `out_reports8` and returns `2` (`< 0` on error), for detach and all exit paths.
 
 ---
 

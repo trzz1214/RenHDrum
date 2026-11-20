@@ -62,6 +62,14 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
     - **Foundation**: Former Hookshot collaborators who created the Longshot static recompiler.
     - **RenHDrum Refinement**: Second real fork used to test the Generic Recomp C Kit; its lessons are in [recomp-games.md section 11](integration/recomp-games.md#11-lessons-from-two-real-forks-hookshot-v220-rc2-longshot-v300-rc3).
 
+15. **ragnarok179 ([`Enhanced-PS5-DualSense-Haptics-Bridge`](https://github.com/ragnarok179/Enhanced-PS5-DualSense-Haptics-Bridge))**
+    - **Foundation**: DualSense Bluetooth combined report `0x36` layout (`0x11` / `0x10` / `0x12` / `0x13`), Sony CRC32 seed `0xA2`, SetState speaker routing flags, and 10 ms / 480-sample Opus CBR 160 kb/s speaker framing (MIT License).
+    - **RenHDrum Refinement**: Reimplemented in Rust inside `src/dualsense/bt_haptics.rs` and `src/dualsense/opus_codec.rs` with zero heap allocation on the packet path and a 2 s idle rest gate.
+
+16. **Xiph.Org Foundation, Skype Limited, Jean-Marc Valin, Koen Vos & Opus Contributors ([`xiph/opus`](https://github.com/xiph/opus))**
+    - **Foundation**: Reference `libopus` (`v1.5.2`, 3-Clause BSD License, [`vendor/opus/COPYING`](../vendor/opus/COPYING)).
+    - **RenHDrum Refinement**: Vendored in `vendor/opus/` and statically compiled via `build.rs` using stack allocation (`USE_ALLOCA`) and fixed encoder state storage for DualSense Bluetooth speaker packets (`0x93`).
+
 ## Copied · Referenced · Built in this project
 
 | Part | Copied (code or data) | Referenced (ideas, specs, measurements) | Built in this project | Evidence |
@@ -74,6 +82,8 @@ RenHDrum stands on the shoulders of open-source reverse-engineering and emulatio
 | Bluetooth pacing (Detailed 5 ms / Compatible + legacy 3 tiers), idle-gated writes, write-after-input | - | Behaviour of the SDL HIDAPI Switch driver; newest-sample fallback idea from Hookshot PR #1213 (no code copied) | Detailed 5 ms mode, Compatible fallback, token-bucket tiers, idle-gated no-queue writes, write-after-input | `tests/guardrails.rs`, `docs/research/03`, `docs/research/04` |
 | DualSense USB audio haptics DSP | - | Nielk1 and the DualSense reverse-engineering community: 4-channel 48 kHz USB audio layout | The synthesizer itself (the DSP shared with Ryuhdr is also my own code) | `src/dualsense/haptics.rs`, `tests/golden_dualsense.rs`, `NOTICE` item 6 |
 | DualSense Bluetooth haptics, report `0x32` | - | egormanga, SAxense: report layout only | Reimplementation in Rust, 48 kHz to 3 kHz conversion, CRC | `src/dualsense/bt_haptics.rs` (header comment: no SAxense code copied), `docs/research/05` |
+| DualSense Bluetooth combined report `0x36` and speaker Opus `0x93` | - | ragnarok179, `Enhanced-PS5-DualSense-Haptics-Bridge` (MIT): report layout and 512→480 10 ms CBR 160 kb/s Opus framing | Reimplementation in Rust, `0x90` speaker flags, zero-allocation `opus_encode_float` + silence frame | `src/dualsense/bt_haptics.rs`, `src/dualsense/opus_codec.rs`, `NOTICE` item 16 |
+| `libopus` (`v1.5.2`) | Copied (`vendor/opus/`, BSD-3-Clause) | - | Static build via `build.rs` (`USE_ALLOCA`), fixed encoder buffer | `vendor/opus/`, `build.rs`, `NOTICE` item 17 |
 | Switch 2 command 214 IPC dispatching | - | neo Luigi (Eglantine PR #155): command 214 routing pattern | Adapted into Brontide-NS2 input driver to feed RenHDrum `_half_` C ABI | `docs/research/11`, `docs/integration/switch2-games.md` |
 | Switch 2 testbed emulator | - | Franseven (PokeDinner 2.5.0): emulator core | Base emulator for Brontide-NS2 reference testbed | `docs/research/11`, `docs/integration/switch2-games.md` |
 | Switch 2 IPC command names (213/214/220) | - | Switchbrew Wiki: command identifiers | Verified against Switchbrew documentation | `docs/research/11` |

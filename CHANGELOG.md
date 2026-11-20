@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-20
+
+### Added
+- **HD Haptics for DualSense**: the HD Rumble signal now drives three parts of the controller, the motors, the built-in speaker and the L2/R2 triggers, on by default and with one switch. Turn it off and the DualSense rumbles exactly as before (locked by the `golden_dualsense` test).
+  - **Speaker**: taps by kind of sound (rain and menu clicks, gravel, metal, long friction as noise), four variants per kind so it does not repeat; it stays quiet when the game plays music notes. Speaker level is `RENHDRUM_HD_HAPTICS_SPEAKER_PERCENT` (`60`).
+  - **Triggers**: kick back only while you hold them, one rule for every game (sharp hit, heavy hit, explosion); music and constant rumble leave them quiet.
+  - **Studio-style motor**: heavy hits and explosions are pulled down to 75 Hz for a deeper thump (only lowered, never raised).
+  - New config field `dualsense_hd_haptics_off` in `RenHdcConfig` (`false` = HD Haptics on; the struct stays 48 bytes), plus `renhdrum_hd_haptics_speaker_block` and `renhdrum_hd_haptics_trigger_block` to build the 47-byte USB effects blocks that open or release the speaker and set or clear a trigger.
+- **DualSense over Bluetooth with speaker and triggers**: `renhdrum_dualsense_dsp_build_bt36_report` builds the 398-byte combined report `0x36` every 10.667 ms with rumble, triggers and the speaker. The speaker audio is Opus-encoded (48 kHz stereo, CBR 160 kb/s, exactly 200 bytes) into the report; silence uses a prebuilt frame, and there is a 2 s idle rest. The 0x32 builder stays. If the host does not call `renhdrum_dualsense_dsp_set_speaker` on Bluetooth, the core turns the speaker on at the HD Haptics level by itself.
+- **libopus 1.5.2** (BSD-3-Clause) is built statically into `renhdrum.dll` (`vendor/opus/`); no extra DLL and no Visual C++ Redistributable needed. The encoder is allocated once at creation; the send path does not allocate.
+- **Settings table and value store**: `renhdrum_options` returns the list of HD Rumble settings (key, label, range, default, help text) and `renhdrum_store_create / destroy / get / set / reset / is_recommended / to_config` keep their values, so every host draws the same settings page. Also `renhdrum_store_shape_amplitude` and the Xbox Direct helpers `renhdrum_xbox_direct_create / push / tick / destroy`. See `docs/integration/ui-guidelines.md`.
+- **Qt settings page sample**: `integrations/qt/` has a ready `SettingsWidget` (Qt Widgets) built from `renhdrum_options`, plus the Song Rung theme, ambient backdrop, HD Rumble pill button and the RenHDrum logo.
+- **Steam Controller (2026) mode keeping in the core**: `renhdrum_valve_grip_mode_tick` and `renhdrum_valve_grip_mode_off` send the `0x86` mode report for the host ("on" at the first vibration and again every 3 s, at once after a stalled write, "off" after 100 ms of silence and on exit). `renhdrum_valve_grip_dsp_create_ex` adds an opt-in 40 ppm drift compensation: after 25 000 continuous reports `renhdrum_valve_grip_build_report` returns `RENHDRUM_VALVE_GRIP_SKIP` (`2`) once and the host skips that report. `renhdrum_valve_grip_dsp_create` is unchanged (compensation off). Requested in `RenHDrum#5`.
+- **Windows recomp bridge `recomp-c` 0.5.0**: HD Haptics, the settings store (`renhdrum.ini`), the safe `rh_shutdown()` on every exit path and the `rh_option_*` calls for the menu page. Reference patches for Longshot (with an HD Rumble page in its menu) and totk-pc-recomp v0.4.1 are in `integrations/recomp-c/reference/`.
+
+### Changed
+- `renhdrum_dualsense_dsp_build_bt36_report` now carries the speaker (the note in `renhdrum.h` and the earlier "no speaker" wording are corrected). Function signatures and values are unchanged.
+- The SDL3 patches in `integrations/sdl3/sdl3-patches/` apply cleanly to every `release-3.4.x` from 3.4.8 to 3.4.20 (checked 2026-11-19; built on 3.4.14 and 3.4.20). Requested in `RenHDrum#8`.
+- DualSense recomp and Switch 2 integration guides, the Eden Switch 2 series (`0020`-`0034`) and the HD Rumble UI guidelines are refreshed for 0.5.0.
+- `RENHDRUM_VERSION` is now `0x000500`.
+
+### Fixed
+- A test that named its temporary folder from the clock could clash between runs; it now uses the process id and a counter.
+
 ## [0.4.0] - 2026-11-14
 
 ### Added

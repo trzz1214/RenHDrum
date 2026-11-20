@@ -3,6 +3,7 @@
 //! The trigger motors are a matching light pair, so they take left and right onsets.
 
 pub mod classify;
+pub mod direct;
 pub mod rotor;
 
 use std::path::Path;

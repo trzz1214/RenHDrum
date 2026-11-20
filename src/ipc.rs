@@ -407,7 +407,7 @@ pub fn settings_file_path() -> Option<PathBuf> {
     Some(p)
 }
 
-/// Serializes all 24 fields of `RenHdcConfig` to simple `key=value` text format.
+/// Serializes all 25 fields of `RenHdcConfig` to simple `key=value` text format.
 pub fn write_settings_text(c: &RenHdcConfig) -> String {
     let mut s = String::new();
     s.push_str("# Brontide-App settings, read by renhdrum.dll when the App is closed\n");
@@ -494,6 +494,10 @@ pub fn write_settings_text(c: &RenHdcConfig) -> String {
     s.push_str(&format!(
         "dualsense_bt_crisp_notes={}\n",
         c.dualsense_bt_crisp_notes
+    ));
+    s.push_str(&format!(
+        "dualsense_hd_haptics_off={}\n",
+        c.dualsense_hd_haptics_off
     ));
     s
 }
@@ -602,6 +606,10 @@ pub fn parse_settings_text(text: &str) -> Option<RenHdcConfig> {
             "dualsense_bt_crisp_notes" => val
                 .parse::<bool>()
                 .map(|v| cfg.dualsense_bt_crisp_notes = v)
+                .is_ok(),
+            "dualsense_hd_haptics_off" => val
+                .parse::<bool>()
+                .map(|v| cfg.dualsense_hd_haptics_off = v)
                 .is_ok(),
             _ => false,
         };
@@ -783,5 +791,32 @@ mod tests {
         note_controller(true, false);
         note_controller(false, true);
         note_controller(false, false);
+    }
+
+    #[test]
+    fn settings_file_hd_haptics_off_roundtrip_and_legacy_default() {
+        let dir = std::env::temp_dir().join(format!("renhdrum_ipc_119_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("renhdrum-settings.txt");
+
+        // (c) roundtrip true and false through a settings file
+        for expected in [true, false] {
+            let mut cfg = RenHdcConfig::from(&RumbleConfigController::default());
+            cfg.dualsense_hd_haptics_off = expected;
+            std::fs::write(&path, write_settings_text(&cfg)).unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let parsed = parse_settings_text(&text).expect("roundtrip parse failed");
+            assert_eq!(parsed.dualsense_hd_haptics_off, expected);
+        }
+
+        // (d) legacy settings file without dualsense_hd_haptics_off defaults to false
+        let legacy_text =
+            "enable_hd_rumble=true\ndualsense_crisp_notes=true\ndualsense_bt_crisp_notes=false\n";
+        std::fs::write(&path, legacy_text).unwrap();
+        let read_legacy = std::fs::read_to_string(&path).unwrap();
+        let parsed_legacy = parse_settings_text(&read_legacy).expect("legacy parse failed");
+        assert!(!parsed_legacy.dualsense_hd_haptics_off);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,0 +1,379 @@
+From 7f1ef52c7cf7d7ceb0dd068b10a0942d40458756 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 01:31:26 +0700
+Subject: [PATCH 30/31] input: use core 0x86 grip mode manager and avoid Steam
+ stand-in pads
+
+---
+ externals/renhdrum/renhdrum.h             |  35 ++++-
+ src/input_common/drivers/renhdrum_pad.cpp | 153 ++++++++++++++++++----
+ 2 files changed, 162 insertions(+), 26 deletions(-)
+
+diff --git a/externals/renhdrum/renhdrum.h b/externals/renhdrum/renhdrum.h
+index 5a21ea827f..c2b956192a 100644
+--- a/externals/renhdrum/renhdrum.h
++++ b/externals/renhdrum/renhdrum.h
+@@ -335,21 +335,45 @@ int32_t renhdrum_dualsense_dsp_build_bt36_report(
+     uint8_t *out_report398
+ );
+ /* Experimental: Steam Controller (2026) grips, report 0x88, built from iafx's measurements (RenHDrum#5).
+-   Create with renhdrum_valve_grip_dsp_create, then use renhdrum_dualsense_dsp_set_half_target and
++   Create with renhdrum_valve_grip_dsp_create[_ex], then use renhdrum_dualsense_dsp_set_half_target and
+    renhdrum_dualsense_dsp_destroy on the handle. One report every RENHDRUM_VALVE_GRIP_PERIOD_NS_*.
+-   Returns 1 when the block carries vibration, 0 when silent, < 0 on error
+-   (unknown format -> RENHDRUM_ERR_INVALID_ARG). out_report64 must hold 64 bytes. */
++   build_report returns 1 when vibrating, 0 when silent, 2 (RENHDRUM_VALVE_GRIP_SKIP) when 40 ppm drift
++   compensation skips this packet (only if created with drift_compensation = true; do not send, phase
++   unchanged), < 0 on error (unknown format -> RENHDRUM_ERR_INVALID_ARG). out_report64: 64 bytes.
++   mode_tick evaluates the 0x86 PCM mode keep-alive (on at first vibration, refresh every 3 s or on
++   stalled=true, off after 100 ms silence) and writes 0 or 2 reports (4 bytes each) into out_reports8.
++   mode_off writes 2 off reports (channels 2 and 5) into out_reports8 for detach/exit paths. */
+ #define RENHDRUM_VALVE_GRIP_REPORT_SIZE 64
+ #define RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K 8
+ #define RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K 9
+ #define RENHDRUM_VALVE_GRIP_PERIOD_NS_8K 3875000ULL
+ #define RENHDRUM_VALVE_GRIP_PERIOD_NS_4K 7750000ULL
++#define RENHDRUM_VALVE_GRIP_SKIP 2
++#define RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE 4
++#define RENHDRUM_VALVE_GRIP_MODE_REPORT_COUNT 2
++#define RENHDRUM_VALVE_GRIP_MODE_REPORTS_SIZE 8
+ RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create(int32_t volume_percent, bool crisp_notes);
++RenHdcDualSenseDsp *renhdrum_valve_grip_dsp_create_ex(
++    int32_t volume_percent,
++    bool crisp_notes,
++    bool drift_compensation
++);
+ int32_t renhdrum_valve_grip_build_report(
+     RenHdcDualSenseDsp *dsp,
+     uint8_t format,
+     uint8_t *out_report64
+ );
++int32_t renhdrum_valve_grip_mode_tick(
++    RenHdcDualSenseDsp *dsp,
++    uint8_t format,
++    uint64_t now_ns,
++    bool stalled,
++    uint8_t *out_reports8
++);
++int32_t renhdrum_valve_grip_mode_off(
++    uint8_t format,
++    uint8_t *out_reports8
++);
+ /* Vibration-reactive trigger (one handle per trigger). update: 1 = changed (11 bytes written to
+    out11, pack with the DS5 effects state), 0 = unchanged, <0 = error. */
+ typedef struct RenHdcTriTrigger RenHdcTriTrigger;
+@@ -366,7 +390,10 @@ int32_t renhdrum_tri_trigger_update(
+     bool fresh,
+     uint8_t *out11
+ );
+-/* Player pressed another button: no new pulse until 500 ms after the last call (same clock as update). */
++/* Player is pressing another button (call every tick while held, before update, same clock):
++   a streak started strictly before this trigger was held counts as a posture and does not mute;
++   a streak started with or after trigger hold (gap > 30 ms starts a new streak) mutes new pulses
++   while held and for 500 ms after the last call. */
+ void renhdrum_tri_trigger_note_action(RenHdcTriTrigger *h, uint32_t now_ms);
+ /* 47-byte DS5EffectsState_t USB blocks for HD Haptics (speaker open/release, single-trigger update/off).
+    Returns 0 on success, -1 (RENHDRUM_ERR_NULL_PTR) if out47 is NULL. */
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 6b457e31ca..9dae375147 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -65,7 +65,10 @@ struct RenHDrumApi {
+     // Optional (RenHDrum after 0.3.1): Steam Controller (2026) grips. The DSP handle is a
+     // RenHdcDualSenseDsp, so set_half_target and dsp_destroy work on it too.
+     decltype(&renhdrum_valve_grip_dsp_create) valve_create{};
++    decltype(&renhdrum_valve_grip_dsp_create_ex) valve_create_ex{};
+     decltype(&renhdrum_valve_grip_build_report) valve_build_report{};
++    decltype(&renhdrum_valve_grip_mode_tick) valve_mode_tick{};
++    decltype(&renhdrum_valve_grip_mode_off) valve_mode_off{};
+     // Optional (RenHDrum 0.4.0+): runtime library version
+     decltype(&renhdrum_version) version{};
+     // Optional (plan 118): DualSense speaker channel and the vibration-reactive trigger
+@@ -103,7 +106,10 @@ struct RenHDrumApi {
+         return xbox_direct_create && xbox_direct_destroy && xbox_direct_push && xbox_direct_tick;
+     }
+     bool HasValve() const {
+-        return valve_create && valve_build_report;
++        return (valve_create || valve_create_ex) && valve_build_report;
++    }
++    bool HasValveMode() const {
++        return valve_mode_tick && valve_mode_off;
+     }
+     bool HasXbox() const {
+         return xbox_create && xbox_destroy && xbox_push_half_sample && xbox_tick && xbox_resend;
+@@ -159,8 +165,11 @@ const RenHDrumApi& Api() {
+             (void)a.library.GetSymbol("renhdrum_xbox_rumble_resend", &a.xbox_resend);
+             (void)a.library.GetSymbol("renhdrum_set_nx2_mode", &a.set_nx2_mode);
+             (void)a.library.GetSymbol("renhdrum_valve_grip_dsp_create", &a.valve_create);
++            (void)a.library.GetSymbol("renhdrum_valve_grip_dsp_create_ex", &a.valve_create_ex);
+             (void)a.library.GetSymbol("renhdrum_valve_grip_build_report",
+                                       &a.valve_build_report);
++            (void)a.library.GetSymbol("renhdrum_valve_grip_mode_tick", &a.valve_mode_tick);
++            (void)a.library.GetSymbol("renhdrum_valve_grip_mode_off", &a.valve_mode_off);
+             (void)a.library.GetSymbol("renhdrum_version", &a.version);
+             (void)a.library.GetSymbol("renhdrum_dualsense_dsp_set_speaker", &a.dsp_set_speaker);
+             (void)a.library.GetSymbol("renhdrum_tri_trigger_create", &a.tri_create);
+@@ -275,6 +284,22 @@ bool IsSteamController(Uint16 vid, Uint16 pid) {
+     return vid == ValveVendorId && (pid == 0x1302 || pid == 0x1303 || pid == 0x1304);
+ }
+ 
++bool HasSteamInputStandIn() {
++    int count = 0;
++    SDL_JoystickID* gamepads = SDL_GetGamepads(&count);
++    bool found = false;
++    for (int i = 0; gamepads && i < count; ++i) {
++        if (SDL_Gamepad* gp = SDL_GetGamepadFromID(gamepads[i])) {
++            if (SDL_GetGamepadSteamHandle(gp) != 0) {
++                found = true;
++                break;
++            }
++        }
++    }
++    SDL_free(gamepads);
++    return found;
++}
++
+ bool IsDualSense(Uint16 vid, Uint16 pid) {
+     return vid == SonyVendorId && (pid == 0x0CE6 || pid == 0x0DF2);
+ }
+@@ -444,6 +469,7 @@ struct RenHDrumPad::Impl {
+     // It reuses bt_hid / bt_thread / bt_running / bt_dsp_mutex below (a pad is never both).
+     RenHdcDualSenseDsp* steam_dsp{};
+     std::uint8_t steam_format{};
++    std::int64_t steam_standin_next_us{};
+ 
+     // Reused by the Steam Controller grip sender (see steam_dsp)
+     std::mutex bt_dsp_mutex;
+@@ -1022,6 +1048,22 @@ struct RenHDrumPad::Impl {
+         }
+     }
+ 
++    static void SendSteamGripModeOff(SDL_hid_device* hid, Uint8 format) {
++        if (const auto& api = Api(); api.valve_mode_off) {
++            std::array<std::uint8_t, RENHDRUM_VALVE_GRIP_MODE_REPORTS_SIZE> reports{};
++            for (const Uint8 fmt : {format, Uint8{0}}) {
++                if (api.valve_mode_off(fmt, reports.data()) == RENHDRUM_VALVE_GRIP_MODE_REPORT_COUNT) {
++                    SDL_hid_write(hid, reports.data(), RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE);
++                    SDL_hid_write(hid, reports.data() + RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE,
++                                  RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE);
++                }
++            }
++            return;
++        }
++        SendSteamGripMode(hid, 1, format);
++        SendSteamGripMode(hid, 1, 0);
++    }
++
+     /// Opens a second HID handle on a Steam Controller (2026), switches the grips to PCM and
+     /// starts the report 0x88 sender. Called without the mutex. Every failure leaves the standard
+     /// rumble (handle closed) or a running sender. Protocol by iafx (RenHDrum#5, iafx/Lichii).
+@@ -1043,15 +1085,20 @@ struct RenHDrumPad::Impl {
+         // Wired takes 8 kHz; the dongle and Bluetooth (Windows) 4 kHz
+         const Uint8 format = steam_pid == 0x1302 ? RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K
+                                                  : RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K;
+-        SendSteamGripMode(hid, 1, 0);
+-        SDL_Delay(10);
+-        SendSteamGripMode(hid, 2, format);
+-        SDL_Delay(200); // the controller needs a moment between off and on
++        if (Api().HasValveMode()) {
++            // Leave the grips in standard rumble mode until vibration starts; mode_tick toggles
++            // 0x86 on/off dynamically and refreshes every 3 s or on write stall.
++            SendSteamGripModeOff(hid, format);
++        } else {
++            SendSteamGripMode(hid, 1, 0);
++            SDL_Delay(10);
++            SendSteamGripMode(hid, 2, format);
++            SDL_Delay(200); // the controller needs a moment between off and on
++        }
+         {
+             std::scoped_lock lock{mutex};
+             if (!joystick || !steam_dsp || bt_hid || bt_thread.joinable()) {
+-                SendSteamGripMode(hid, 1, format);
+-                SendSteamGripMode(hid, 1, 0);
++                SendSteamGripModeOff(hid, format);
+                 SDL_hid_close(hid);
+                 return;
+             }
+@@ -1078,28 +1125,51 @@ struct RenHDrumPad::Impl {
+         constexpr Uint64 ResyncNs = 100'000'000ULL;
+         const auto& api = Api();
+         const Uint8 format = steam_format;
++        const bool use_mode_tick = api.HasValveMode();
+         const Uint64 period_ns = format == RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K
+                                      ? RENHDRUM_VALVE_GRIP_PERIOD_NS_8K
+                                      : RENHDRUM_VALVE_GRIP_PERIOD_NS_4K;
+         std::array<std::uint8_t, RENHDRUM_VALVE_GRIP_REPORT_SIZE> report{};
++        std::array<std::uint8_t, RENHDRUM_VALVE_GRIP_MODE_REPORTS_SIZE> mode_reports{};
+         Uint64 next = SDL_GetTicksNS();
+         Uint64 last_signal = 0;
+         int fails_in_row = 0;
++        bool write_stalled = false;
+         while (bt_running.load()) {
+             next += period_ns;
++            const Uint64 now = SDL_GetTicksNS();
+             int built = -1;
++            int mode_count = 0;
+             {
+                 std::scoped_lock lock{bt_dsp_mutex};
+                 if (steam_dsp) {
+                     built = api.valve_build_report(steam_dsp, format, report.data());
++                    if (use_mode_tick && built >= 0) {
++                        mode_count = api.valve_mode_tick(steam_dsp, format, now, write_stalled,
++                                                         mode_reports.data());
++                    }
+                 }
+             }
+-            const Uint64 now = SDL_GetTicksNS();
+-            if (built == 1) {
++            write_stalled = false;
++            if (mode_count == RENHDRUM_VALVE_GRIP_MODE_REPORT_COUNT) {
++                for (int i = 0; i < mode_count; ++i) {
++                    if (SDL_hid_write(bt_hid,
++                                      mode_reports.data() + i * RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE,
++                                      RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE) < 0) {
++                        write_stalled = true;
++                        ++fails_in_row;
++                    } else {
++                        fails_in_row = 0;
++                    }
++                }
++            }
++            if (built == 1 || built == RENHDRUM_VALVE_GRIP_SKIP) {
+                 last_signal = now;
+             }
+-            if (built >= 0 && last_signal != 0 && now - last_signal < SteamGripTailNs) {
++            if (built >= 0 && built != RENHDRUM_VALVE_GRIP_SKIP && last_signal != 0 &&
++                now - last_signal < SteamGripTailNs) {
+                 if (SDL_hid_write(bt_hid, report.data(), report.size()) < 0) {
++                    write_stalled = true;
+                     ++fails_in_row;
+                 } else {
+                     fails_in_row = 0;
+@@ -1114,12 +1184,17 @@ struct RenHDrumPad::Impl {
+                 }
+                 break;
+             }
+-            if (next > now) {
+-                SDL_DelayPrecise(next - now);
+-            } else if (now - next > ResyncNs) {
+-                next = now; // stalled: resync instead of bursting
++            const Uint64 after = SDL_GetTicksNS();
++            if (next > after) {
++                SDL_DelayPrecise(next - after);
++            } else if (after - next > ResyncNs) {
++                next = after; // stalled: resync instead of bursting
++                write_stalled = true;
+             }
+         }
++        if (bt_hid) {
++            SendSteamGripModeOff(bt_hid, format);
++        }
+         bt_running.store(false);
+     }
+ 
+@@ -1221,16 +1296,12 @@ struct RenHDrumPad::Impl {
+     bool Release() {
+         const auto& api = Api();
+         if (steam_dsp) {
+-            // Stop the grip sender, switch the grips back to rumble, then free its DSP. The
+-            // handle is closed by the Bluetooth cleanup below (shared member).
++            // Stop the grip sender (SteamGripLoop writes 0x86 off before exiting) and free its
++            // DSP. The handle is closed by the Bluetooth cleanup below (shared member).
+             bt_running.store(false);
+             if (bt_thread.joinable()) {
+                 bt_thread.join();
+             }
+-            if (bt_hid) {
+-                SendSteamGripMode(bt_hid, 1, steam_format);
+-                SendSteamGripMode(bt_hid, 1, 0);
+-            }
+             api.dsp_destroy(steam_dsp);
+             steam_dsp = nullptr;
+         }
+@@ -1323,6 +1394,10 @@ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gam
+     if (!joystick || !IsRenHDrumLoaded()) {
+         return nullptr;
+     }
++    if (gamepad && SDL_GetGamepadSteamHandle(gamepad) != 0) {
++        LOG_INFO(Input, "RenHDrum: skipping Steam Input virtual stand-in gamepad");
++        return nullptr;
++    }
+     const Uint16 vid = SDL_GetJoystickVendor(joystick);
+     const Uint16 pid = SDL_GetJoystickProduct(joystick);
+     if (IsSteamController(vid, pid)) {
+@@ -1339,6 +1414,12 @@ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gam
+                             "the standard rumble");
+             return nullptr;
+         }
++        if (HasSteamInputStandIn()) {
++            LOG_INFO(Input,
++                     "RenHDrum: Steam Input stand-in present, skipping Steam Controller {:04X}:{:04X}",
++                     vid, pid);
++            return nullptr;
++        }
+         // Not shared yet: no other thread can reach `steam` until it is returned.
+         auto steam = std::make_unique<Impl>();
+         steam->vid = vid;
+@@ -1349,8 +1430,12 @@ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gam
+             SDL_GetJoystickConnectionState(joystick) == SDL_JOYSTICK_CONNECTION_WIRELESS;
+         steam->SyncStore();
+         steam->user = ReadUserSettings(steam->store);
+-        steam->steam_dsp = steam_api.valve_create(steam->user.dualsense_volume,
+-                                                  steam->user.dualsense_crisp_notes);
++        const bool use_core_mode = steam_api.valve_create_ex && steam_api.HasValveMode();
++        steam->steam_dsp = use_core_mode
++                               ? steam_api.valve_create_ex(steam->user.dualsense_volume,
++                                                           steam->user.dualsense_crisp_notes, true)
++                               : steam_api.valve_create(steam->user.dualsense_volume,
++                                                        steam->user.dualsense_crisp_notes);
+         if (!steam->steam_dsp) {
+             return nullptr;
+         }
+@@ -1665,6 +1750,7 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+     SDL_AudioStream* check_audio_stream = nullptr;
+     SDL_AudioDeviceID check_audio_device = 0;
+     bool restart_bt = false;
++    bool check_steam_standin = false;
+     bool send = false;
+     bool send_xbox = false;
+     bool triggers = false;
+@@ -1701,6 +1787,10 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+             impl->bt_starting = true;
+             restart_bt = true;
+         }
++        if (impl->steam_dsp && impl->bt_running.load() && now_us >= impl->steam_standin_next_us) {
++            impl->steam_standin_next_us = now_us + 1'000'000;
++            check_steam_standin = true;
++        }
+         send = impl->engine && Api().engine_tick(impl->engine, now_us, packet.data()) == 1;
+         const bool direct_mode = impl->xbox_direct && impl->user.xbox_direct;
+         if (impl->xbox_direct) {
+@@ -1751,6 +1841,25 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+     if (restart_bt) {
+         impl->RestartDualSenseBluetooth();
+     }
++    if (check_steam_standin && HasSteamInputStandIn()) {
++        bool stopped = false;
++        {
++            std::scoped_lock lock{impl->mutex};
++            if (impl->steam_dsp) {
++                impl->Release();
++                if (impl->kind >= 0) {
++                    --connected_count[impl->kind];
++                    impl->kind = -1;
++                }
++                stopped = true;
++            }
++        }
++        if (stopped) {
++            UnregisterActivePad(impl.get());
++            LOG_INFO(Input, "RenHDrum: Steam Input stand-in opened, yielding Steam Controller "
++                            "grips to standard rumble");
++        }
++    }
+     if (check_audio_stream && check_audio_device != 0) {
+         int count = 0;
+         SDL_AudioDeviceID* devices = SDL_GetAudioPlaybackDevices(&count);
+-- 
+2.55.0.windows.5
+
