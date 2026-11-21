@@ -19,7 +19,8 @@ integrations/recomp-c/
 ├── reference/
 │   ├── recomp-c-reference.patch   # Reference patch against Hookshot v2.2.0-rc.2 (GPL-3.0)
 │   ├── longshot-reference.patch   # Reference patch against Longshot (GPL-3.0-or-later)
-│   └── totk-reference.patch       # Reference patch against totk-pc-recomp v0.4.1 (MIT)
+│   ├── totk-reference.patch       # Reference patch against totk-pc-recomp v0.4.1 (MIT)
+│   └── dkb-reference.patch        # Reference patch against dkb-pc-recomp v0.5.1 (GPL-3.0-or-later)
 └── README.md
 ```
 
@@ -145,3 +146,4 @@ if (rh_pad_claimed(i)) {
 - Hookshot reference patch (`reference/recomp-c-reference.patch`): **GPL-3.0**. Credit to **NotRexed** and the Hookshot contributors.
 - Longshot reference patch (`reference/longshot-reference.patch`, applies cleanly on upstream `08994a9e`, `main` of 20 Nov 2026; it includes the HD Rumble menu page): **GPL-3.0-or-later**. Credit to **MagicBeanDev** and the Longshot contributors.
 - totk-pc-recomp reference patch (`reference/totk-reference.patch`, applies cleanly on tag `v0.4.1`, `6151ac4`; a Switch 1 game, so it calls `rh_set_switch_gen(1)`): **MIT**, as totk-pc-recomp. Credit to the totk-pc-recomp contributors.
+- dkb-pc-recomp reference patch (`reference/dkb-reference.patch`, applies cleanly on tag `v0.5.1`, `44ba6b1`; a Switch 2 game, so it calls `rh_set_switch_gen(2)`; only player 1's pad goes through the bridge, player 2 keeps the game's two-motor rumble; it also fixes two `.nx` reading bugs of the installer): **GPL-3.0-or-later**, as dkb-pc-recomp. Credit to Lucas-blip-png and the dkb-pc-recomp contributors.

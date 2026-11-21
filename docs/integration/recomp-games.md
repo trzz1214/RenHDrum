@@ -1,6 +1,6 @@
 # Static Recompilation Games HD Rumble Integration Guide
 
-This guide explains how I integrate `renhdrum.dll` (`0.5.0`) into C and C++ static recompilation runtimes using SDL3 (or SDL2) to deliver authentic HD Rumble across all four controllers supported by the core. I have shipped it this way in Longshot and in totk-pc-recomp. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
+This guide explains how I integrate `renhdrum.dll` (`0.5.0`) into C and C++ static recompilation runtimes using SDL3 (or SDL2) to deliver authentic HD Rumble across all four controllers supported by the core. I have shipped it this way in Longshot, totk-pc-recomp and dkb-pc-recomp. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
 
 > [!NOTE]
 > **Supported Controllers**: `✅ Nintendo Pro Controller` · `✅ DualSense` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
@@ -284,9 +284,9 @@ Many recomp runtimes exit abruptly via `ExitProcess` without closing controllers
 
 ---
 
-## 11. Lessons from the Longshot and totk-pc-recomp ports
+## 11. Lessons from the Longshot, totk-pc-recomp and dkb-pc-recomp ports
 
-I ported the `0.5.0` bridge to Longshot and to totk-pc-recomp (a Switch 1 game). These are the things that cost me time, in the order I would check them.
+I ported the `0.5.0` bridge to Longshot, to totk-pc-recomp (a Switch 1 game) and to dkb-pc-recomp (a Switch 2 game). These are the things that cost me time, in the order I would check them.
 
 1. **Exit.** `ExitProcess` and `TerminateProcess` skip `atexit`, so call `rh_shutdown()` on every exit path while the game is playing. Without it a wired Pro Controller is left in its special mode and the player sees stuck buttons after quitting (the "stuck key after exit" bug). `rh_shutdown()` releases the DualSense speaker and triggers, sends the Steam grip "off" report and closes the HID handles; it is safe to call more than once. Do not call it from a crash handler (it can wait on a lock the crashed thread holds).
    - Closing the pads as well is only safe on the thread that owns them. In totk, `input_shutdown()` calls `rh_shutdown()` and then closes the gamepad, ahead of each of the five `plat_exit(0)` calls.
@@ -304,8 +304,9 @@ I ported the `0.5.0` bridge to Longshot and to totk-pc-recomp (a Switch 1 game).
 8. **Upstream platform checks.** totk's `check_platform.py` flags Win32 calls outside `runtime/platform/`. The bridge is Windows-only. If you want to send it upstream as a PR, move its Win32 calls into the project's platform layer first.
 9. **Packaging.** Build `renhdrum.dll` with `+crt-static` and check `dumpbin /dependents` (no `VCRUNTIME140.dll`; section 7). Never ship game dumps or keys.
 10. **Start from the newest upstream.** Take the latest upstream at the time you work. If upstream changes a lot between your survey and your build (Longshot reworked its menu within one day), survey again instead of applying an old patch blindly. `git apply --3way` needs the reference tag's blobs in the target repository.
+11. **Local co-op: one pad per player.** The bridge sends every vibration to every pad it holds; it does not know players. In dkb-pc-recomp (Donkey Kong Bananza, a second gamepad plays Pauline) I attach only player 1's pad and leave player 2 on the game's own two-motor path. Then check every path that renews player 2's rumble: one of them also refreshed player 1's motors and rumbled the claimed pad twice.
 
-11. **Lessons from the Eden-based Switch 2 and Switch 1 builds (Brontide-NS2, Brontide-oot).** These are C++/Qt emulators, not recomps, but the same mistakes show up:
+12. **Lessons from the Eden-based Switch 2 and Switch 1 builds (Brontide-NS2, Brontide-oot).** These are C++/Qt emulators, not recomps, but the same mistakes show up:
     - **One writer per trigger.** Trigger commands from two threads undo each other. Send them from one thread.
     - **Take the settings from the core.** Build the HD Rumble page from `renhdrum_options` and keep the values in a `renhdrum_store_*` store; do not keep your own copy of each key. A new core row then needs no host rebuild (see [ui-guidelines.md](ui-guidelines.md), `integrations/qt/`).
     - **Call `renhdrum_dualsense_dsp_set_speaker` on Bluetooth too.** The `0x36` report carries the speaker; the core turns it on by itself if you forget, but the host should set it so the switch is honoured in one place.
@@ -314,13 +315,13 @@ I ported the `0.5.0` bridge to Longshot and to totk-pc-recomp (a Switch 1 game).
 
 ### Which controller is wired in where
 
-| Controller | Brontide-NS2 / oot / Brontide | Longshot | totk-pc-recomp |
-|---|:---:|:---:|:---:|
-| Switch Pro Controller | yes | yes | yes |
-| DualSense, wired (motors + speaker + triggers) | yes | yes | yes |
-| DualSense, Bluetooth (rumble + triggers + speaker) | yes | yes | yes |
-| Xbox One S / Series | yes | yes | yes |
-| Steam Controller (2026) | yes | yes | yes |
+| Controller | Brontide-NS2 / oot / Brontide | Longshot | totk-pc-recomp | dkb-pc-recomp |
+|---|:---:|:---:|:---:|:---:|
+| Switch Pro Controller | yes | yes | yes | yes |
+| DualSense, wired (motors + speaker + triggers) | yes | yes | yes | yes |
+| DualSense, Bluetooth (rumble + triggers + speaker) | yes | yes | yes | yes |
+| Xbox One S / Series | yes | yes | yes | yes |
+| Steam Controller (2026) | yes | yes | yes | yes |
 
 Every host here calls the same core functions, so a new core release reaches all of them by replacing `renhdrum.dll` (and the header for the recomp bridge).
 
