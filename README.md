@@ -16,6 +16,8 @@ flowchart LR
 ```
 
 > [!TIP]
+> **New to RenHDrum?** Read the **[Getting Started & FAQ guide](docs/GETTING-STARTED.md)** first.
+>
 > **Just want to play?** Ready-made test builds with RenHDrum already inside, for Switch 1, Switch 2 and recompiled PC ports, are all on the website.
 >
 > **[Get the builds &rarr;](https://ryuhdr.threedola.workers.dev/#download)**
