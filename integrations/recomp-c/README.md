@@ -17,7 +17,7 @@ integrations/recomp-c/
 │   ├── renhdrum_recomp_bridge.c   # Worker threads, dynamic DLL/SDL loader, 4-controller bridge, INI store
 │   └── renhdrum_recomp_bridge.h   # Public C/C++ interface
 ├── reference/
-│   ├── recomp-c-reference.patch   # Reference patch against Hookshot v2.2.0-rc.2 (GPL-3.0)
+│   ├── recomp-c-reference.patch   # Legacy reference patch against Hookshot v2.2.0-rc.2 (GPL-3.0; Hookshot is no longer supported, use longshot-reference.patch for Ocarina of Time)
 │   ├── longshot-reference.patch   # Reference patch against Longshot (GPL-3.0-or-later)
 │   ├── totk-reference.patch       # Reference patch against totk-pc-recomp v0.4.1 (MIT)
 │   └── dkb-reference.patch        # Reference patch against dkb-pc-recomp v0.5.1 (GPL-3.0-or-later)
@@ -143,7 +143,7 @@ if (rh_pad_claimed(i)) {
 ## License
 
 - Bridge implementation (`renhdrum_recomp_bridge.c`, `renhdrum_recomp_bridge.h`): **MIT OR Apache-2.0**.
-- Hookshot reference patch (`reference/recomp-c-reference.patch`): **GPL-3.0**. Credit to **NotRexed** and the Hookshot contributors.
+- Hookshot reference patch (`reference/recomp-c-reference.patch`): **GPL-3.0**. Credit to **NotRexed** and the Hookshot contributors (legacy reference; Hookshot is no longer supported, use Longshot for Ocarina of Time).
 - Longshot reference patch (`reference/longshot-reference.patch`, applies cleanly on upstream `08994a9e`, `main` of 20 Nov 2026; it includes the HD Rumble menu page): **GPL-3.0-or-later**. Credit to **MagicBeanDev** and the Longshot contributors.
 - totk-pc-recomp reference patch (`reference/totk-reference.patch`, applies cleanly on tag `v0.4.1`, `6151ac4`; a Switch 1 game, so it calls `rh_set_switch_gen(1)`): **MIT**, as totk-pc-recomp. Credit to the totk-pc-recomp contributors.
 - dkb-pc-recomp reference patch (`reference/dkb-reference.patch`, applies cleanly on tag `v0.5.1`, `44ba6b1`; a Switch 2 game, so it calls `rh_set_switch_gen(2)`; only player 1's pad goes through the bridge, player 2 keeps the game's two-motor rumble; it also fixes two `.nx` reading bugs of the installer): **GPL-3.0-or-later**, as dkb-pc-recomp. Credit to Lucas-blip-png and the dkb-pc-recomp contributors.

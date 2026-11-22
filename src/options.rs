@@ -173,7 +173,8 @@ impl RenHdcStore {
         c.hd_rumble_experimental_frequency_in_packet = b(I_FREQ_PACKET);
         c.hd_rumble_experimental_frequency_both_bands = b(I_FREQ_BOTH);
         c.hd_rumble_experimental_crisp_notes = b(I_CRISP);
-        c.hd_rumble_usb_interval_ms = USB_INTERVALS_MS[v(I_USB_INTERVAL) as usize];
+        c.hd_rumble_usb_interval_ms = USB_INTERVALS_MS
+            [v(I_USB_INTERVAL).clamp(0, (USB_INTERVALS_MS.len() - 1) as i32) as usize];
         c.hd_rumble_usb_auto_slow = b(I_USB_AUTO_SLOW);
         c.hd_rumble_experimental_bt_after_input = b(I_BT_AFTER_INPUT);
         c.hd_rumble_experimental_bt_crisp_notes = b(I_BT_CRISP);
@@ -187,25 +188,31 @@ pub unsafe extern "C" fn renhdrum_options(
     out_count: *mut i32,
     out_stride: *mut i32,
 ) -> *const RenHdcOption {
-    if !out_count.is_null() {
-        *out_count = OPTIONS.len() as i32;
-    }
-    if !out_stride.is_null() {
-        *out_stride = std::mem::size_of::<RenHdcOption>() as i32;
-    }
-    OPTIONS.as_ptr()
+    crate::ffi::ffi_guard(std::ptr::null(), || {
+        if !out_count.is_null() {
+            *out_count = OPTIONS.len() as i32;
+        }
+        if !out_stride.is_null() {
+            *out_stride = std::mem::size_of::<RenHdcOption>() as i32;
+        }
+        OPTIONS.as_ptr()
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn renhdrum_store_create() -> *mut RenHdcStore {
-    Box::into_raw(Box::new(RenHdcStore::new()))
+    crate::ffi::ffi_guard(std::ptr::null_mut(), || {
+        Box::into_raw(Box::new(RenHdcStore::new()))
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_store_destroy(s: *mut RenHdcStore) {
-    if !s.is_null() {
-        drop(Box::from_raw(s));
-    }
+    crate::ffi::ffi_guard((), || {
+        if !s.is_null() {
+            drop(Box::from_raw(s));
+        }
+    });
 }
 
 #[no_mangle]
@@ -214,16 +221,18 @@ pub unsafe extern "C" fn renhdrum_store_get(
     key: *const c_char,
     out: *mut i32,
 ) -> i32 {
-    if s.is_null() || key.is_null() || out.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    match find(key) {
-        Some(i) => {
-            *out = (*s).values[i];
-            RENHDRUM_OK
+    crate::ffi::ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if s.is_null() || key.is_null() || out.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        None => RENHDRUM_ERR_INVALID_ARG,
-    }
+        match find(key) {
+            Some(i) => {
+                *out = (*s).values[i];
+                RENHDRUM_OK
+            }
+            None => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 #[no_mangle]
@@ -232,25 +241,29 @@ pub unsafe extern "C" fn renhdrum_store_set(
     key: *const c_char,
     value: i32,
 ) -> i32 {
-    if s.is_null() || key.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    match find(key) {
-        Some(i) => {
-            (*s).values[i] = value.clamp(OPTIONS[i].min, OPTIONS[i].max);
-            RENHDRUM_OK
+    crate::ffi::ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if s.is_null() || key.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        None => RENHDRUM_ERR_INVALID_ARG,
-    }
+        match find(key) {
+            Some(i) => {
+                (*s).values[i] = value.clamp(OPTIONS[i].min, OPTIONS[i].max);
+                RENHDRUM_OK
+            }
+            None => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_store_reset(s: *mut RenHdcStore) -> i32 {
-    if s.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    *s = RenHdcStore::new();
-    RENHDRUM_OK
+    crate::ffi::ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if s.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        *s = RenHdcStore::new();
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -258,11 +271,13 @@ pub unsafe extern "C" fn renhdrum_store_is_recommended(
     s: *const RenHdcStore,
     out: *mut bool,
 ) -> i32 {
-    if s.is_null() || out.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    *out = (*s).is_recommended();
-    RENHDRUM_OK
+    crate::ffi::ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if s.is_null() || out.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        *out = (*s).is_recommended();
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -270,11 +285,13 @@ pub unsafe extern "C" fn renhdrum_store_to_config(
     s: *const RenHdcStore,
     out: *mut RenHdcConfig,
 ) -> i32 {
-    if s.is_null() || out.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    *out = (*s).to_config();
-    RENHDRUM_OK
+    crate::ffi::ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if s.is_null() || out.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        *out = (*s).to_config();
+        RENHDRUM_OK
+    })
 }
 
 /// Intensity (`gain`), then a power curve lifting weak rumble (`low_boost`): exponent 1.0 at 0
@@ -285,22 +302,24 @@ pub unsafe extern "C" fn renhdrum_store_shape_amplitude(
     s: *const RenHdcStore,
     amplitude: f32,
 ) -> f32 {
-    if s.is_null() {
-        return amplitude;
-    }
-    let gain = (*s).value("gain") as f32;
-    let boost = (*s).value("low_boost");
-    let x = (amplitude * gain / 100.0).min(1.0);
-    if x <= 0.0 || boost <= 0 {
-        return x;
-    }
-    let exponent = 1.0 - 0.006 * boost as f32;
-    const KNEE: f32 = 0.02;
-    if x < KNEE {
-        let r = x / KNEE;
-        return KNEE.powf(exponent) * r * r;
-    }
-    x.powf(exponent)
+    crate::ffi::ffi_guard(amplitude, || {
+        if s.is_null() {
+            return amplitude;
+        }
+        let gain = (*s).value("gain") as f32;
+        let boost = (*s).value("low_boost");
+        let x = (amplitude * gain / 100.0).min(1.0);
+        if x <= 0.0 || boost <= 0 {
+            return x;
+        }
+        let exponent = 1.0 - 0.006 * boost as f32;
+        const KNEE: f32 = 0.02;
+        if x < KNEE {
+            let r = x / KNEE;
+            return KNEE.powf(exponent) * r * r;
+        }
+        x.powf(exponent)
+    })
 }
 
 #[cfg(test)]
@@ -478,5 +497,17 @@ mod tests {
         let s = renhdrum_store_create();
         assert_eq!(unsafe { renhdrum_store_shape_amplitude(s, 0.37) }, 0.37);
         unsafe { renhdrum_store_destroy(s) };
+    }
+
+    #[test]
+    fn to_config_clamps_out_of_range_usb_interval() {
+        let s = renhdrum_store_create();
+        unsafe {
+            (*s).values[I_USB_INTERVAL] = -5;
+            assert_eq!((*s).to_config().hd_rumble_usb_interval_ms, 10);
+            (*s).values[I_USB_INTERVAL] = 99;
+            assert_eq!((*s).to_config().hd_rumble_usb_interval_ms, 30);
+            renhdrum_store_destroy(s);
+        }
     }
 }

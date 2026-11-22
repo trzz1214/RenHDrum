@@ -52,7 +52,7 @@ DualSense over Bluetooth still gets rumble, speaker and triggers, with nothing e
 <img src="docs/assets/hd-rumble-panel-light.png" alt="The HD Rumble settings panel, light theme" width="48%">
 </p>
 
-Where it runs today: Brontide-NS2, Brontide-oot, Brontide (Switch 1), totk-pc-recomp and Longshot. The builds are on the [website](https://ryuhdr.threedola.workers.dev/#download).
+Where it runs today: Brontide-NS2, Brontide-oot, Brontide (Switch 1), Longshot, totk-pc-recomp and dkb-pc-recomp. The builds are on the [website](https://ryuhdr.threedola.workers.dev/#download).
 
 Switch 2 Pro Controller, Steam Controller (2015) and Steam Deck are still in research, so please hold issues for them for now.
 

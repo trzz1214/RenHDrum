@@ -29,6 +29,11 @@ pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
 pub const RENHDRUM_ERR_INVALID_ARG: i32 = -2;
 pub const RENHDRUM_ERR_DECODE_FAILED: i32 = -3;
 
+#[inline]
+pub(crate) fn ffi_guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(fallback)
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenHdcSettings {
@@ -243,12 +248,14 @@ pub extern "C" fn renhdrum_version() -> u32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_settings_default(out_settings: *mut RenHdcSettings) -> i32 {
-    if out_settings.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let defaults = HdRumbleSettings::default_settings();
-    *out_settings = RenHdcSettings::from(&defaults);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_settings.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let defaults = HdRumbleSettings::default_settings();
+        *out_settings = RenHdcSettings::from(&defaults);
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -256,20 +263,22 @@ pub unsafe extern "C" fn renhdrum_settings_resolve(
     config: *const RenHdcConfig,
     out_settings: *mut RenHdcSettings,
 ) -> i32 {
-    if out_settings.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let app = crate::ipc::app_config();
-    let c_opt = if let Some(ref a) = app {
-        Some(RumbleConfigController::from(a))
-    } else if !config.is_null() {
-        Some(RumbleConfigController::from(&*config))
-    } else {
-        None
-    };
-    let resolved = HdRumbleSettings::resolve(c_opt.as_ref());
-    *out_settings = RenHdcSettings::from(&resolved);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_settings.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let app = crate::ipc::app_config();
+        let c_opt = if let Some(ref a) = app {
+            Some(RumbleConfigController::from(a))
+        } else if !config.is_null() {
+            Some(RumbleConfigController::from(&*config))
+        } else {
+            None
+        };
+        let resolved = HdRumbleSettings::resolve(c_opt.as_ref());
+        *out_settings = RenHdcSettings::from(&resolved);
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -277,34 +286,38 @@ pub unsafe extern "C" fn renhdrum_settings_resolve_pure(
     config: *const RenHdcConfig,
     out_settings: *mut RenHdcSettings,
 ) -> i32 {
-    if out_settings.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let c_opt = if config.is_null() {
-        None
-    } else {
-        Some(RumbleConfigController::from(&*config))
-    };
-    let resolved = HdRumbleSettings::resolve_with_dir(c_opt.as_ref(), None, false);
-    *out_settings = RenHdcSettings::from(&resolved);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_settings.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let c_opt = if config.is_null() {
+            None
+        } else {
+            Some(RumbleConfigController::from(&*config))
+        };
+        let resolved = HdRumbleSettings::resolve_with_dir(c_opt.as_ref(), None, false);
+        *out_settings = RenHdcSettings::from(&resolved);
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_preset_apply(kind: i32, config: *mut RenHdcConfig) -> i32 {
-    if config.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let preset_kind = match kind {
-        0 => HdRumblePresetKind::Standard,
-        1 => HdRumblePresetKind::Crisp,
-        2 => HdRumblePresetKind::Custom,
-        _ => return RENHDRUM_ERR_INVALID_ARG,
-    };
-    let mut controller = RumbleConfigController::from(&*config);
-    HdRumblePreset::apply(preset_kind, &mut controller);
-    *config = RenHdcConfig::from(&controller);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if config.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let preset_kind = match kind {
+            0 => HdRumblePresetKind::Standard,
+            1 => HdRumblePresetKind::Crisp,
+            2 => HdRumblePresetKind::Custom,
+            _ => return RENHDRUM_ERR_INVALID_ARG,
+        };
+        let mut controller = RumbleConfigController::from(&*config);
+        HdRumblePreset::apply(preset_kind, &mut controller);
+        *config = RenHdcConfig::from(&controller);
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -312,13 +325,15 @@ pub unsafe extern "C" fn renhdrum_preset_detect(
     config: *const RenHdcConfig,
     out_kind: *mut i32,
 ) -> i32 {
-    if config.is_null() || out_kind.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let controller = RumbleConfigController::from(&*config);
-    let detected = HdRumblePreset::detect(&controller);
-    *out_kind = detected as i32;
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if config.is_null() || out_kind.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let controller = RumbleConfigController::from(&*config);
+        let detected = HdRumblePreset::detect(&controller);
+        *out_kind = detected as i32;
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -329,14 +344,16 @@ pub unsafe extern "C" fn renhdrum_encode_standard_side(
     high_amp: f32,
     out_bytes4: *mut u8,
 ) -> i32 {
-    if out_bytes4.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let dst = slice::from_raw_parts_mut(out_bytes4, 4);
-    let mut buf = [0u8; 4];
-    hd_encode_side(&mut buf, low_amp, low_freq, high_amp, high_freq);
-    dst.copy_from_slice(&buf);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_bytes4.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let dst = slice::from_raw_parts_mut(out_bytes4, 4);
+        let mut buf = [0u8; 4];
+        hd_encode_side(&mut buf, low_amp, low_freq, high_amp, high_freq);
+        dst.copy_from_slice(&buf);
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -351,50 +368,54 @@ pub unsafe extern "C" fn renhdrum_encode_standard_packet(
     right_ha: f32,
     out_bytes8: *mut u8,
 ) -> i32 {
-    if out_bytes8.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let dst = slice::from_raw_parts_mut(out_bytes8, 8);
-    let mut buf = [0u8; 8];
-    hd_encode_packet(
-        left_lf, left_la, left_hf, left_ha, right_lf, right_la, right_hf, right_ha, &mut buf,
-    );
-    dst.copy_from_slice(&buf);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_bytes8.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let dst = slice::from_raw_parts_mut(out_bytes8, 8);
+        let mut buf = [0u8; 8];
+        hd_encode_packet(
+            left_lf, left_la, left_hf, left_ha, right_lf, right_la, right_hf, right_ha, &mut buf,
+        );
+        dst.copy_from_slice(&buf);
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_amfm_game_amplitude(code: i32, out_amp: *mut f32) -> i32 {
-    if out_amp.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    match HdAmFmEncoding::game_amplitude(code) {
-        Ok(amp) => {
-            *out_amp = amp;
-            RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_amp.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        Err(_) => RENHDRUM_ERR_INVALID_ARG,
-    }
+        match HdAmFmEncoding::game_amplitude(code) {
+            Ok(amp) => {
+                *out_amp = amp;
+                RENHDRUM_OK
+            }
+            Err(_) => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn renhdrum_amfm_code(game_amp: f32) -> i32 {
-    HdAmFmEncoding::code(game_amp)
+    ffi_guard(0, || HdAmFmEncoding::code(game_amp))
 }
 
 #[no_mangle]
 pub extern "C" fn renhdrum_amfm_freq7(high: i32, freq: f32) -> i32 {
-    HdAmFmEncoding::freq7(high != 0, freq)
+    ffi_guard(0, || HdAmFmEncoding::freq7(high != 0, freq))
 }
 
 #[no_mangle]
 pub extern "C" fn renhdrum_amfm_amp7(game_amplitude: f32) -> i32 {
-    HdAmFmEncoding::amp7(game_amplitude)
+    ffi_guard(0, || HdAmFmEncoding::amp7(game_amplitude))
 }
 
 #[no_mangle]
 pub extern "C" fn renhdrum_amfm_preset_code(high: i32, freq7: i32) -> i32 {
-    HdAmFmEncoding::preset_code(high != 0, freq7)
+    ffi_guard(0, || HdAmFmEncoding::preset_code(high != 0, freq7))
 }
 
 #[no_mangle]
@@ -407,16 +428,18 @@ pub unsafe extern "C" fn renhdrum_amfm_pack_three(
     hi2: i32,
     out_val: *mut u32,
 ) -> i32 {
-    if out_val.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    match HdAmFmEncoding::pack_three(lo0, hi0, lo1, hi1, lo2, hi2) {
-        Ok(val) => {
-            *out_val = val;
-            RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_val.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        Err(_) => RENHDRUM_ERR_INVALID_ARG,
-    }
+        match HdAmFmEncoding::pack_three(lo0, hi0, lo1, hi1, lo2, hi2) {
+            Ok(val) => {
+                *out_val = val;
+                RENHDRUM_OK
+            }
+            Err(_) => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 #[no_mangle]
@@ -430,16 +453,18 @@ pub unsafe extern "C" fn renhdrum_amfm_pack_three_7bit(
     hi2: i32,
     out_val: *mut u32,
 ) -> i32 {
-    if out_val.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    match HdAmFmEncoding::pack_three_7bit(high != 0, is_fm != 0, value7, lo1, hi1, lo2, hi2) {
-        Ok(val) => {
-            *out_val = val;
-            RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_val.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        Err(_) => RENHDRUM_ERR_INVALID_ARG,
-    }
+        match HdAmFmEncoding::pack_three_7bit(high != 0, is_fm != 0, value7, lo1, hi1, lo2, hi2) {
+            Ok(val) => {
+                *out_val = val;
+                RENHDRUM_OK
+            }
+            Err(_) => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 #[no_mangle]
@@ -452,16 +477,18 @@ pub unsafe extern "C" fn renhdrum_amfm_pack_two_14bit(
     hi1: i32,
     out_val: *mut u32,
 ) -> i32 {
-    if out_val.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    match HdAmFmEncoding::pack_two_14bit(high != 0, freq7, amp7, other0, lo1, hi1) {
-        Ok(val) => {
-            *out_val = val;
-            RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_val.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        Err(_) => RENHDRUM_ERR_INVALID_ARG,
-    }
+        match HdAmFmEncoding::pack_two_14bit(high != 0, freq7, amp7, other0, lo1, hi1) {
+            Ok(val) => {
+                *out_val = val;
+                RENHDRUM_OK
+            }
+            Err(_) => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 #[no_mangle]
@@ -474,16 +501,25 @@ pub unsafe extern "C" fn renhdrum_amfm_pack_two_14bit_level(
     hi1: i32,
     out_val: *mut u32,
 ) -> i32 {
-    if out_val.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    match HdAmFmEncoding::pack_two_14bit_level(high != 0, freq7, game_amplitude, other0, lo1, hi1) {
-        Ok(val) => {
-            *out_val = val;
-            RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_val.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        Err(_) => RENHDRUM_ERR_INVALID_ARG,
-    }
+        match HdAmFmEncoding::pack_two_14bit_level(
+            high != 0,
+            freq7,
+            game_amplitude,
+            other0,
+            lo1,
+            hi1,
+        ) {
+            Ok(val) => {
+                *out_val = val;
+                RENHDRUM_OK
+            }
+            Err(_) => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 #[no_mangle]
@@ -497,47 +533,51 @@ pub unsafe extern "C" fn renhdrum_amfm_pack_two_14bit_reach(
     hi1: i32,
     out_val: *mut u32,
 ) -> i32 {
-    if out_val.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    match HdAmFmEncoding::pack_two_14bit_reach(
-        high != 0,
-        freq7,
-        game_amplitude,
-        reach_code,
-        other_amplitude,
-        lo1,
-        hi1,
-    ) {
-        Ok(val) => {
-            *out_val = val;
-            RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_val.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        Err(_) => RENHDRUM_ERR_INVALID_ARG,
-    }
+        match HdAmFmEncoding::pack_two_14bit_reach(
+            high != 0,
+            freq7,
+            game_amplitude,
+            reach_code,
+            other_amplitude,
+            lo1,
+            hi1,
+        ) {
+            Ok(val) => {
+                *out_val = val;
+                RENHDRUM_OK
+            }
+            Err(_) => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_amfm_is_three_sample_side(in_bytes4: *const u8) -> i32 {
-    if in_bytes4.is_null() {
-        return 0;
-    }
-    let slice = slice::from_raw_parts(in_bytes4, 4);
-    if HdAmFmEncoding::is_three_sample_side(slice) {
-        1
-    } else {
-        0
-    }
+    ffi_guard(0, || {
+        if in_bytes4.is_null() {
+            return 0;
+        }
+        let slice = slice::from_raw_parts(in_bytes4, 4);
+        if HdAmFmEncoding::is_three_sample_side(slice) {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn renhdrum_click_amp4(amplitude: f32) -> i32 {
-    HdClickEncoding::amp4(amplitude)
+    ffi_guard(0, || HdClickEncoding::amp4(amplitude))
 }
 
 #[no_mangle]
 pub extern "C" fn renhdrum_click_amp7(amplitude: f32) -> i32 {
-    HdClickEncoding::amp7(amplitude)
+    ffi_guard(0, || HdClickEncoding::amp7(amplitude))
 }
 
 #[no_mangle]
@@ -546,16 +586,18 @@ pub unsafe extern "C" fn renhdrum_click_build_packet(
     amp_r: f32,
     out_packet10: *mut u8,
 ) -> i32 {
-    if out_packet10.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let packet = slice::from_raw_parts_mut(out_packet10, 10);
-    let any = HdClickEncoding::build_click_packet(packet, amp_l, amp_r);
-    if any {
-        1
-    } else {
-        0
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_packet10.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let packet = slice::from_raw_parts_mut(out_packet10, 10);
+        let any = HdClickEncoding::build_click_packet(packet, amp_l, amp_r);
+        if any {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 #[no_mangle]
@@ -563,31 +605,33 @@ pub unsafe extern "C" fn renhdrum_click_encode_side(
     side: *const RenHdClickSide,
     out_bytes4: *mut u8,
 ) -> i32 {
-    if side.is_null() || out_bytes4.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let s = &*side;
-    let click_side = HdClickSide {
-        kind: if s.kind == 1 {
-            HdClickKind::SingleWaveResonance
-        } else {
-            HdClickKind::DualResonance3Pulse
-        },
-        res_high_code: s.res_high_code,
-        res_low_code: s.res_low_code,
-        pulse1_code: s.pulse1_code,
-        pulse2_code: s.pulse2_code,
-        res_high_off: s.res_high_off,
-        res_low_off: s.res_low_off,
-        pulse1_off: s.pulse1_off,
-        pulse2_off: s.pulse2_off,
-        amp7: s.amp7,
-        freq7: s.freq7,
-        freq_is_high: s.freq_is_high,
-    };
-    let dst = slice::from_raw_parts_mut(out_bytes4, 4);
-    HdClickEncoding::hd_encode_side_click(dst, &click_side);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if side.is_null() || out_bytes4.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let s = &*side;
+        let click_side = HdClickSide {
+            kind: if s.kind == 1 {
+                HdClickKind::SingleWaveResonance
+            } else {
+                HdClickKind::DualResonance3Pulse
+            },
+            res_high_code: s.res_high_code,
+            res_low_code: s.res_low_code,
+            pulse1_code: s.pulse1_code,
+            pulse2_code: s.pulse2_code,
+            res_high_off: s.res_high_off,
+            res_low_off: s.res_low_off,
+            pulse1_off: s.pulse1_off,
+            pulse2_off: s.pulse2_off,
+            amp7: s.amp7,
+            freq7: s.freq7,
+            freq_is_high: s.freq_is_high,
+        };
+        let dst = slice::from_raw_parts_mut(out_bytes4, 4);
+        HdClickEncoding::hd_encode_side_click(dst, &click_side);
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -595,64 +639,70 @@ pub unsafe extern "C" fn renhdrum_click_decode_side(
     in_bytes4: *const u8,
     out_side: *mut RenHdClickSide,
 ) -> i32 {
-    if in_bytes4.is_null() || out_side.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let slice = slice::from_raw_parts(in_bytes4, 4);
-    match HdClickEncoding::try_decode_side_click(slice) {
-        Some(s) => {
-            *out_side = RenHdClickSide {
-                kind: match s.kind {
-                    HdClickKind::DualResonance3Pulse => 0,
-                    HdClickKind::SingleWaveResonance => 1,
-                },
-                res_high_code: s.res_high_code,
-                res_low_code: s.res_low_code,
-                pulse1_code: s.pulse1_code,
-                pulse2_code: s.pulse2_code,
-                res_high_off: s.res_high_off,
-                res_low_off: s.res_low_off,
-                pulse1_off: s.pulse1_off,
-                pulse2_off: s.pulse2_off,
-                amp7: s.amp7,
-                freq7: s.freq7,
-                freq_is_high: s.freq_is_high,
-            };
-            RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if in_bytes4.is_null() || out_side.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        None => RENHDRUM_ERR_DECODE_FAILED,
-    }
+        let slice = slice::from_raw_parts(in_bytes4, 4);
+        match HdClickEncoding::try_decode_side_click(slice) {
+            Some(s) => {
+                *out_side = RenHdClickSide {
+                    kind: match s.kind {
+                        HdClickKind::DualResonance3Pulse => 0,
+                        HdClickKind::SingleWaveResonance => 1,
+                    },
+                    res_high_code: s.res_high_code,
+                    res_low_code: s.res_low_code,
+                    pulse1_code: s.pulse1_code,
+                    pulse2_code: s.pulse2_code,
+                    res_high_off: s.res_high_off,
+                    res_low_off: s.res_low_off,
+                    pulse1_off: s.pulse1_off,
+                    pulse2_off: s.pulse2_off,
+                    amp7: s.amp7,
+                    freq7: s.freq7,
+                    freq_is_high: s.freq_is_high,
+                };
+                RENHDRUM_OK
+            }
+            None => RENHDRUM_ERR_DECODE_FAILED,
+        }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_click_is_dual_wave_side(in_bytes4: *const u8) -> i32 {
-    if in_bytes4.is_null() {
-        return 0;
-    }
-    let slice = slice::from_raw_parts(in_bytes4, 4);
-    if HdClickEncoding::is_dual_wave_side(slice) {
-        1
-    } else {
-        0
-    }
+    ffi_guard(0, || {
+        if in_bytes4.is_null() {
+            return 0;
+        }
+        let slice = slice::from_raw_parts(in_bytes4, 4);
+        if HdClickEncoding::is_dual_wave_side(slice) {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_click_is_click_packet(in_bytes10: *const u8) -> i32 {
-    if in_bytes10.is_null() {
-        return 0;
-    }
-    let slice = slice::from_raw_parts(in_bytes10, 10);
-    if HdClickEncoding::is_click_packet(slice) {
-        1
-    } else {
-        0
-    }
+    ffi_guard(0, || {
+        if in_bytes10.is_null() {
+            return 0;
+        }
+        let slice = slice::from_raw_parts(in_bytes10, 10);
+        if HdClickEncoding::is_click_packet(slice) {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn renhdrum_crisp_slot_gain(slots_since_onset: i32) -> f32 {
-    HdCrispNotes::slot_gain(slots_since_onset)
+    ffi_guard(1.0, || HdCrispNotes::slot_gain(slots_since_onset))
 }
 
 #[no_mangle]
@@ -662,21 +712,24 @@ pub unsafe extern "C" fn renhdrum_crisp_apply(
     out_sample: *mut RenHdSideSample,
     out_capped: *mut i32,
 ) -> i32 {
-    if s.is_null() || out_sample.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let side_sample = HdSideSample::new((*s).amp_low, (*s).freq_low, (*s).amp_high, (*s).freq_high);
-    let (shaped, capped) = HdCrispNotes::apply(&side_sample, gain);
-    *out_sample = RenHdSideSample {
-        amp_low: shaped.amp_low,
-        freq_low: shaped.freq_low,
-        amp_high: shaped.amp_high,
-        freq_high: shaped.freq_high,
-    };
-    if !out_capped.is_null() {
-        *out_capped = if capped { 1 } else { 0 };
-    }
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if s.is_null() || out_sample.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let side_sample =
+            HdSideSample::new((*s).amp_low, (*s).freq_low, (*s).amp_high, (*s).freq_high);
+        let (shaped, capped) = HdCrispNotes::apply(&side_sample, gain);
+        *out_sample = RenHdSideSample {
+            amp_low: shaped.amp_low,
+            freq_low: shaped.freq_low,
+            amp_high: shaped.amp_high,
+            freq_high: shaped.freq_high,
+        };
+        if !out_capped.is_null() {
+            *out_capped = if capped { 1 } else { 0 };
+        }
+        RENHDRUM_OK
+    })
 }
 
 #[no_mangle]
@@ -687,24 +740,28 @@ pub unsafe extern "C" fn renhdrum_crisp_shape_slot(
     out_onset: *mut i32,
     out_capped: *mut i32,
 ) -> i32 {
-    if slots_since_onset.is_null() || s.is_null() || out_sample.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let side_sample = HdSideSample::new((*s).amp_low, (*s).freq_low, (*s).amp_high, (*s).freq_high);
-    let (shaped, onset, capped) = HdCrispNotes::shape_slot(&mut *slots_since_onset, &side_sample);
-    *out_sample = RenHdSideSample {
-        amp_low: shaped.amp_low,
-        freq_low: shaped.freq_low,
-        amp_high: shaped.amp_high,
-        freq_high: shaped.freq_high,
-    };
-    if !out_onset.is_null() {
-        *out_onset = if onset { 1 } else { 0 };
-    }
-    if !out_capped.is_null() {
-        *out_capped = if capped { 1 } else { 0 };
-    }
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if slots_since_onset.is_null() || s.is_null() || out_sample.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let side_sample =
+            HdSideSample::new((*s).amp_low, (*s).freq_low, (*s).amp_high, (*s).freq_high);
+        let (shaped, onset, capped) =
+            HdCrispNotes::shape_slot(&mut *slots_since_onset, &side_sample);
+        *out_sample = RenHdSideSample {
+            amp_low: shaped.amp_low,
+            freq_low: shaped.freq_low,
+            amp_high: shaped.amp_high,
+            freq_high: shaped.freq_high,
+        };
+        if !out_onset.is_null() {
+            *out_onset = if onset { 1 } else { 0 };
+        }
+        if !out_capped.is_null() {
+            *out_capped = if capped { 1 } else { 0 };
+        }
+        RENHDRUM_OK
+    })
 }
 
 pub struct RenHdcEngine {
@@ -768,19 +825,23 @@ pub extern "C" fn renhdrum_engine_create(
     is_bluetooth: bool,
     is_pro_controller: bool,
 ) -> *mut RenHdcEngine {
-    crate::ipc::note_controller(is_bluetooth, is_pro_controller);
-    Box::into_raw(Box::new(RenHdcEngine::new_in(
-        is_bluetooth,
-        is_pro_controller,
-        None,
-    )))
+    ffi_guard(std::ptr::null_mut(), || {
+        crate::ipc::note_controller(is_bluetooth, is_pro_controller);
+        Box::into_raw(Box::new(RenHdcEngine::new_in(
+            is_bluetooth,
+            is_pro_controller,
+            None,
+        )))
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_engine_destroy(engine: *mut RenHdcEngine) {
-    if !engine.is_null() {
-        drop(Box::from_raw(engine));
-    }
+    ffi_guard((), || {
+        if !engine.is_null() {
+            drop(Box::from_raw(engine));
+        }
+    });
 }
 
 #[no_mangle]
@@ -788,16 +849,18 @@ pub unsafe extern "C" fn renhdrum_engine_apply_settings(
     engine: *mut RenHdcEngine,
     settings: *const RenHdcSettings,
 ) -> i32 {
-    if engine.is_null() || settings.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let s: HdRumbleSettings = (&*settings).into();
-    if let Ok(mut guard) = (*engine).inner.lock() {
-        guard.apply_settings(&s);
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if engine.is_null() || settings.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let s: HdRumbleSettings = (&*settings).into();
+        if let Ok(mut guard) = (*engine).inner.lock() {
+            guard.apply_settings(&s);
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 #[no_mangle]
@@ -813,63 +876,65 @@ pub unsafe extern "C" fn renhdrum_engine_push_sample(
     mut right_ah: f32,
     mut right_fh: f32,
 ) -> i32 {
-    if engine.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    if !left_al.is_finite() {
-        left_al = 0.0;
-    }
-    if !left_ah.is_finite() {
-        left_ah = 0.0;
-    }
-    if !left_fl.is_finite() {
-        left_fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
-    }
-    if !left_fh.is_finite() {
-        left_fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
-    }
-    if !right_al.is_finite() {
-        right_al = 0.0;
-    }
-    if !right_ah.is_finite() {
-        right_ah = 0.0;
-    }
-    if !right_fl.is_finite() {
-        right_fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
-    }
-    if !right_fh.is_finite() {
-        right_fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
-    }
-    let u_now = now_us.max(0) as u64;
-    let (raw_l, raw_lh, raw_r, raw_rh) = (left_al, left_ah, right_al, right_ah);
-    if let Ok(mut b) = (*engine).nx2_boost_left.lock() {
-        let (al, ah) = b.apply_pro_nx2(left_al, left_fl, left_ah, left_fh, u_now);
-        left_al = al;
-        left_ah = ah;
-    }
-    if let Ok(mut b) = (*engine).nx2_boost_right.lock() {
-        let (al, ah) = b.apply_pro_nx2(right_al, right_fl, right_ah, right_fh, u_now);
-        right_al = al;
-        right_ah = ah;
-    }
-    if let Ok(mut guard) = (*engine).inner.lock() {
-        guard.push_sample(
-            now_us, left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
-        );
-        if let Some(trace) = &(*engine).trace {
-            if let Ok(mut t) = trace.lock() {
-                t.log_sample_raw(
-                    now_us, false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh,
-                );
-                t.log_sample_raw(
-                    now_us, true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh,
-                );
-            }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if engine.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+        if !left_al.is_finite() {
+            left_al = 0.0;
+        }
+        if !left_ah.is_finite() {
+            left_ah = 0.0;
+        }
+        if !left_fl.is_finite() {
+            left_fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
+        }
+        if !left_fh.is_finite() {
+            left_fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
+        }
+        if !right_al.is_finite() {
+            right_al = 0.0;
+        }
+        if !right_ah.is_finite() {
+            right_ah = 0.0;
+        }
+        if !right_fl.is_finite() {
+            right_fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
+        }
+        if !right_fh.is_finite() {
+            right_fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
+        }
+        let u_now = now_us.max(0) as u64;
+        let (raw_l, raw_lh, raw_r, raw_rh) = (left_al, left_ah, right_al, right_ah);
+        if let Ok(mut b) = (*engine).nx2_boost_left.lock() {
+            let (al, ah) = b.apply_pro_nx2(left_al, left_fl, left_ah, left_fh, u_now);
+            left_al = al;
+            left_ah = ah;
+        }
+        if let Ok(mut b) = (*engine).nx2_boost_right.lock() {
+            let (al, ah) = b.apply_pro_nx2(right_al, right_fl, right_ah, right_fh, u_now);
+            right_al = al;
+            right_ah = ah;
+        }
+        if let Ok(mut guard) = (*engine).inner.lock() {
+            guard.push_sample(
+                now_us, left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
+            );
+            if let Some(trace) = &(*engine).trace {
+                if let Ok(mut t) = trace.lock() {
+                    t.log_sample_raw(
+                        now_us, false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh,
+                    );
+                    t.log_sample_raw(
+                        now_us, true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh,
+                    );
+                }
+            }
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 #[no_mangle]
@@ -882,45 +947,47 @@ pub unsafe extern "C" fn renhdrum_engine_push_half_sample(
     mut ah: f32,
     mut fh: f32,
 ) -> i32 {
-    if engine.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    if !al.is_finite() {
-        al = 0.0;
-    }
-    if !ah.is_finite() {
-        ah = 0.0;
-    }
-    if !fl.is_finite() {
-        fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
-    }
-    if !fh.is_finite() {
-        fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
-    }
-    let u_now = now_us.max(0) as u64;
-    let (raw_al, raw_ah) = (al, ah);
-    let boost_lock = if is_right {
-        (*engine).nx2_boost_right.lock()
-    } else {
-        (*engine).nx2_boost_left.lock()
-    };
-    if let Ok(mut b) = boost_lock {
-        let (out_al, out_ah) = b.apply_pro_nx2(al, fl, ah, fh, u_now);
-        al = out_al;
-        ah = out_ah;
-    }
-    if let Ok(mut guard) = (*engine).inner.lock() {
-        guard.push_half_sample(now_us, is_right, al, fl, ah, fh);
-        if let Some(trace) = &(*engine).trace {
-            if let Ok(mut t) = trace.lock() {
-                t.log_sample_raw(now_us, is_right, al, fl, ah, fh, raw_al, raw_ah);
-            }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if engine.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        crate::ipc::note_sample(u_now, al, fl, ah, fh);
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+        if !al.is_finite() {
+            al = 0.0;
+        }
+        if !ah.is_finite() {
+            ah = 0.0;
+        }
+        if !fl.is_finite() {
+            fl = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_LOW;
+        }
+        if !fh.is_finite() {
+            fh = crate::planner::amfm_planner::HdAmFmPlanner::DEFAULT_FREQ_HIGH;
+        }
+        let u_now = now_us.max(0) as u64;
+        let (raw_al, raw_ah) = (al, ah);
+        let boost_lock = if is_right {
+            (*engine).nx2_boost_right.lock()
+        } else {
+            (*engine).nx2_boost_left.lock()
+        };
+        if let Ok(mut b) = boost_lock {
+            let (out_al, out_ah) = b.apply_pro_nx2(al, fl, ah, fh, u_now);
+            al = out_al;
+            ah = out_ah;
+        }
+        if let Ok(mut guard) = (*engine).inner.lock() {
+            guard.push_half_sample(now_us, is_right, al, fl, ah, fh);
+            if let Some(trace) = &(*engine).trace {
+                if let Ok(mut t) = trace.lock() {
+                    t.log_sample_raw(now_us, is_right, al, fl, ah, fh, raw_al, raw_ah);
+                }
+            }
+            crate::ipc::note_sample(u_now, al, fl, ah, fh);
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 #[no_mangle]
@@ -929,26 +996,28 @@ pub unsafe extern "C" fn renhdrum_engine_tick(
     now_us: i64,
     out_packet10: *mut u8,
 ) -> i32 {
-    if engine.is_null() || out_packet10.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    if let Ok(mut guard) = (*engine).inner.lock() {
-        let mut packet = [0u8; 10];
-        if guard.tick(now_us, &mut packet) {
-            slice::from_raw_parts_mut(out_packet10, 10).copy_from_slice(&packet);
-            crate::ipc::note_packet(&packet);
-            if let Some(trace) = &(*engine).trace {
-                if let Ok(mut t) = trace.lock() {
-                    t.log_packet(now_us, &packet);
+    ffi_guard(0, || {
+        if engine.is_null() || out_packet10.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        if let Ok(mut guard) = (*engine).inner.lock() {
+            let mut packet = [0u8; 10];
+            if guard.tick(now_us, &mut packet) {
+                slice::from_raw_parts_mut(out_packet10, 10).copy_from_slice(&packet);
+                crate::ipc::note_packet(&packet);
+                if let Some(trace) = &(*engine).trace {
+                    if let Ok(mut t) = trace.lock() {
+                        t.log_packet(now_us, &packet);
+                    }
                 }
+                1
+            } else {
+                0
             }
-            1
         } else {
             0
         }
-    } else {
-        0
-    }
+    })
 }
 
 /// volume_percent (clamped 10..100) is the final output gain; the core already applies it.
@@ -960,28 +1029,30 @@ pub extern "C" fn renhdrum_dualsense_dsp_create(
     volume_percent: i32,
     crisp_notes: bool,
 ) -> *mut RenHdcDualSenseDsp {
-    let (vol, crisp, bt_crisp) = if let Some(app) = crate::ipc::app_config() {
-        (
-            app.dualsense_haptics_volume,
-            app.dualsense_crisp_notes,
-            app.dualsense_bt_crisp_notes,
-        )
-    } else {
-        (
-            volume_percent,
-            crisp_notes,
-            RumbleConfigController::default().dualsense_bt_crisp_notes,
-        )
-    };
-    Box::into_raw(Box::new(RenHdcDualSenseDsp {
-        inner: std::sync::Mutex::new(DualSenseHapticsDsp::new(vol, crisp)),
-        bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
-        bt_crisp_notes: bt_crisp,
-        speaker_explicit: std::sync::atomic::AtomicBool::new(false),
-        bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
-        valve_grip: std::sync::Mutex::new(ValveGripState::default()),
-        trace: crate::trace::RumbleTrace::open_in("dualsense", None).map(std::sync::Mutex::new),
-    }))
+    ffi_guard(std::ptr::null_mut(), || {
+        let (vol, crisp, bt_crisp) = if let Some(app) = crate::ipc::app_config() {
+            (
+                app.dualsense_haptics_volume,
+                app.dualsense_crisp_notes,
+                app.dualsense_bt_crisp_notes,
+            )
+        } else {
+            (
+                volume_percent,
+                crisp_notes,
+                RumbleConfigController::default().dualsense_bt_crisp_notes,
+            )
+        };
+        Box::into_raw(Box::new(RenHdcDualSenseDsp {
+            inner: std::sync::Mutex::new(DualSenseHapticsDsp::new(vol, crisp)),
+            bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
+            bt_crisp_notes: bt_crisp,
+            speaker_explicit: std::sync::atomic::AtomicBool::new(false),
+            bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+            valve_grip: std::sync::Mutex::new(ValveGripState::default()),
+            trace: crate::trace::RumbleTrace::open_in("dualsense", None).map(std::sync::Mutex::new),
+        }))
+    })
 }
 
 /// Experimental (Steam Controller 2026 grips, built from iafx's measurements in RenHDrum#5).
@@ -1005,27 +1076,32 @@ pub extern "C" fn renhdrum_valve_grip_dsp_create_ex(
     crisp_notes: bool,
     drift_compensation: bool,
 ) -> *mut RenHdcDualSenseDsp {
-    let (vol, crisp) = if let Some(app) = crate::ipc::app_config() {
-        (app.dualsense_haptics_volume, app.dualsense_crisp_notes)
-    } else {
-        (volume_percent, crisp_notes)
-    };
-    Box::into_raw(Box::new(RenHdcDualSenseDsp {
-        inner: std::sync::Mutex::new(DualSenseHapticsDsp::new_grip(vol, crisp)),
-        bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
-        bt_crisp_notes: crisp,
-        speaker_explicit: std::sync::atomic::AtomicBool::new(false),
-        bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
-        valve_grip: std::sync::Mutex::new(ValveGripState::new(drift_compensation)),
-        trace: crate::trace::RumbleTrace::open_in("valve-grip", None).map(std::sync::Mutex::new),
-    }))
+    ffi_guard(std::ptr::null_mut(), || {
+        let (vol, crisp) = if let Some(app) = crate::ipc::app_config() {
+            (app.dualsense_haptics_volume, app.dualsense_crisp_notes)
+        } else {
+            (volume_percent, crisp_notes)
+        };
+        Box::into_raw(Box::new(RenHdcDualSenseDsp {
+            inner: std::sync::Mutex::new(DualSenseHapticsDsp::new_grip(vol, crisp)),
+            bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
+            bt_crisp_notes: crisp,
+            speaker_explicit: std::sync::atomic::AtomicBool::new(false),
+            bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+            valve_grip: std::sync::Mutex::new(ValveGripState::new(drift_compensation)),
+            trace: crate::trace::RumbleTrace::open_in("valve-grip", None)
+                .map(std::sync::Mutex::new),
+        }))
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_dualsense_dsp_destroy(dsp: *mut RenHdcDualSenseDsp) {
-    if !dsp.is_null() {
-        drop(Box::from_raw(dsp));
-    }
+    ffi_guard((), || {
+        if !dsp.is_null() {
+            drop(Box::from_raw(dsp));
+        }
+    });
 }
 
 #[no_mangle]
@@ -1040,27 +1116,29 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_target(
     mut right_ah: f32,
     right_fh: f32,
 ) -> i32 {
-    if dsp.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let (raw_l, raw_lh, raw_r, raw_rh) = (left_al, left_ah, right_al, right_ah);
-    let (l_al, l_ah) = crate::nx2::apply_dualsense_nx2(left_al, left_ah);
-    left_al = l_al;
-    left_ah = l_ah;
-    let (r_al, r_ah) = crate::nx2::apply_dualsense_nx2(right_al, right_ah);
-    right_al = r_al;
-    right_ah = r_ah;
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if dsp.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let (raw_l, raw_lh, raw_r, raw_rh) = (left_al, left_ah, right_al, right_ah);
+        let (l_al, l_ah) = crate::nx2::apply_dualsense_nx2(left_al, left_ah);
+        left_al = l_al;
+        left_ah = l_ah;
+        let (r_al, r_ah) = crate::nx2::apply_dualsense_nx2(right_al, right_ah);
+        right_al = r_al;
+        right_ah = r_ah;
 
-    if let Ok(mut guard) = (*dsp).inner.lock() {
-        guard.set_target(
-            left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
-        );
-        (*dsp).trace_half(false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh);
-        (*dsp).trace_half(true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh);
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+        if let Ok(mut guard) = (*dsp).inner.lock() {
+            guard.set_target(
+                left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
+            );
+            (*dsp).trace_half(false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh);
+            (*dsp).trace_half(true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh);
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 #[no_mangle]
@@ -1072,21 +1150,23 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_half_target(
     mut ah: f32,
     fh: f32,
 ) -> i32 {
-    if dsp.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let (raw_al, raw_ah) = (al, ah);
-    let (out_al, out_ah) = crate::nx2::apply_dualsense_nx2(al, ah);
-    al = out_al;
-    ah = out_ah;
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if dsp.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let (raw_al, raw_ah) = (al, ah);
+        let (out_al, out_ah) = crate::nx2::apply_dualsense_nx2(al, ah);
+        al = out_al;
+        ah = out_ah;
 
-    if let Ok(mut guard) = (*dsp).inner.lock() {
-        guard.set_half_target(is_right, al, fl, ah, fh);
-        (*dsp).trace_half(is_right, al, fl, ah, fh, raw_al, raw_ah);
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+        if let Ok(mut guard) = (*dsp).inner.lock() {
+            guard.set_half_target(is_right, al, fl, ah, fh);
+            (*dsp).trace_half(is_right, al, fl, ah, fh, raw_al, raw_ah);
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 /// Speaker channel (channel 1) level, 0..100 percent. 0 = off (default).
@@ -1095,21 +1175,23 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_speaker(
     dsp: *mut RenHdcDualSenseDsp,
     percent: i32,
 ) -> i32 {
-    if dsp.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    if let Ok(mut guard) = (*dsp).inner.lock() {
-        (*dsp)
-            .speaker_explicit
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        (*dsp)
-            .bt_auto_speaker
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        guard.set_speaker(percent);
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if dsp.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        if let Ok(mut guard) = (*dsp).inner.lock() {
+            (*dsp)
+                .speaker_explicit
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            (*dsp)
+                .bt_auto_speaker
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            guard.set_speaker(percent);
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 /// Vibration-reactive trigger state machine (plan 118). One handle per trigger.
@@ -1119,16 +1201,20 @@ pub struct RenHdcTriTrigger {
 
 #[no_mangle]
 pub extern "C" fn renhdrum_tri_trigger_create() -> *mut RenHdcTriTrigger {
-    Box::into_raw(Box::new(RenHdcTriTrigger {
-        inner: std::sync::Mutex::new(crate::dualsense::TriTrigger::new()),
-    }))
+    ffi_guard(std::ptr::null_mut(), || {
+        Box::into_raw(Box::new(RenHdcTriTrigger {
+            inner: std::sync::Mutex::new(crate::dualsense::TriTrigger::new()),
+        }))
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_tri_trigger_destroy(h: *mut RenHdcTriTrigger) {
-    if !h.is_null() {
-        drop(Box::from_raw(h));
-    }
+    ffi_guard((), || {
+        if !h.is_null() {
+            drop(Box::from_raw(h));
+        }
+    });
 }
 
 /// Returns 1 and writes 11 bytes to `out11` when the effect changed, 0 when unchanged, <0 on error.
@@ -1145,50 +1231,56 @@ pub unsafe extern "C" fn renhdrum_tri_trigger_update(
     fresh: bool,
     out11: *mut u8,
 ) -> i32 {
-    if h.is_null() || out11.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let Ok(mut guard) = (*h).inner.lock() else {
-        return RENHDRUM_ERR_INVALID_ARG;
-    };
-    let mut buf = [0u8; 11];
-    let changed = guard.update(
-        now_ms,
-        depth,
-        (amp_low, freq_low, amp_high, freq_high),
-        fresh,
-        &mut buf,
-    );
-    if changed {
-        slice::from_raw_parts_mut(out11, 11).copy_from_slice(&buf);
-        1
-    } else {
-        0
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if h.is_null() || out11.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let Ok(mut guard) = (*h).inner.lock() else {
+            return RENHDRUM_ERR_INVALID_ARG;
+        };
+        let mut buf = [0u8; 11];
+        let changed = guard.update(
+            now_ms,
+            depth,
+            (amp_low, freq_low, amp_high, freq_high),
+            fresh,
+            &mut buf,
+        );
+        if changed {
+            slice::from_raw_parts_mut(out11, 11).copy_from_slice(&buf);
+            1
+        } else {
+            0
+        }
+    })
 }
 
 /// The player is pressing another button: the trigger ignores rumble for 500 ms after the last call.
 /// Same monotonic clock as `renhdrum_tri_trigger_update`. Null-safe.
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_tri_trigger_note_action(h: *mut RenHdcTriTrigger, now_ms: u32) {
-    if h.is_null() {
-        return;
-    }
-    if let Ok(mut guard) = (*h).inner.lock() {
-        guard.note_action(now_ms);
-    }
+    ffi_guard((), || {
+        if h.is_null() {
+            return;
+        }
+        if let Ok(mut guard) = (*h).inner.lock() {
+            guard.note_action(now_ms);
+        }
+    });
 }
 
 /// Builds a 47-byte `DS5EffectsState_t` USB block to open (`on != 0`) or release (`on == 0`) the
 /// DualSense speaker. Returns `0` on success, `-1` (`RENHDRUM_ERR_NULL_PTR`) if `out47` is null.
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_hd_haptics_speaker_block(on: i32, out47: *mut u8) -> i32 {
-    if out47.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let out = &mut *(out47 as *mut [u8; DS5_EFFECTS_STATE_SIZE]);
-    hd_haptics_speaker_block(on != 0, out);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out47.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let out = &mut *(out47 as *mut [u8; DS5_EFFECTS_STATE_SIZE]);
+        hd_haptics_speaker_block(on != 0, out);
+        RENHDRUM_OK
+    })
 }
 
 /// Builds a 47-byte `DS5EffectsState_t` USB block for one trigger (`is_right != 0` = R2 at `[10..21]`,
@@ -1200,21 +1292,25 @@ pub unsafe extern "C" fn renhdrum_hd_haptics_trigger_block(
     effect11_or_null: *const u8,
     out47: *mut u8,
 ) -> i32 {
-    if out47.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let effect = if effect11_or_null.is_null() {
-        None
-    } else {
-        Some(&*(effect11_or_null as *const [u8; DualSenseTriggerEffect::SIZE]))
-    };
-    let out = &mut *(out47 as *mut [u8; DS5_EFFECTS_STATE_SIZE]);
-    hd_haptics_trigger_block(is_right != 0, effect, out);
-    RENHDRUM_OK
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out47.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let effect = if effect11_or_null.is_null() {
+            None
+        } else {
+            Some(&*(effect11_or_null as *const [u8; DualSenseTriggerEffect::SIZE]))
+        };
+        let out = &mut *(out47 as *mut [u8; DS5_EFFECTS_STATE_SIZE]);
+        hd_haptics_trigger_block(is_right != 0, effect, out);
+        RENHDRUM_OK
+    })
 }
 #[no_mangle]
 pub extern "C" fn renhdrum_set_nx2_mode(mode: i32) {
-    crate::nx2::set_nx2_mode(mode);
+    ffi_guard((), || {
+        crate::nx2::set_nx2_mode(mode);
+    });
 }
 
 pub struct RenHdcXboxRumble {
@@ -1223,17 +1319,21 @@ pub struct RenHdcXboxRumble {
 
 #[no_mangle]
 pub extern "C" fn renhdrum_xbox_rumble_create(is_bluetooth: bool) -> *mut RenHdcXboxRumble {
-    let mapper = XboxRumbleMapper::new(is_bluetooth, XboxRumbleTuning::load_in(None));
-    Box::into_raw(Box::new(RenHdcXboxRumble {
-        inner: std::sync::Mutex::new(mapper),
-    }))
+    ffi_guard(std::ptr::null_mut(), || {
+        let mapper = XboxRumbleMapper::new(is_bluetooth, XboxRumbleTuning::load_in(None));
+        Box::into_raw(Box::new(RenHdcXboxRumble {
+            inner: std::sync::Mutex::new(mapper),
+        }))
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_xbox_rumble_destroy(rumble: *mut RenHdcXboxRumble) {
-    if !rumble.is_null() {
-        drop(Box::from_raw(rumble));
-    }
+    ffi_guard((), || {
+        if !rumble.is_null() {
+            drop(Box::from_raw(rumble));
+        }
+    });
 }
 
 #[no_mangle]
@@ -1246,18 +1346,20 @@ pub unsafe extern "C" fn renhdrum_xbox_rumble_push_half_sample(
     high_amp: f32,
     high_freq: f32,
 ) -> i32 {
-    if rumble.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let low_amp = if low_amp.is_finite() { low_amp } else { 0.0 };
-    let high_amp = if high_amp.is_finite() { high_amp } else { 0.0 };
-    let (low_amp, high_amp) = crate::nx2::apply_xbox_nx2(low_amp, high_amp);
-    if let Ok(mut guard) = (*rumble).inner.lock() {
-        guard.push_half_sample(now_us, is_right, low_amp, low_freq, high_amp, high_freq);
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if rumble.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let low_amp = if low_amp.is_finite() { low_amp } else { 0.0 };
+        let high_amp = if high_amp.is_finite() { high_amp } else { 0.0 };
+        let (low_amp, high_amp) = crate::nx2::apply_xbox_nx2(low_amp, high_amp);
+        if let Ok(mut guard) = (*rumble).inner.lock() {
+            guard.push_half_sample(now_us, is_right, low_amp, low_freq, high_amp, high_freq);
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 /// Returns 1 and fills `out_motors4` when the motors must be sent now, 0 when not.
@@ -1267,32 +1369,36 @@ pub unsafe extern "C" fn renhdrum_xbox_rumble_tick(
     now_us: i64,
     out_motors4: *mut u16,
 ) -> i32 {
-    if rumble.is_null() || out_motors4.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let Ok(mut guard) = (*rumble).inner.lock() else {
-        return RENHDRUM_ERR_INVALID_ARG;
-    };
-    match guard.tick(now_us) {
-        Some(motors) => {
-            slice::from_raw_parts_mut(out_motors4, 4).copy_from_slice(&motors);
-            1
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if rumble.is_null() || out_motors4.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        None => 0,
-    }
+        let Ok(mut guard) = (*rumble).inner.lock() else {
+            return RENHDRUM_ERR_INVALID_ARG;
+        };
+        match guard.tick(now_us) {
+            Some(motors) => {
+                slice::from_raw_parts_mut(out_motors4, 4).copy_from_slice(&motors);
+                1
+            }
+            None => 0,
+        }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_xbox_rumble_resend(rumble: *mut RenHdcXboxRumble) -> i32 {
-    if rumble.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    if let Ok(mut guard) = (*rumble).inner.lock() {
-        guard.resend();
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if rumble.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        if let Ok(mut guard) = (*rumble).inner.lock() {
+            guard.resend();
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 #[no_mangle]
@@ -1301,22 +1407,28 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_fill_f32(
     out_interleaved_4ch: *mut f32,
     frame_count: usize,
 ) -> i32 {
-    if frame_count == 0 {
-        return RENHDRUM_OK;
-    }
-    if dsp.is_null() || out_interleaved_4ch.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let Some(total_samples) = frame_count.checked_mul(4) else {
-        return RENHDRUM_ERR_INVALID_ARG;
-    };
-    if let Ok(mut guard) = (*dsp).inner.lock() {
-        let slice = slice::from_raw_parts_mut(out_interleaved_4ch, total_samples);
-        guard.fill_interleaved_f32(slice);
-        RENHDRUM_OK
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if frame_count == 0 {
+            return RENHDRUM_OK;
+        }
+        if dsp.is_null() || out_interleaved_4ch.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        const MAX_FILL_FRAMES: usize = (isize::MAX as usize) / (4 * std::mem::size_of::<f32>());
+        if frame_count > MAX_FILL_FRAMES {
+            return RENHDRUM_ERR_INVALID_ARG;
+        }
+        let Some(total_samples) = frame_count.checked_mul(4) else {
+            return RENHDRUM_ERR_INVALID_ARG;
+        };
+        if let Ok(mut guard) = (*dsp).inner.lock() {
+            let slice = slice::from_raw_parts_mut(out_interleaved_4ch, total_samples);
+            guard.fill_interleaved_f32(slice);
+            RENHDRUM_OK
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 /// Builds one DualSense Bluetooth haptics report 0x32 (142 bytes) from the next 10.667 ms of the DSP.
@@ -1327,26 +1439,28 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt_report(
     buffer_length: u8,
     out_report142: *mut u8,
 ) -> i32 {
-    if dsp.is_null() || out_report142.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
-        return RENHDRUM_ERR_INVALID_ARG;
-    };
-    if (*dsp)
-        .bt_auto_speaker
-        .swap(false, std::sync::atomic::Ordering::Relaxed)
-        && !(*dsp)
-            .speaker_explicit
-            .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        inner.set_speaker(0);
-    }
-    if inner.crisp_notes != (*dsp).bt_crisp_notes {
-        inner.set_crisp_notes((*dsp).bt_crisp_notes);
-    }
-    let out = &mut *(out_report142 as *mut [u8; DS5_BT_HAPTICS_REPORT_SIZE]);
-    i32::from(packer.build(&mut inner, buffer_length, out))
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if dsp.is_null() || out_report142.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
+            return RENHDRUM_ERR_INVALID_ARG;
+        };
+        if (*dsp)
+            .bt_auto_speaker
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+            && !(*dsp)
+                .speaker_explicit
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            inner.set_speaker(0);
+        }
+        if inner.crisp_notes != (*dsp).bt_crisp_notes {
+            inner.set_crisp_notes((*dsp).bt_crisp_notes);
+        }
+        let out = &mut *(out_report142 as *mut [u8; DS5_BT_HAPTICS_REPORT_SIZE]);
+        i32::from(packer.build(&mut inner, buffer_length, out))
+    })
 }
 
 /// Builds one combined DualSense Bluetooth report 0x36 (398 bytes: rumble + adaptive triggers +
@@ -1363,39 +1477,41 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt36_report(
     _seq: u8,
     out_report398: *mut u8,
 ) -> i32 {
-    if dsp.is_null() || out_report398.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
-        return RENHDRUM_ERR_INVALID_ARG;
-    };
-    if inner.crisp_notes != (*dsp).bt_crisp_notes {
-        inner.set_crisp_notes((*dsp).bt_crisp_notes);
-    }
-    let hd_off = crate::ipc::app_config().is_some_and(|c| c.dualsense_hd_haptics_off);
-    if !(*dsp)
-        .speaker_explicit
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        let target_pct = if hd_off {
-            0
-        } else {
-            crate::dualsense::HD_HAPTICS_SPEAKER_PERCENT
-        };
-        if inner.speaker_enabled() != (target_pct > 0) {
-            inner.set_speaker(target_pct);
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if dsp.is_null() || out_report398.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-        (*dsp)
-            .bt_auto_speaker
-            .store(target_pct > 0, std::sync::atomic::Ordering::Relaxed);
-    }
-    let state = if state47_or_null.is_null() {
-        None
-    } else {
-        Some(&*(state47_or_null as *const [u8; DS5_EFFECTS_STATE_SIZE]))
-    };
-    let out = &mut *(out_report398 as *mut [u8; DS5_BT36_REPORT_SIZE]);
-    i32::from(packer.build36_with_speaker(&mut inner, state, !hd_off, out) != 0)
+        let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
+            return RENHDRUM_ERR_INVALID_ARG;
+        };
+        if inner.crisp_notes != (*dsp).bt_crisp_notes {
+            inner.set_crisp_notes((*dsp).bt_crisp_notes);
+        }
+        let hd_off = crate::ipc::app_config().is_some_and(|c| c.dualsense_hd_haptics_off);
+        if !(*dsp)
+            .speaker_explicit
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let target_pct = if hd_off {
+                0
+            } else {
+                crate::dualsense::HD_HAPTICS_SPEAKER_PERCENT
+            };
+            if inner.speaker_enabled() != (target_pct > 0) {
+                inner.set_speaker(target_pct);
+            }
+            (*dsp)
+                .bt_auto_speaker
+                .store(target_pct > 0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let state = if state47_or_null.is_null() {
+            None
+        } else {
+            Some(&*(state47_or_null as *const [u8; DS5_EFFECTS_STATE_SIZE]))
+        };
+        let out = &mut *(out_report398 as *mut [u8; DS5_BT36_REPORT_SIZE]);
+        i32::from(packer.build36_with_speaker(&mut inner, state, !hd_off, out) != 0)
+    })
 }
 
 /// Experimental. Builds one Steam Controller (2026) grip report 0x88 (64 bytes) from the next
@@ -1408,20 +1524,22 @@ pub unsafe extern "C" fn renhdrum_valve_grip_build_report(
     format: u8,
     out_report64: *mut u8,
 ) -> i32 {
-    if dsp.is_null() || out_report64.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
-        return RENHDRUM_ERR_INVALID_ARG;
-    }
-    let (Ok(mut inner), Ok(mut grip)) = ((*dsp).inner.lock(), (*dsp).valve_grip.lock()) else {
-        return RENHDRUM_ERR_INVALID_ARG;
-    };
-    let out = &mut *(out_report64 as *mut [u8; VALVE_GRIP_REPORT_SIZE]);
-    match grip.build_report(&mut inner, format, out) {
-        Some(outcome) => outcome as i32,
-        None => RENHDRUM_ERR_INVALID_ARG,
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if dsp.is_null() || out_report64.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
+            return RENHDRUM_ERR_INVALID_ARG;
+        }
+        let (Ok(mut inner), Ok(mut grip)) = ((*dsp).inner.lock(), (*dsp).valve_grip.lock()) else {
+            return RENHDRUM_ERR_INVALID_ARG;
+        };
+        let out = &mut *(out_report64 as *mut [u8; VALVE_GRIP_REPORT_SIZE]);
+        match grip.build_report(&mut inner, format, out) {
+            Some(outcome) => outcome as i32,
+            None => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 /// Experimental. Evaluates the Steam Controller (2026) `0x86` PCM mode keep-alive state at `now_ns`:
@@ -1436,37 +1554,41 @@ pub unsafe extern "C" fn renhdrum_valve_grip_mode_tick(
     stalled: bool,
     out_reports8: *mut u8,
 ) -> i32 {
-    if dsp.is_null() || out_reports8.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
-        return RENHDRUM_ERR_INVALID_ARG;
-    }
-    let (Ok(inner), Ok(mut grip)) = ((*dsp).inner.lock(), (*dsp).valve_grip.lock()) else {
-        return RENHDRUM_ERR_INVALID_ARG;
-    };
-    let out = &mut *(out_reports8
-        as *mut [[u8; VALVE_GRIP_MODE_REPORT_SIZE]; VALVE_GRIP_MODE_REPORT_COUNT]);
-    match grip.mode_tick(&inner, format, now_ns, stalled, out) {
-        Some(n) => n as i32,
-        None => RENHDRUM_ERR_INVALID_ARG,
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if dsp.is_null() || out_reports8.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
+            return RENHDRUM_ERR_INVALID_ARG;
+        }
+        let (Ok(inner), Ok(mut grip)) = ((*dsp).inner.lock(), (*dsp).valve_grip.lock()) else {
+            return RENHDRUM_ERR_INVALID_ARG;
+        };
+        let out = &mut *(out_reports8
+            as *mut [[u8; VALVE_GRIP_MODE_REPORT_SIZE]; VALVE_GRIP_MODE_REPORT_COUNT]);
+        match grip.mode_tick(&inner, format, now_ns, stalled, out) {
+            Some(n) => n as i32,
+            None => RENHDRUM_ERR_INVALID_ARG,
+        }
+    })
 }
 
 /// Experimental. Writes two 4-byte `0x86` "off" reports (channels 2 and 5) into `out_reports8`
 /// for detach / shutdown / error-exit paths. Accepts `format` `0`, `8`, or `9`; returns `2`, or < 0 on error.
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_valve_grip_mode_off(format: u8, out_reports8: *mut u8) -> i32 {
-    if out_reports8.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let out = &mut *(out_reports8
-        as *mut [[u8; VALVE_GRIP_MODE_REPORT_SIZE]; VALVE_GRIP_MODE_REPORT_COUNT]);
-    if build_valve_grip_mode_off(format, out) {
-        VALVE_GRIP_MODE_REPORT_COUNT as i32
-    } else {
-        RENHDRUM_ERR_INVALID_ARG
-    }
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_reports8.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let out = &mut *(out_reports8
+            as *mut [[u8; VALVE_GRIP_MODE_REPORT_SIZE]; VALVE_GRIP_MODE_REPORT_COUNT]);
+        if build_valve_grip_mode_off(format, out) {
+            VALVE_GRIP_MODE_REPORT_COUNT as i32
+        } else {
+            RENHDRUM_ERR_INVALID_ARG
+        }
+    })
 }
 
 #[no_mangle]
@@ -1479,38 +1601,41 @@ pub unsafe extern "C" fn renhdrum_dualsense_evaluate_triggers(
     pulse_age_ms: i64,
     out_ds5_effects47: *mut u8,
 ) -> i32 {
-    if out_ds5_effects47.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let config = if title_id == DualSenseTriggerProfileConfig::BOW_DRAW_TITLE_ID {
-        DualSenseTriggerProfileConfig::create_bow_draw()
-    } else {
-        DualSenseTriggerProfileConfig {
-            title_id,
-            name: format!("{:016x}", title_id),
-            arm_triggers: false,
-            bow_enabled: false,
-            bow_strength: 0,
-            shield_enabled: false,
-            shield_start_zone: 0,
-            shield_strength: 0,
-            shot_enabled: false,
-            shot_amplitude: 0,
-            shot_frequency: 0,
-            shot_min_pulse_ms: 0,
-            sustained_enabled: false,
-            sustained_amplitude: 0,
-            sustained_frequency: 0,
-            sustained_min_rumble_ms: 0,
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if out_ds5_effects47.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
         }
-    };
-    let profile = DualSenseTriggerProfile::new(&config);
-    let input = DualSenseTriggerInput::new(zl_held, zr_held, rumble_on, rumble_on_ms, pulse_age_ms);
-    let (left, right) = profile.evaluate(&input);
-    let mut effects = [0u8; 47];
-    pack_ds5_effects_state(&left.data, &right.data, &mut effects);
-    slice::from_raw_parts_mut(out_ds5_effects47, 47).copy_from_slice(&effects);
-    RENHDRUM_OK
+        let config = if title_id == DualSenseTriggerProfileConfig::BOW_DRAW_TITLE_ID {
+            DualSenseTriggerProfileConfig::create_bow_draw()
+        } else {
+            DualSenseTriggerProfileConfig {
+                title_id,
+                name: format!("{:016x}", title_id),
+                arm_triggers: false,
+                bow_enabled: false,
+                bow_strength: 0,
+                shield_enabled: false,
+                shield_start_zone: 0,
+                shield_strength: 0,
+                shot_enabled: false,
+                shot_amplitude: 0,
+                shot_frequency: 0,
+                shot_min_pulse_ms: 0,
+                sustained_enabled: false,
+                sustained_amplitude: 0,
+                sustained_frequency: 0,
+                sustained_min_rumble_ms: 0,
+            }
+        };
+        let profile = DualSenseTriggerProfile::new(&config);
+        let input =
+            DualSenseTriggerInput::new(zl_held, zr_held, rumble_on, rumble_on_ms, pulse_age_ms);
+        let (left, right) = profile.evaluate(&input);
+        let mut effects = [0u8; 47];
+        pack_ds5_effects_state(&left.data, &right.data, &mut effects);
+        slice::from_raw_parts_mut(out_ds5_effects47, 47).copy_from_slice(&effects);
+        RENHDRUM_OK
+    })
 }
 
 #[cfg(test)]
@@ -2419,6 +2544,30 @@ mod tests {
             assert_eq!(&out[10..21], &eff);
             assert!(!(0xFC..=0xFE).contains(&out[10]));
             renhdrum_tri_trigger_destroy(tri);
+        }
+    }
+
+    #[test]
+    fn ffi_guard_catches_panic_and_returns_fallback() {
+        let got = ffi_guard(RENHDRUM_ERR_INVALID_ARG, || -> i32 { panic!("boom") });
+        assert_eq!(got, RENHDRUM_ERR_INVALID_ARG);
+    }
+
+    #[test]
+    fn dualsense_fill_f32_rejects_oversized_frame_count() {
+        unsafe {
+            let dsp = renhdrum_dualsense_dsp_create(100, true);
+            assert!(!dsp.is_null());
+            let mut dummy = [0.0f32; 4];
+            assert_eq!(
+                renhdrum_dualsense_dsp_fill_f32(dsp, dummy.as_mut_ptr(), (isize::MAX as usize) / 4),
+                RENHDRUM_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                renhdrum_dualsense_dsp_fill_f32(dsp, dummy.as_mut_ptr(), usize::MAX),
+                RENHDRUM_ERR_INVALID_ARG
+            );
+            renhdrum_dualsense_dsp_destroy(dsp);
         }
     }
 }

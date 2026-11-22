@@ -202,21 +202,33 @@ impl Entry {
     }
 
     pub fn detail(&self) -> Option<String> {
-        self.detail.read().unwrap().clone()
+        self.detail
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn detail_reason(&self) -> Option<String> {
-        self.detail_reason.read().unwrap().clone()
+        self.detail_reason
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_pacing(&self, pacing: &str) {
-        *self.detail_reason.write().unwrap() = None;
-        *self.detail.write().unwrap() = Some(pacing.to_string());
+        *self
+            .detail_reason
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self.detail.write().unwrap_or_else(|e| e.into_inner()) = Some(pacing.to_string());
     }
 
     pub fn set_not_sending(&self, reason: &str) {
-        *self.detail_reason.write().unwrap() = Some(reason.to_string());
-        *self.detail.write().unwrap() = None;
+        *self
+            .detail_reason
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(reason.to_string());
+        *self.detail.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn haptics(&self) -> DualSenseHapticsStatus {
@@ -243,11 +255,17 @@ impl Entry {
     }
 
     pub fn trigger_profile(&self) -> Option<String> {
-        self.trigger_profile.read().unwrap().clone()
+        self.trigger_profile
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_trigger_profile(&self, profile: Option<String>) {
-        *self.trigger_profile.write().unwrap() = profile;
+        *self
+            .trigger_profile
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = profile;
     }
 
     pub fn samples(&self) -> i64 {
@@ -319,19 +337,19 @@ impl Entry {
     }
 
     pub fn sync(&self) -> Option<SyncCounters> {
-        self.sync.read().unwrap().clone()
+        self.sync.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn set_sync_active(&self, active: bool) {
         self.sync_active.store(active, Ordering::Release);
         if !active {
-            *self.sync.write().unwrap() = None;
+            *self.sync.write().unwrap_or_else(|e| e.into_inner()) = None;
         }
     }
 
     pub fn report_sync(&self, counters: SyncCounters) {
         {
-            let mut state = self.gap_state.lock().unwrap();
+            let mut state = self.gap_state.lock().unwrap_or_else(|e| e.into_inner());
             state.gap_count += counters.gap_count;
             state.gap_sum_us += counters.gap_sum_us;
             if counters.gap_count > 0 {
@@ -339,11 +357,11 @@ impl Entry {
                 state.gap_max_us = state.gap_max_us.max(counters.gap_max_us);
             }
         }
-        *self.sync.write().unwrap() = Some(counters);
+        *self.sync.write().unwrap_or_else(|e| e.into_inner()) = Some(counters);
     }
 
     pub fn link(&self) -> Option<LinkCounters> {
-        self.link.read().unwrap().clone()
+        self.link.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn report_link(
@@ -354,16 +372,16 @@ impl Entry {
         queued_max: i32,
     ) {
         {
-            let mut state = self.gap_state.lock().unwrap();
+            let mut state = self.gap_state.lock().unwrap_or_else(|e| e.into_inner());
             state.link_write_max_us = state.link_write_max_us.max(write_max_us);
             state.link_gap_max_us = state.link_gap_max_us.max(report_gap_max_us);
             state.link_queued_max = state.link_queued_max.max(queued_max);
         }
-        *self.link.write().unwrap() = Some(counters);
+        *self.link.write().unwrap_or_else(|e| e.into_inner()) = Some(counters);
     }
 
     pub fn take_link_max_window(&self) -> (i64, i64, i32) {
-        let mut state = self.gap_state.lock().unwrap();
+        let mut state = self.gap_state.lock().unwrap_or_else(|e| e.into_inner());
         let res = (
             state.link_write_max_us,
             state.link_gap_max_us,
@@ -376,7 +394,7 @@ impl Entry {
     }
 
     pub fn take_sync_gap_window(&self) -> (i64, i64, i64, i64) {
-        let mut state = self.gap_state.lock().unwrap();
+        let mut state = self.gap_state.lock().unwrap_or_else(|e| e.into_inner());
         let count = state.gap_count;
         let min_us = if count > 0 { state.gap_min_us } else { 0 };
         let max_us = state.gap_max_us;
@@ -399,7 +417,10 @@ impl Entry {
     }
 
     pub fn settings_text(&self) -> Option<String> {
-        self.settings_text.read().unwrap().clone()
+        self.settings_text
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn settings_version(&self) -> i32 {
@@ -407,7 +428,10 @@ impl Entry {
     }
 
     pub fn set_settings(&self, text: &str) {
-        *self.settings_text.write().unwrap() = Some(text.to_string());
+        *self
+            .settings_text
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
         self.settings_version.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -445,7 +469,7 @@ impl RumbleStatus {
             return;
         }
 
-        let mut slots = Self::slots().write().unwrap();
+        let mut slots = Self::slots().write().unwrap_or_else(|e| e.into_inner());
         if entry.slot.load(Ordering::Acquire) == slot as i32 {
             if let Some(ref current) = slots[slot] {
                 if Arc::ptr_eq(current, &entry) {
@@ -461,7 +485,7 @@ impl RumbleStatus {
     }
 
     pub fn unregister(entry: &Arc<Entry>) {
-        let mut slots = Self::slots().write().unwrap();
+        let mut slots = Self::slots().write().unwrap_or_else(|e| e.into_inner());
         Self::unregister_locked(&mut slots, entry);
     }
 
@@ -481,7 +505,7 @@ impl RumbleStatus {
 
     pub fn get(slot: usize) -> Option<Arc<Entry>> {
         if slot < Self::SLOT_COUNT {
-            Self::slots().read().unwrap()[slot].clone()
+            Self::slots().read().unwrap_or_else(|e| e.into_inner())[slot].clone()
         } else {
             None
         }
@@ -849,5 +873,43 @@ mod tests {
 
         RumbleStatus::unregister(&second);
         assert!(RumbleStatus::get(1).is_none());
+    }
+
+    #[test]
+    fn poisoned_locks_do_not_panic() {
+        let entry = Arc::new(Entry::new(
+            "DualSense",
+            RumbleTransport::Usb,
+            RumbleBackendKind::DualSense,
+        ));
+        let cloned = Arc::clone(&entry);
+        let _ = std::thread::spawn(move || {
+            let _d = cloned.detail.write().unwrap();
+            let _g = cloned.gap_state.lock().unwrap();
+            panic!("poison locks");
+        })
+        .join();
+
+        let _ = entry.detail();
+        entry.set_pacing("15ms");
+        entry.report_sync(SyncCounters {
+            sent_report: 1,
+            sent_fallback: 0,
+            wait_busy: 0,
+            read_skipped: 0,
+            received: 0,
+            merged: 0,
+            gap_count: 0,
+            gap_min_us: 0,
+            gap_max_us: 0,
+            gap_sum_us: 0,
+            pump_loops: 0,
+            pump_cpu_us: 0,
+            pump_alive_us: 0,
+            pump_busy_us: 0,
+            pump_running: false,
+        });
+        let _ = entry.take_sync_gap_window();
+        assert_eq!(entry.detail().as_deref(), Some("15ms"));
     }
 }

@@ -47,6 +47,7 @@ extern "C" {
 pub struct BtOpusEncoder {
     state: [u64; ENCODER_STATE_WORDS],
     was_active: bool,
+    ready: bool,
 }
 
 impl Default for BtOpusEncoder {
@@ -60,38 +61,38 @@ impl BtOpusEncoder {
         let mut enc = Self {
             state: [0u64; ENCODER_STATE_WORDS],
             was_active: false,
+            ready: false,
         };
         unsafe {
             let needed = opus_encoder_get_size(BT_OPUS_CHANNELS as c_int);
-            assert!(
-                needed > 0 && (needed as usize) <= std::mem::size_of_val(&enc.state),
-                "libopus encoder state size {needed} exceeds fixed buffer {}",
-                std::mem::size_of_val(&enc.state)
-            );
+            if needed <= 0 || (needed as usize) > std::mem::size_of_val(&enc.state) {
+                return enc;
+            }
             let st = enc.state.as_mut_ptr() as *mut c_void;
-            let rc = opus_encoder_init(
+            if opus_encoder_init(
                 st,
                 BT_OPUS_SAMPLE_RATE,
                 BT_OPUS_CHANNELS as c_int,
                 OPUS_APPLICATION_AUDIO,
-            );
-            assert_eq!(rc, OPUS_OK, "opus_encoder_init failed: {rc}");
-            assert_eq!(
-                opus_encoder_ctl(st, OPUS_SET_BITRATE_REQUEST, BT_OPUS_BITRATE),
-                OPUS_OK
-            );
-            assert_eq!(
-                opus_encoder_ctl(st, OPUS_SET_VBR_REQUEST, 0 as c_int),
-                OPUS_OK
-            );
-            assert_eq!(
-                opus_encoder_ctl(
-                    st,
-                    OPUS_SET_EXPERT_FRAME_DURATION_REQUEST,
-                    OPUS_FRAMESIZE_10_MS
-                ),
-                OPUS_OK
-            );
+            ) != OPUS_OK
+            {
+                return enc;
+            }
+            if opus_encoder_ctl(st, OPUS_SET_BITRATE_REQUEST, BT_OPUS_BITRATE) != OPUS_OK {
+                return enc;
+            }
+            if opus_encoder_ctl(st, OPUS_SET_VBR_REQUEST, 0 as c_int) != OPUS_OK {
+                return enc;
+            }
+            if opus_encoder_ctl(
+                st,
+                OPUS_SET_EXPERT_FRAME_DURATION_REQUEST,
+                OPUS_FRAMESIZE_10_MS,
+            ) != OPUS_OK
+            {
+                return enc;
+            }
+            enc.ready = true;
         }
         enc
     }
@@ -103,6 +104,10 @@ impl BtOpusEncoder {
         mono512: &[f32; BT_SPEAKER_SOURCE_TICK_SAMPLES],
         out200: &mut [u8; BT_OPUS_PACKET_SIZE],
     ) -> bool {
+        if !self.ready {
+            *out200 = SPEAKER_OPUS_SILENCE;
+            return false;
+        }
         let silent = mono512.iter().all(|&s| !s.is_finite() || s.abs() <= 1e-6);
         if silent {
             if self.was_active {
@@ -120,7 +125,7 @@ impl BtOpusEncoder {
         for i in 0..BT_OPUS_FRAME_SAMPLES {
             let pos = (i as f64) * ((BT_SPEAKER_SOURCE_TICK_SAMPLES - 1) as f64)
                 / ((BT_OPUS_FRAME_SAMPLES - 1) as f64);
-            let lo = pos as usize;
+            let lo = (pos as usize).min(BT_SPEAKER_SOURCE_TICK_SAMPLES - 1);
             let hi = (lo + 1).min(BT_SPEAKER_SOURCE_TICK_SAMPLES - 1);
             let frac = (pos - lo as f64) as f32;
             let a = if mono512[lo].is_finite() {
@@ -219,5 +224,29 @@ pub mod test_decoder {
             assert!(decoded >= 0, "opus_decode_float failed: {decoded}");
             decoded as usize
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_initializes_ready() {
+        let enc = BtOpusEncoder::new();
+        assert!(enc.ready);
+    }
+
+    #[test]
+    fn unready_encoder_returns_silence_without_panicking() {
+        let mut enc = BtOpusEncoder {
+            state: [0u64; ENCODER_STATE_WORDS],
+            was_active: false,
+            ready: false,
+        };
+        let mono = [0.5f32; BT_SPEAKER_SOURCE_TICK_SAMPLES];
+        let mut out = [0u8; BT_OPUS_PACKET_SIZE];
+        assert!(!enc.encode_source_tick(&mono, &mut out));
+        assert_eq!(out, SPEAKER_OPUS_SILENCE);
     }
 }

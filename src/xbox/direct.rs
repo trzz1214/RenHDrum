@@ -138,14 +138,16 @@ fn pack(g: [u16; 2], t: [u16; 2], send_g: bool, send_t: bool) -> ([u16; 4], i32)
 
 #[no_mangle]
 pub extern "C" fn renhdrum_xbox_direct_create() -> *mut RenHdcXboxDirect {
-    Box::into_raw(Box::default())
+    crate::ffi::ffi_guard(std::ptr::null_mut(), || Box::into_raw(Box::default()))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_xbox_direct_destroy(d: *mut RenHdcXboxDirect) {
-    if !d.is_null() {
-        drop(Box::from_raw(d));
-    }
+    crate::ffi::ffi_guard((), || {
+        if !d.is_null() {
+            drop(Box::from_raw(d));
+        }
+    });
 }
 
 /// One half sample (raw game amplitudes; `gain` / `low_boost` of the store are applied inside).
@@ -163,12 +165,14 @@ pub unsafe extern "C" fn renhdrum_xbox_direct_push(
     triggers: bool,
     out_motors4: *mut u16,
 ) -> i32 {
-    if d.is_null() || s.is_null() || out_motors4.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let (m, mask) = (*d).push(&*s, now_us, is_right, low_amp, high_amp, triggers);
-    std::ptr::copy_nonoverlapping(m.as_ptr(), out_motors4, 4);
-    mask
+    crate::ffi::ffi_guard(crate::ffi::RENHDRUM_ERR_INVALID_ARG, || {
+        if d.is_null() || s.is_null() || out_motors4.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let (m, mask) = (*d).push(&*s, now_us, is_right, low_amp, high_amp, triggers);
+        std::ptr::copy_nonoverlapping(m.as_ptr(), out_motors4, 4);
+        mask
+    })
 }
 
 /// Call on the host timer: when a burst ends, returns the settled motor values (same mask as push).
@@ -179,12 +183,14 @@ pub unsafe extern "C" fn renhdrum_xbox_direct_tick(
     triggers: bool,
     out_motors4: *mut u16,
 ) -> i32 {
-    if d.is_null() || out_motors4.is_null() {
-        return RENHDRUM_ERR_NULL_PTR;
-    }
-    let (m, mask) = (*d).tick(now_us, triggers);
-    std::ptr::copy_nonoverlapping(m.as_ptr(), out_motors4, 4);
-    mask
+    crate::ffi::ffi_guard(crate::ffi::RENHDRUM_ERR_INVALID_ARG, || {
+        if d.is_null() || out_motors4.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let (m, mask) = (*d).tick(now_us, triggers);
+        std::ptr::copy_nonoverlapping(m.as_ptr(), out_motors4, 4);
+        mask
+    })
 }
 
 #[cfg(test)]

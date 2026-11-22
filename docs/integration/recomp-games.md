@@ -30,7 +30,7 @@ To integrate RenHDrum into a C/C++ recomp runtime:
 - Optional drop-in reference implementation:
   - [`integrations/recomp-c/bridge/renhdrum_recomp_bridge.c`](../../integrations/recomp-c/bridge/renhdrum_recomp_bridge.c)
   - [`integrations/recomp-c/bridge/renhdrum_recomp_bridge.h`](../../integrations/recomp-c/bridge/renhdrum_recomp_bridge.h)
-  - [`integrations/recomp-c/reference/recomp-c-reference.patch`](../../integrations/recomp-c/reference/recomp-c-reference.patch) (reference patch against Hookshot `v2.2.0-rc.2`, GPL-3.0) and [`integrations/recomp-c/reference/longshot-reference.patch`](../../integrations/recomp-c/reference/longshot-reference.patch) (Longshot, GPL-3.0-or-later). The bridge is the same in both; only the hook sites differ.
+  - [`integrations/recomp-c/reference/longshot-reference.patch`](../../integrations/recomp-c/reference/longshot-reference.patch) (Longshot, GPL-3.0-or-later), [`totk-reference.patch`](../../integrations/recomp-c/reference/totk-reference.patch) (`totk-pc-recomp`, MIT), [`dkb-reference.patch`](../../integrations/recomp-c/reference/dkb-reference.patch) (`dkb-pc-recomp`, GPL-3.0-or-later), and legacy [`recomp-c-reference.patch`](../../integrations/recomp-c/reference/recomp-c-reference.patch) (archived Hookshot `v2.2.0-rc.2`, GPL-3.0; Hookshot is no longer supported, use Longshot for Ocarina of Time). The bridge is the same across them; only the hook sites differ.
 
 You do **not** need to link against `renhdrum.dll.lib` or `SDL3.lib` at compile time. The reference bridge resolves `renhdrum.dll` with `LoadLibraryExW` and resolves SDL3/SDL2 functions at runtime with `GetModuleHandleA` + `GetProcAddress`.
 
@@ -329,5 +329,5 @@ Every host here calls the same core functions, so a new core release reaches all
 
 ## Prebuilt Builds & Reference Kit
 
-- Ready-to-use C bridge and reference patches (Hookshot `v2.2.0-rc.2` and Longshot): [`integrations/recomp-c/`](../../integrations/recomp-c/).
+- Ready-to-use C bridge and reference patches (Longshot, `totk-pc-recomp`, `dkb-pc-recomp`, and legacy Hookshot `v2.2.0-rc.2`): [`integrations/recomp-c/`](../../integrations/recomp-c/).
 - End-user test builds and downloads: see the [website](https://ryuhdr.threedola.workers.dev/).

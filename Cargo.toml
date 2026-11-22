@@ -24,5 +24,5 @@ cc = "1"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+panic = "unwind" # keep unwind so ffi_guard (catch_unwind) stops panics at the C ABI boundary instead of aborting the host
 strip = "symbols"
