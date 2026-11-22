@@ -83,6 +83,6 @@ The entry point is the **HD Rumble** button on the Controls page. It sits below 
 ## 7. In practice
 
 - **Longshot (in-game menu in its own DLL).** The HD Rumble switch sits in Controls with a row that opens the HD Rumble page: Status line, Basic rows, Advanced rows behind a "Show" button, Reset, credit line. The page declares its rows by `renhdrum_options` key and reads each value back from the host every time it opens. The menu reaches the core through one host function, `rh_option` (get, set, reset, status, key name by index), so the menu DLL never links the bridge; it checks the host table version first. Rows that only apply to one link (for example Switch Bluetooth) hide themselves when a DualSense is connected by cable. Details: `recomp-games.md`, section 11, lesson 6.
-- **totk-pc-recomp.** The on/off switch is kept in the game's settings file; per-controller details are in `renhdrum.ini` beside the executable.
+- **totk-pc-recomp, dkb-pc-recomp and mkw-recomp.** The main HD Rumble switch is kept in the game's settings file (in the Controls tab / F1 menu); per-controller details are rendered from `rh_option_*` and saved in `renhdrum.ini` beside the executable.
 - **Status text.** The status line comes from the bridge (`rh_status_line`). If a host hides rows by link, it has to match the bridge's wording, so keep that match in one place and test it.
 - **Saved twice.** If the host menu also saves each keyed row in its own settings file, that is fine as long as loading the file never pushes values into the core; only a change by the player should.

@@ -154,6 +154,11 @@ static struct {
     uint32_t (*get_joy_props)(void *);
     int (*get_bool_prop)(uint32_t, const char *, int);
 
+    /* Patched SDL3 HD Rumble transport modes (optional; NULL on stock SDL3) */
+    int (SDLCALL *hd_set_no_queue)(void *, int, int, int);
+    int (SDLCALL *hd_set_no_queue_bt)(void *, int, int);
+    int (SDLCALL *hd_set_bt_after_input)(void *, int);
+
     /* HID & device paths */
     const char *(*get_gamepad_path)(void *);
     const char *(*get_controller_path)(void *);
@@ -209,6 +214,9 @@ static void init_sdl(void) {
         rh_load_proc(&sdl.get_button3, m, "SDL_GetGamepadButton");
         rh_load_proc(&sdl.get_joy_props, m, "SDL_GetJoystickProperties");
         rh_load_proc(&sdl.get_bool_prop, m, "SDL_GetBooleanProperty");
+        rh_load_proc(&sdl.hd_set_no_queue, m, "SDL_HDRumbleSetNoQueue");
+        rh_load_proc(&sdl.hd_set_no_queue_bt, m, "SDL_HDRumbleSetNoQueueBluetooth");
+        rh_load_proc(&sdl.hd_set_bt_after_input, m, "SDL_HDRumbleSetBluetoothAfterInput");
 
         rh_load_proc(&sdl.get_gamepad_path, m, "SDL_GetGamepadPath");
         rh_load_proc(&sdl.get_joy_path, m, "SDL_GetJoystickPath");
@@ -449,11 +457,41 @@ static int rh_resolve_pro_settings(RenHdcSettings *out, int bt) {
             out->bluetooth_level = 4;
         }
     }
-    /* Stock SDL3 queues every write: keep transport flags off so the core paces writes */
-    out->usb_no_queue = false;
-    out->bt_after_input = false;
-    out->bt_fast = false;
     return 1;
+}
+
+#define RH_NO_QUEUE_ENVELOPE_GAP_MS 10
+
+static void rh_clear_pro_transport(void *joy) {
+    if (!sdl.is_sdl3 || !joy) return;
+    if (sdl.hd_set_no_queue) sdl.hd_set_no_queue(joy, 0, 0, 0);
+    if (sdl.hd_set_no_queue_bt) sdl.hd_set_no_queue_bt(joy, 0, 0);
+    if (sdl.hd_set_bt_after_input) sdl.hd_set_bt_after_input(joy, 0);
+}
+
+static void rh_apply_pro_transport(void *joy, RenHdcSettings *s, int bt) {
+    if (!s) return;
+    if (!sdl.is_sdl3 || !joy || !sdl.hd_set_no_queue || !sdl.hd_set_no_queue_bt || !sdl.hd_set_bt_after_input) {
+        /* Stock SDL3 queues every write: keep transport flags off so the core paces writes */
+        s->usb_no_queue = false;
+        s->bt_after_input = false;
+        s->bt_fast = false;
+        return;
+    }
+    rh_clear_pro_transport(joy);
+    if (bt) {
+        s->usb_no_queue = false;
+        s->bt_fast = s->enabled && s->bt_fast && s->bt_after_input &&
+                     sdl.hd_set_no_queue_bt(joy, 1, RH_NO_QUEUE_ENVELOPE_GAP_MS) == 1;
+        s->bt_after_input = s->enabled && s->bt_after_input && !s->bt_fast &&
+                            sdl.hd_set_bt_after_input(joy, 1) == 1;
+    } else {
+        int gap_ms = s->envelope_5ms ? RH_NO_QUEUE_ENVELOPE_GAP_MS : (int)s->usb_interval_ms;
+        s->usb_no_queue = s->enabled && s->usb_no_queue &&
+                          sdl.hd_set_no_queue(joy, 1, gap_ms, (int)s->usb_pause_ms) == 1;
+        s->bt_after_input = false;
+        s->bt_fast = false;
+    }
 }
 
 /* ---- Connected slot tracking (matched to host MAX_PADS slots) ---- */
@@ -558,6 +596,7 @@ static RenHdcEngine *rh_engine;
 static void *rh_active_pad;
 static void *rh_joy;
 static int rh_is_bt;
+static int rh_usb_no_queue;
 static uint8_t rh_last_pkt[10];
 static int rh_has_last_pkt;
 static int64_t rh_last_send_us;
@@ -1650,7 +1689,7 @@ static DWORD WINAPI rh_worker(void *arg) {
                 rh_has_last_pkt = !rh_pkt_is_silent(pkt);
                 rh_last_send_us = now_us;
                 send_pkt = 1;
-            } else if (!rh_is_bt && rh_has_last_pkt && (now_us - rh_last_send_us) >= RH_RESEND_US) {
+            } else if (!rh_is_bt && !rh_usb_no_queue && rh_has_last_pkt && (now_us - rh_last_send_us) >= RH_RESEND_US) {
                 memcpy(pkt, rh_last_pkt, sizeof(pkt));
                 rh_last_send_us = now_us;
                 send_pkt = 1;
@@ -1884,17 +1923,20 @@ static int rh_detach_engines(void *pad, int untrack) {
     /* Pro Controller detach */
     AcquireSRWLockExclusive(&rh_lock);
     if (rh_active_pad && (!pad || rh_active_pad == pad)) {
-        void *target = rh_joy ? rh_joy : rh_active_pad;
+        void *joy = rh_joy;
+        void *target = joy ? joy : rh_active_pad;
         RenHdcEngine *e = rh_engine;
         rh_engine = NULL;
         rh_active_pad = NULL;
         rh_joy = NULL;
         rh_is_bt = 0;
+        rh_usb_no_queue = 0;
         memset(rh_last_pkt, 0, sizeof(rh_last_pkt));
         rh_has_last_pkt = 0;
         rh_last_send_us = 0;
         ReleaseSRWLockExclusive(&rh_lock);
 
+        rh_clear_pro_transport(joy);
         static const uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
         if (target && sdl.send_effect) sdl.send_effect(target, stop_pkt, sizeof(stop_pkt));
         if (e && rh.destroy) rh.destroy(e);
@@ -1955,14 +1997,28 @@ static void rh_apply_settings_live(void) {
     RhUserOpts u = rh_read_opts();
 
     /* 1. Pro Controller live reconfigure */
-    AcquireSRWLockExclusive(&rh_lock);
+    void *pro_joy = NULL;
+    int pro_bt = 0;
+    int pro_have = 0;
+    AcquireSRWLockShared(&rh_lock);
     if (rh_engine && rh.apply) {
+        pro_joy = rh_joy;
+        pro_bt = rh_is_bt;
+        pro_have = 1;
+    }
+    ReleaseSRWLockShared(&rh_lock);
+    if (pro_have) {
         RenHdcSettings s;
-        if (rh_resolve_pro_settings(&s, rh_is_bt)) {
-            rh.apply(rh_engine, &s);
+        if (rh_resolve_pro_settings(&s, pro_bt)) {
+            rh_apply_pro_transport(pro_joy, &s, pro_bt);
+            AcquireSRWLockExclusive(&rh_lock);
+            if (rh_engine && rh.apply) {
+                rh.apply(rh_engine, &s);
+                rh_usb_no_queue = (!rh_is_bt && s.usb_no_queue) ? 1 : 0;
+            }
+            ReleaseSRWLockExclusive(&rh_lock);
         }
     }
-    ReleaseSRWLockExclusive(&rh_lock);
 
     /* 2. DualSense slots live reconfigure */
     for (int i = 0; i < RH_MAX_PADS; i++) {
@@ -2301,12 +2357,16 @@ void rh_attach(void *pad) {
             hos_log("renhdrum: off (defaults failed)");
             return;
         }
-        rh.apply(e, &s);
         void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
+        static const uint8_t stop_pkt[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
+        if (joy && sdl.send_effect) sdl.send_effect(joy, stop_pkt, sizeof(stop_pkt));
+        rh_apply_pro_transport(joy, &s, bt);
+        rh.apply(e, &s);
 
         AcquireSRWLockExclusive(&rh_lock);
         if (rh_engine) {
             ReleaseSRWLockExclusive(&rh_lock);
+            rh_clear_pro_transport(joy);
             rh.destroy(e);
             return;
         }
@@ -2314,6 +2374,7 @@ void rh_attach(void *pad) {
         rh_active_pad = pad;
         rh_joy = joy;
         rh_is_bt = bt ? 1 : 0;
+        rh_usb_no_queue = (!bt && s.usb_no_queue) ? 1 : 0;
         memset(rh_last_pkt, 0, sizeof(rh_last_pkt));
         rh_has_last_pkt = 0;
         rh_last_send_us = 0;
@@ -2323,8 +2384,15 @@ void rh_attach(void *pad) {
 
         rh_pads_set_claimed(pad, 1);
         rh_ensure_worker();
-        if (bt) hos_log("renhdrum: on (bluetooth level %d)", s.bluetooth_level);
-        else hos_log("renhdrum: on (usb)");
+        if (bt) {
+            if (s.bt_fast) hos_log("renhdrum: on (bluetooth detailed 5ms)");
+            else if (s.bt_after_input) hos_log("renhdrum: on (bluetooth compatible, after-input)");
+            else hos_log("renhdrum: on (bluetooth level %d)", s.bluetooth_level);
+        } else {
+            if (s.usb_no_queue && s.envelope_5ms) hos_log("renhdrum: on (usb no-queue 5ms)");
+            else if (s.usb_no_queue) hos_log("renhdrum: on (usb no-queue)");
+            else hos_log("renhdrum: on (usb)");
+        }
         return;
     }
 

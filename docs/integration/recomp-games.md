@@ -1,6 +1,6 @@
 # Static Recompilation Games HD Rumble Integration Guide
 
-This guide explains how I integrate `renhdrum.dll` (`0.5.0`) into C and C++ static recompilation runtimes using SDL3 (or SDL2) to deliver authentic HD Rumble across all four controllers supported by the core. I have shipped it this way in Longshot, totk-pc-recomp and dkb-pc-recomp. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
+This guide explains how I integrate `renhdrum.dll` (`0.5.0`) into C and C++ static recompilation runtimes using SDL3 (or SDL2) to deliver authentic HD Rumble across all four controllers supported by the core. I have shipped it this way in Longshot, totk-pc-recomp, dkb-pc-recomp and mkw-recomp. It also documents standalone hardware reliability fixes for the Nintendo Switch Pro Controller.
 
 > [!NOTE]
 > **Supported Controllers**: `✅ Nintendo Pro Controller` · `✅ DualSense` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
@@ -9,12 +9,12 @@ This guide explains how I integrate `renhdrum.dll` (`0.5.0`) into C and C++ stat
 
 ## Integration Checklist
 
-Seven checks I run before shipping any recomp integration. They come from real PR review lessons (`Goldoire/fefw-recomp#95`) and hardware testing across Hookshot, Longshot, `totk-pc-recomp`, and `LASRecomp`:
+Seven checks I run before shipping any recomp integration. They come from real PR review lessons (`Goldoire/fefw-recomp#95`) and hardware testing across Hookshot, Longshot, `totk-pc-recomp`, `dkb-pc-recomp`, `mkw-recomp`, and `LASRecomp`:
 
 1. **Load `renhdrum.dll` by full path beside the executable.** Never pass a bare filename that searches CWD or `PATH`. Verify `(renhdrum_version() >> 8) == (RENHDRUM_VERSION >> 8)` (`0x0005xx` for `0.5.0`), and resolve optional functions as "use if present". When the core's `major.minor` changes, copy the new `renhdrum.h` into your tree and rebuild; otherwise the bridge refuses the DLL and the game keeps its normal rumble (safe on purpose).
 2. **Apply intensity in one place only.** `volume_percent` in `renhdrum_dualsense_dsp_create` is already the final output gain; never scale samples again before pushing them. To change volume at runtime, recreate the DSP handle while keeping the audio stream open.
 3. **Respect the host's rumble and HD Rumble switches everywhere.** Turning rumble off must stop both RenHDrum haptics and plain motor rumble; turning HD Rumble off must release all claimed pads cleanly back to the host's built-in rumble.
-4. **Always route Switch Pro Bluetooth through the core's limiter.** **Compatible** (level 4, default) runs on unpatched SDL3 out of the box (newest value, 32 ms minimum spacing, 40 ms resend while rumbling). **Detailed (5 ms)** (`bt_fast`) requires idle-gated SDL3 transport patches. Never push raw unthrottled HID packets over Bluetooth.
+4. **Always route Switch Pro Bluetooth through the core's limiter, and patch `SDL3.dll` when you build it.** **Compatible** (level 4) runs on unpatched SDL3 out of the box (newest value, 32 ms minimum spacing, 40 ms resend while rumbling). When the host builds its own `SDL3.dll` (or ships a custom one), apply [`integrations/sdl3/sdl3-patches/0001-hdrumble.patch`](../../integrations/sdl3/sdl3-patches/0001-hdrumble.patch) and [`0002-hdrumble-idle-write.patch`](../../integrations/sdl3/sdl3-patches/0002-hdrumble-idle-write.patch): the `recomp-c` bridge automatically resolves `SDL_HDRumbleSetNoQueue`, `SDL_HDRumbleSetNoQueueBluetooth`, and `SDL_HDRumbleSetBluetoothAfterInput` when present, unlocking **Detailed (5 ms)** envelope framing and write-after-input over Bluetooth (eliminating half-duplex Bluetooth input lag in continuous-vibration games) and no-queue 5 ms over USB. Never push raw unthrottled HID packets over Bluetooth.
 5. **Fall back in layers and avoid lock inversion.** Missing DLL, version mismatch, missing optional exports, missing DualSense speaker, or repeated write failures must degrade cleanly per pad. Always drop host locks before joining worker threads.
 6. **Call `rh_shutdown()` on every exit path while playing.** `ExitProcess` / `TerminateProcess` skip `atexit`, so a handler is not enough (see section 11, lesson 1). Do not call it from a crash handler.
 7. **Never claim a virtual pad.** Skip Steam Input stand-in pads and the host's own virtual pads, or the rumble fires twice (see section 11, lesson 4).
@@ -142,8 +142,10 @@ Follow strict lock discipline:
 ### 4.1 Nintendo Switch Pro Controller (`057E:2009`)
 - **Detection**: `vid == 0x057E && pid == 0x2009`.
 - **Engine**: `renhdrum_engine_create(bt != 0, true)` with `renhdrum_settings_default(&s)`.
-- **Bluetooth**: Default to `s.bluetooth_level = 4` (**Compatible** — 32 ms spacing, newest value, 40 ms resend handled inside the core, safe on unpatched SDL3). Allow optional `HOOKSHOT_BT_LEVEL=1..4` override. Keep `usb_no_queue = bt_after_input = bt_fast = false` when targeting unpatched SDL3.
-- **Output**: 10-byte sub-command `0x10` packets via `SDL_SendJoystickEffect`. Over USB, if no new non-silent packet was sent for `40 ms` (`RH_RESEND_US = 40000`), resend the last non-silent packet so the controller's hardware watchdog does not drop sustained rumbles. On detach, send the neutral packet `{0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40}`.
+- **SDL3 transport modes (`SDL_HDRumbleSet*`)**: At runtime the bridge looks up `SDL_HDRumbleSetNoQueue`, `SDL_HDRumbleSetNoQueueBluetooth`, and `SDL_HDRumbleSetBluetoothAfterInput` in `SDL3.dll`.
+  - When those exports are present (patched `SDL3.dll`): over Bluetooth it enables `SDL_HDRumbleSetNoQueueBluetooth(joy, 1, 10)` for **Detailed (5 ms)** (`bt_fast && bt_after_input`) or `SDL_HDRumbleSetBluetoothAfterInput(joy, 1)` for **Compatible** (`!bt_fast && bt_after_input`), and over USB it enables `SDL_HDRumbleSetNoQueue(joy, 1, gap_ms, usb_pause_ms)` (with SDL handling the 50 ms USB / 150 ms Bluetooth keep-alive refresh).
+  - When running against an unpatched stock `SDL3.dll`: it clears `usb_no_queue = bt_after_input = bt_fast = false` so the core paces Bluetooth at Level 4 (**Compatible** — 32 ms spacing, newest value, 40 ms resend) and the worker resends active USB packets every `40 ms` (`RH_RESEND_US = 40000`).
+- **Output**: 10-byte sub-command `0x10` packets via `SDL_SendJoystickEffect`. On detach, reset any active `SDL_HDRumbleSet*` modes to `0` and send the neutral packet `{0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40}`.
 
 ### 4.2 Sony DualSense / DualSense Edge (`054C:0CE6` / `0x0DF2`)
 - **Detection**: `vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)`.
@@ -284,12 +286,12 @@ Many recomp runtimes exit abruptly via `ExitProcess` without closing controllers
 
 ---
 
-## 11. Lessons from the Longshot, totk-pc-recomp and dkb-pc-recomp ports
+## 11. Lessons from the Longshot, totk-pc-recomp, dkb-pc-recomp and mkw-recomp ports
 
-I ported the `0.5.0` bridge to Longshot, to totk-pc-recomp (a Switch 1 game) and to dkb-pc-recomp (a Switch 2 game). These are the things that cost me time, in the order I would check them.
+I ported the `0.5.0` bridge to Longshot, to totk-pc-recomp (a Switch 1 game), to dkb-pc-recomp (a Switch 2 game), and to mkw-recomp (a Switch 2 game). These are the things that cost me time, in the order I would check them.
 
 1. **Exit.** `ExitProcess` and `TerminateProcess` skip `atexit`, so call `rh_shutdown()` on every exit path while the game is playing. Without it a wired Pro Controller is left in its special mode and the player sees stuck buttons after quitting (the "stuck key after exit" bug). `rh_shutdown()` releases the DualSense speaker and triggers, sends the Steam grip "off" report and closes the HID handles; it is safe to call more than once. Do not call it from a crash handler (it can wait on a lock the crashed thread holds).
-   - Closing the pads as well is only safe on the thread that owns them. In totk, `input_shutdown()` calls `rh_shutdown()` and then closes the gamepad, ahead of each of the five `plat_exit(0)` calls.
+   - Closing the pads as well is only safe on the thread that owns them. In totk, dkb and mkw-recomp, `input_shutdown()` calls `rh_shutdown()` and then closes the gamepads ahead of every `plat_exit(0)` call (five in totk, six in mkw-recomp).
    - In Longshot the pad poll loop runs on another thread, so closing pads from the exit path would race with it. There I call only `rh_shutdown()`, in `hos_close_finish()` (`host/hos_relaunch.c`).
 2. **The header travels with the DLL.** The bridge compares `RENHDRUM_VERSION >> 8` of the header you copied with the DLL's `renhdrum_version() >> 8`. When the DLL's `major.minor` moves, copy the new `renhdrum.h` and rebuild, or the bridge refuses the DLL and the player gets normal rumble. That is deliberate and safe. The `0.5.0` functions are loaded as "use if present": if one is missing, only that feature drops back to the normal path.
 3. **When upstream has already added RenHDrum.** Longshot vendored RenHDrum on its own in `third_party/renhdrum/` (pinned tag plus a `tree-sha256`). I replaced its private RenHDrum path with the shared bridge and kept its own Motors and HD Rumble paths for pads RenHDrum does not claim. Bump `third_party/` only the way the project's `PROVENANCE.md` says, and put the new DLL beside the game without breaking the integrity check.
@@ -304,9 +306,11 @@ I ported the `0.5.0` bridge to Longshot, to totk-pc-recomp (a Switch 1 game) and
 8. **Upstream platform checks.** totk's `check_platform.py` flags Win32 calls outside `runtime/platform/`. The bridge is Windows-only. If you want to send it upstream as a PR, move its Win32 calls into the project's platform layer first.
 9. **Packaging.** Build `renhdrum.dll` with `+crt-static` and check `dumpbin /dependents` (no `VCRUNTIME140.dll`; section 7). Never ship game dumps or keys.
 10. **Start from the newest upstream.** Take the latest upstream at the time you work. If upstream changes a lot between your survey and your build (Longshot reworked its menu within one day), survey again instead of applying an old patch blindly. `git apply --3way` needs the reference tag's blobs in the target repository.
-11. **Local co-op: one pad per player.** The bridge sends every vibration to every pad it holds; it does not know players. In dkb-pc-recomp (Donkey Kong Bananza, a second gamepad plays Pauline) I attach only player 1's pad and leave player 2 on the game's own two-motor path. Then check every path that renews player 2's rumble: one of them also refreshed player 1's motors and rumbled the claimed pad twice.
+11. **Local co-op: one pad per player.** The bridge sends every vibration to every pad it holds; it does not know players. In dkb-pc-recomp (Donkey Kong Bananza, a second gamepad plays Pauline) and mkw-recomp (Mario Kart World, up to 8 players), I attach only player 1's pad through RenHDrum and leave players 2+ on the game's own two-motor path. Then check every path that renews player 2's rumble: one of them also refreshed player 1's motors and rumbled the claimed pad twice.
+12. **Post-menu input release gate (`g_menu = 2` / `RELEASE_WAIT_NS`).** In `totk`/`dkb`/`mkw`-style runtimes, closing the F1 in-game menu (`input_menu(0)`) sets `g_menu = 2` and blocks `input_poll()` until `buttons == 0`. Because `poll_merged()` folds the 8 analog-stick direction bits (`B_SL_LEFT..B_SR_DOWN`) and keyboard/mouse buttons into `buttons`, while the F1 menu itself reads the pad via `input_pad_read()` (which bypasses `blocked()`), any resting stick offset after switching a Switch Pro Controller between Bluetooth and USB—or holding a stick/key while closing the menu—leaves `buttons != 0` forever. The controller then navigates the F1 menu normally while appearing completely dead in-game. Always bound the state-2 release wait with a timeout (`RELEASE_WAIT_NS`, 0.5–1 s, recording `plat_now_ns()` on `input_menu(0)` / `input_block(0)`) and ignore virtual stick-direction bits (`B_SL_LEFT..B_SR_DOWN`) when checking whether the menu-closing button was released.
+13. **Patching `SDL3.dll` (`0001-hdrumble.patch` + `0002-hdrumble-idle-write.patch`) for Switch Pro 1 Bluetooth.** In a game that streams continuous road/engine vibration every frame (such as *Mario Kart World*), stock SDL3's Switch HID driver refreshes Bluetooth rumble every 50 ms and queues writes onto `SDL_HIDAPI_RumbleThread` with a 10 ms delay without waiting for an input report. Over half-duplex Bluetooth this starves input reports (button lag) and forces the bridge into 32 ms point-sampled fallback (`Compatible`) instead of the 5 ms AM/FM envelope planner (`Detailed`). Whenever the project builds `SDL3.dll` from source (for example in `windeps.py`), apply both patches from `integrations/sdl3/sdl3-patches/` and export `SDL_HDRumbleSetNoQueue`, `SDL_HDRumbleSetNoQueueBluetooth`, and `SDL_HDRumbleSetBluetoothAfterInput` so the bridge activates idle-gated 5 ms framing and write-after-input automatically.
 
-12. **Lessons from the Eden-based Switch 2 and Switch 1 builds (Brontide-NS2, Brontide-oot).** These are C++/Qt emulators, not recomps, but the same mistakes show up:
+14. **Lessons from the Eden-based Switch 2 and Switch 1 builds (Brontide-NS2, Brontide-oot).** These are C++/Qt emulators, not recomps, but the same mistakes show up:
     - **One writer per trigger.** Trigger commands from two threads undo each other. Send them from one thread.
     - **Take the settings from the core.** Build the HD Rumble page from `renhdrum_options` and keep the values in a `renhdrum_store_*` store; do not keep your own copy of each key. A new core row then needs no host rebuild (see [ui-guidelines.md](ui-guidelines.md), `integrations/qt/`).
     - **Call `renhdrum_dualsense_dsp_set_speaker` on Bluetooth too.** The `0x36` report carries the speaker; the core turns it on by itself if you forget, but the host should set it so the switch is honoured in one place.
@@ -315,13 +319,13 @@ I ported the `0.5.0` bridge to Longshot, to totk-pc-recomp (a Switch 1 game) and
 
 ### Which controller is wired in where
 
-| Controller | Brontide-NS2 / oot / Brontide | Longshot | totk-pc-recomp | dkb-pc-recomp |
-|---|:---:|:---:|:---:|:---:|
-| Switch Pro Controller | yes | yes | yes | yes |
-| DualSense, wired (motors + speaker + triggers) | yes | yes | yes | yes |
-| DualSense, Bluetooth (rumble + triggers + speaker) | yes | yes | yes | yes |
-| Xbox One S / Series | yes | yes | yes | yes |
-| Steam Controller (2026) | yes | yes | yes | yes |
+| Controller | Brontide-NS2 / oot / Brontide | Longshot | totk-pc-recomp | dkb-pc-recomp | mkw-recomp |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Switch Pro Controller | yes | yes | yes | yes | yes |
+| DualSense, wired (motors + speaker + triggers) | yes | yes | yes | yes | yes |
+| DualSense, Bluetooth (rumble + triggers + speaker) | yes | yes | yes | yes | yes |
+| Xbox One S / Series | yes | yes | yes | yes | yes |
+| Steam Controller (2026) | yes | yes | yes | yes | yes |
 
 Every host here calls the same core functions, so a new core release reaches all of them by replacing `renhdrum.dll` (and the header for the recomp bridge).
 

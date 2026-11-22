@@ -199,4 +199,4 @@ if (n == 1) { /* send report with HID output report 0x36 */ }
 The `0x36` layout and the Opus speaker framing were learned from Enhanced-PS5-DualSense-Haptics-Bridge by ragnarok179 (MIT), then written again in Rust. See [CREDITS](../CREDITS.md).
 
 ### 6.4 Where it runs
-Brontide-NS2, Brontide-oot, Brontide (Switch 1), totk-pc-recomp and Longshot, through the `recomp-c` bridge or the Eden patch series. The host pages are the [recompiled PC ports guide](recomp-games.md) and [Switch 2 games](switch2-games.md).
+Brontide-NS2, Brontide-oot, Brontide (Switch 1), totk-pc-recomp, dkb-pc-recomp, mkw-recomp and Longshot, through the `recomp-c` bridge or the Eden patch series. The host pages are the [recompiled PC ports guide](recomp-games.md) and [Switch 2 games](switch2-games.md).
