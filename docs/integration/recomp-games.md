@@ -9,7 +9,7 @@ This guide explains how I integrate `renhdrum.dll` (`0.5.0`) into C and C++ stat
 
 ## Integration Checklist
 
-Seven checks I run before shipping any recomp integration. They come from real PR review lessons (`Goldoire/fefw-recomp#95`) and hardware testing across Hookshot, Longshot, `totk-pc-recomp`, `dkb-pc-recomp`, `mkw-recomp`, and `LASRecomp`:
+Eight checks I run before shipping any recomp integration. They come from real PR review lessons (`Goldoire/fefw-recomp#95`) and hardware testing across Hookshot, Longshot, `totk-pc-recomp`, `dkb-pc-recomp`, `mkw-recomp`, and `LASRecomp`:
 
 1. **Load `renhdrum.dll` by full path beside the executable.** Never pass a bare filename that searches CWD or `PATH`. Verify `(renhdrum_version() >> 8) == (RENHDRUM_VERSION >> 8)` (`0x0005xx` for `0.5.0`), and resolve optional functions as "use if present". When the core's `major.minor` changes, copy the new `renhdrum.h` into your tree and rebuild; otherwise the bridge refuses the DLL and the game keeps its normal rumble (safe on purpose).
 2. **Apply intensity in one place only.** `volume_percent` in `renhdrum_dualsense_dsp_create` is already the final output gain; never scale samples again before pushing them. To change volume at runtime, recreate the DSP handle while keeping the audio stream open.
@@ -18,6 +18,7 @@ Seven checks I run before shipping any recomp integration. They come from real P
 5. **Fall back in layers and avoid lock inversion.** Missing DLL, version mismatch, missing optional exports, missing DualSense speaker, or repeated write failures must degrade cleanly per pad. Always drop host locks before joining worker threads.
 6. **Call `rh_shutdown()` on every exit path while playing.** `ExitProcess` / `TerminateProcess` skip `atexit`, so a handler is not enough (see section 11, lesson 1). Do not call it from a crash handler.
 7. **Never claim a virtual pad.** Skip Steam Input stand-in pads and the host's own virtual pads, or the rumble fires twice (see section 11, lesson 4).
+8. **Prefer the bridge.** If you call the core yourself, read section 11, lesson 15 first.
 
 ---
 
@@ -292,7 +293,7 @@ I ported the `0.5.0` bridge to Longshot, to totk-pc-recomp (a Switch 1 game), to
 
 1. **Exit.** `ExitProcess` and `TerminateProcess` skip `atexit`, so call `rh_shutdown()` on every exit path while the game is playing. Without it a wired Pro Controller is left in its special mode and the player sees stuck buttons after quitting (the "stuck key after exit" bug). `rh_shutdown()` releases the DualSense speaker and triggers, sends the Steam grip "off" report and closes the HID handles; it is safe to call more than once. Do not call it from a crash handler (it can wait on a lock the crashed thread holds).
    - Closing the pads as well is only safe on the thread that owns them. In totk, dkb and mkw-recomp, `input_shutdown()` calls `rh_shutdown()` and then closes the gamepads ahead of every `plat_exit(0)` call (five in totk, six in mkw-recomp).
-   - In Longshot the pad poll loop runs on another thread, so closing pads from the exit path would race with it. There I call only `rh_shutdown()`, in `hos_close_finish()` (`host/hos_relaunch.c`).
+   - In Longshot the pad poll loop runs on another thread, so closing pads from the exit path would race with it. In `hos_close_finish()` (`host/hos_relaunch.c`) I first stop that thread (waiting at most 250 ms), then call `rh_shutdown()`, and close the pads only if the thread has really stopped.
 2. **The header travels with the DLL.** The bridge compares `RENHDRUM_VERSION >> 8` of the header you copied with the DLL's `renhdrum_version() >> 8`. When the DLL's `major.minor` moves, copy the new `renhdrum.h` and rebuild, or the bridge refuses the DLL and the player gets normal rumble. That is deliberate and safe. The `0.5.0` functions are loaded as "use if present": if one is missing, only that feature drops back to the normal path.
 3. **When upstream has already added RenHDrum.** Longshot vendored RenHDrum on its own in `third_party/renhdrum/` (pinned tag plus a `tree-sha256`). I replaced its private RenHDrum path with the shared bridge and kept its own Motors and HD Rumble paths for pads RenHDrum does not claim. Bump `third_party/` only the way the project's `PROVENANCE.md` says, and put the new DLL beside the game without breaking the integrity check.
 4. **Virtual pads.** Do not claim a Steam Input stand-in (`SDL_GetGamepadSteamHandle(pad) != 0`, or `0x28DE:0x11FF`), nor a pad the host creates itself (Longshot's `pad_switch2.c`). Claiming both the real and the virtual pad rumbles twice.
@@ -316,6 +317,15 @@ I ported the `0.5.0` bridge to Longshot, to totk-pc-recomp (a Switch 1 game), to
     - **Call `renhdrum_dualsense_dsp_set_speaker` on Bluetooth too.** The `0x36` report carries the speaker; the core turns it on by itself if you forget, but the host should set it so the switch is honoured in one place.
     - **Each wired DualSense gets its own speaker.** Do not share the first pad's audio stream between two pads.
     - **Controls page.** Put the **HD Rumble** button below the controller picture, not on top of the stick test circles.
+
+15. **If you call the core directly instead of using the bridge.** A recomp that wrote its own path (Longshot 3.2.0 is one example) can hit the first six problems below; the last is a rule to keep when you rework the speaker path. Each is symptom, cause, fix:
+    - **Pro Controller over Bluetooth feels like the old, slow level.** Calling only `renhdrum_engine_create` leaves the default settings (60 ms spacing, no resend). Fix: after creating the engine, call `renhdrum_settings_resolve_pure` and `renhdrum_engine_apply_settings`, so Compatible (32 ms, resend every 40 ms) is used.
+    - **Wired Pro Controller stops rumbling during a steady rumble.** On USB the core skips a packet equal to the last one, and stock SDL3 does not resend it. Fix: when rumbling, the host resends the last packet every 40 ms (or uses the patched `SDL3.dll`).
+    - **Switch 2 Pro, paired Joy-Cons or third-party Switch pads lose all rumble.** Treating every Switch `SDL_GamepadType` as a real Pro Controller sends them down the HD path, and the failed send is ignored. Fix: use the HD path only for a real `057E:2009` (not virtual, not Steam), and when the send function fails, fall back to the normal motor rumble.
+    - **A pad stays stuck after closing the window or restarting.** The close-window and relaunch paths are exit paths too (lesson 1). Fix: call `rh_shutdown()` there, and close the `SDL_Gamepad` handles on the thread that owns them.
+    - **Rumble feels wrong when the strength is not 100%, or the wired DualSense feels dull; Xbox trigger rumble lingers.** Scaling the raw value before the core moves its thresholds. Fix: push the raw value, apply gain after the curve (checklist item 2), pass `crisp_notes = true` for wired DualSense (`false` only for Bluetooth `0x32`), detect Xbox by VID `0x045E`, hold triggers for 200 ms and call `renhdrum_xbox_rumble_resend`.
+    - **Switch 2 games report an unimplemented import, or ignore the pause of vibration.** `IsOunceVibrationDeviceMounted` is missing and `PermitVibration(bool)` is empty. Fix: return 1 from the first and wire the second to `rh_permit`.
+    - **The DualSense speaker and HD Haptics fight each other.** A second 4-channel stream makes both sides toggle the speaker on and off. Fix: mix the game's controller-speaker audio into channels 0 and 1 of the one 48 kHz 4-channel stream the bridge already runs.
 
 ### Which controller is wired in where
 
