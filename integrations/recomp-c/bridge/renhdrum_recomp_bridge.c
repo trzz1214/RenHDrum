@@ -1,7 +1,8 @@
-/* renhdrum_recomp_bridge.c - Generic RenHDrum 0.5.0 bridge for static recompilations
-   Authentic HD Rumble for Nintendo Switch Pro Controller (USB & Bluetooth), DualSense / Edge
-   (USB 4-ch 48 kHz + speaker + reactive triggers, Bluetooth 0x36 Opus + triggers / 0x32),
-   Xbox One S (4 motors + Direct mode), and Steam Controller 2026 grips (experimental).
+/* renhdrum_recomp_bridge.c - Generic RenHDrum 0.6.0 bridge for static recompilations
+   Authentic HD Rumble for Nintendo Switch Pro Controller (USB & Bluetooth),
+   Switch 2 Pro Controller (USB, experimental), DualSense / Edge (USB 4-ch 48 kHz +
+   speaker + reactive triggers, Bluetooth 0x36 Opus + triggers / 0x32), Xbox One S
+   (4 motors + Direct mode), and Steam Controller 2026 grips (experimental).
    Loaded dynamically at run time (no import library needed).
    MIT OR Apache-2.0 / GPL-3.0 compatibility */
 #ifndef _CRT_SECURE_NO_WARNINGS
@@ -32,6 +33,16 @@
 #define RH_DS_AUDIO_MAX_ATTEMPTS 10
 #define RH_STEAM_FAILS_MAX 100
 #define RH_STEAM_TAIL_NS 100000000LL
+#define RH_PRO2_FAILS_MAX 100
+
+#ifndef RENHDRUM_PRO2_REPORT_SIZE
+typedef struct RenHdcPro2 RenHdcPro2;
+#define RENHDRUM_PRO2_REPORT_SIZE 64
+#endif
+
+#ifndef RENHDRUM_ABI_COMPATIBLE
+#define RENHDRUM_ABI_COMPATIBLE(v) ((((uint32_t)(v)) >> 16) == ((uint32_t)RENHDRUM_VERSION >> 16) && ((uint32_t)(v)) >= (uint32_t)RENHDRUM_VERSION)
+#endif
 
 #ifndef SDLCALL
 #if defined(_WIN32) && !defined(_WIN64)
@@ -110,6 +121,10 @@ static struct {
     void (*tri_destroy)(RenHdcTriTrigger *);
     int32_t (*tri_update)(RenHdcTriTrigger *, uint32_t, uint8_t, float, float, float, float, bool, uint8_t *);
     void (*tri_note_action)(RenHdcTriTrigger *, uint32_t);
+    RenHdcTriggerPreset *(*preset_create)(void);
+    void (*preset_destroy)(RenHdcTriggerPreset *);
+    void (*preset_set)(RenHdcTriggerPreset *, uint8_t, float, uint32_t);
+    int32_t (*preset_tick)(RenHdcTriggerPreset *, uint32_t, uint8_t *);
     int32_t (*hd_speaker_block)(int32_t, uint8_t *);
     int32_t (*hd_trigger_block)(int32_t, const uint8_t *, uint8_t *);
 
@@ -130,6 +145,13 @@ static struct {
     int32_t (*sv_build)(RenHdcDualSenseDsp *, uint8_t, uint8_t *);
     int32_t (*sv_mode_tick)(RenHdcDualSenseDsp *, uint8_t, uint64_t, bool, uint8_t *);
     int32_t (*sv_mode_off)(uint8_t, uint8_t *);
+
+    /* Switch 2 Pro Controller (experimental) */
+    RenHdcPro2 *(*pro2_create)(uint16_t);
+    void (*pro2_destroy)(RenHdcPro2 *);
+    int32_t (*pro2_push)(RenHdcPro2 *, int64_t, bool, float, float, float, float);
+    int32_t (*pro2_build)(RenHdcPro2 *, int64_t, uint8_t *);
+    int32_t (*pro2_silent)(RenHdcPro2 *, uint8_t *);
 } rh;
 
 /* ---- SDL3 / SDL2 dynamic dispatch ---- */
@@ -140,6 +162,8 @@ static struct {
     uint16_t (*get_pid)(void *);
     int (*get_conn)(void *);
     void *(*get_joy)(void *);
+    uint32_t (*get_joy_id)(void *);
+    bool (*is_joy_virtual)(uint32_t);
     int (*send_effect)(void *, const void *, int);
     void (*close_pad)(void *);
     int (*rumble_pad)(void *, uint16_t, uint16_t, uint32_t);
@@ -202,6 +226,8 @@ static void init_sdl(void) {
         rh_load_proc(&sdl.get_pid, m, "SDL_GetGamepadProduct");
         rh_load_proc(&sdl.get_conn, m, "SDL_GetGamepadConnectionState");
         rh_load_proc(&sdl.get_joy, m, "SDL_GetGamepadJoystick");
+        rh_load_proc(&sdl.get_joy_id, m, "SDL_GetJoystickID");
+        rh_load_proc(&sdl.is_joy_virtual, m, "SDL_IsJoystickVirtual");
         rh_load_proc(&sdl.send_effect, m, "SDL_SendJoystickEffect");
         rh_load_proc(&sdl.close_pad, m, "SDL_CloseGamepad");
         rh_load_proc(&sdl.rumble_pad, m, "SDL_RumbleGamepad");
@@ -608,7 +634,49 @@ static int rh_pkt_is_silent(const uint8_t p[10]) {
     return memcmp(p + 2, neutral, 4) == 0 && memcmp(p + 6, neutral, 4) == 0;
 }
 
+/* ---- Switch 2 Pro Controller state (experimental) ---- */
+static SRWLOCK rh_pro2_lock = SRWLOCK_INIT;
+static RenHdcPro2 *rh_pro2;
+static void *rh_pro2_pad;
+static void *rh_pro2_joy;
+static int64_t rh_pro2_at[2];
+static int rh_pro2_muted[2];
+static int rh_pro2_fails;
+
+static void rh_pro2_send_silent(RenHdcPro2 *h, void *target, int count) {
+    if (!h || !target || !rh.pro2_silent || !sdl.send_effect) return;
+    uint8_t pkt[RENHDRUM_PRO2_REPORT_SIZE];
+    for (int i = 0; i < count; i++) {
+        if (rh.pro2_silent(h, pkt) == RENHDRUM_OK) {
+            sdl.send_effect(target, pkt, RENHDRUM_PRO2_REPORT_SIZE);
+        }
+    }
+}
+
+static int rh_pro2_detach(void *pad) {
+    AcquireSRWLockExclusive(&rh_pro2_lock);
+    if (!rh_pro2 || (pad && rh_pro2_pad != pad)) {
+        ReleaseSRWLockExclusive(&rh_pro2_lock);
+        return 0;
+    }
+    RenHdcPro2 *h = rh_pro2;
+    void *target = rh_pro2_joy ? rh_pro2_joy : rh_pro2_pad;
+    rh_pro2 = NULL;
+    rh_pro2_pad = NULL;
+    rh_pro2_joy = NULL;
+    rh_pro2_at[0] = rh_pro2_at[1] = 0;
+    rh_pro2_muted[0] = rh_pro2_muted[1] = 0;
+    rh_pro2_fails = 0;
+    ReleaseSRWLockExclusive(&rh_pro2_lock);
+
+    rh_pro2_send_silent(h, target, 3);
+    if (rh.pro2_destroy) rh.pro2_destroy(h);
+    return 1;
+}
+
 /* ---- DualSense state (per-pad slots; lock order: restart_lock -> tri_lock -> lock -> dsp_lock -> audio_claim_lock) ---- */
+/* An IMPACT_PULSE beats layer 1 this long: the core pulse length (IMPACT_DURATION_MS 150 in RenHDrum). */
+#define RH_PULSE_BEATS_TRI_MS 150
 typedef struct RhDsSlot {
     SRWLOCK restart_lock;
     SRWLOCK tri_lock;
@@ -644,6 +712,13 @@ typedef struct RhDsSlot {
     RenHdcTriTrigger *tri[2];
     float tri_sample[2][4];
     int tri_fresh[2];
+    RenHdcTriggerPreset *preset[2];
+    LONG preset_gen[2];
+    int preset_active[2];
+    uint32_t pulse_until_ms[2];   /* 6c round 1: until then an IMPACT_PULSE beats layer 1 (0 = none pending) */
+    uint8_t preset_last[2][11];   /* the last bytes a running preset sent (6a: back after a layer-1 effect) */
+    uint8_t tri_last[2][11];
+    int tri_last_valid[2];
     uint8_t bt_effect[2][11];
     int bt_effect_set[2];
     int64_t at[2];
@@ -653,6 +728,9 @@ typedef struct RhDsSlot {
 static RhDsSlot rh_ds_slots[RH_MAX_PADS];
 static SRWLOCK rh_ds_audio_claim_lock = SRWLOCK_INIT;
 static uint32_t rh_claimed_audio_devs[RH_MAX_PADS];
+static volatile LONG rh_presets_ready = 0;
+static volatile LONG rh_preset_packed[2];
+static volatile LONG rh_preset_gen[2];
 
 /* ---- Xbox One S state ---- */
 static SRWLOCK rh_xb_lock = SRWLOCK_INIT;
@@ -832,6 +910,10 @@ static void SDLCALL ds_audio_dev_cb(void *userdata, uint8_t *stream, int len) {
     if (rem > 0) memset(dst, 0, (size_t)rem);
 }
 
+static int rh_has_trigger_preset_api(void) {
+    return rh.preset_create && rh.preset_destroy && rh.preset_set && rh.preset_tick;
+}
+
 static int rh_has_hd_haptics_api(void) {
     return rh.ds_set_speaker && rh.hd_speaker_block && rh.hd_trigger_block &&
            rh.tri_create && rh.tri_destroy && rh.tri_update;
@@ -871,12 +953,28 @@ static void rh_ds_sync_hd_haptics_slot(int slot_idx) {
                     log_trigger = 1;
                 }
             }
+            if (rh_has_trigger_preset_api() && !slot->preset[s]) {
+                slot->preset[s] = rh.preset_create();
+                slot->preset_gen[s] = InterlockedCompareExchange(&rh_preset_gen[s], 0, 0);
+                slot->preset_active[s] = 0;
+                slot->pulse_until_ms[s] = 0;
+                slot->tri_last_valid[s] = 0;
+                memset(slot->tri_last[s], 0, sizeof(slot->tri_last[s]));
+                slot->tri_last[s][0] = 0x05;
+            }
         }
     } else {
         for (int s = 0; s < 2; s++) {
             if (slot->tri[s]) {
                 rh.tri_destroy(slot->tri[s]);
                 slot->tri[s] = NULL;
+                off_triggers = 1;
+            }
+            if (slot->preset[s]) {
+                if (rh.preset_destroy) rh.preset_destroy(slot->preset[s]);
+                slot->preset[s] = NULL;
+                slot->preset_active[s] = 0;
+                slot->pulse_until_ms[s] = 0;
                 off_triggers = 1;
             }
         }
@@ -1294,6 +1392,8 @@ static void rh_ds_restart_bt(int slot_idx) {
     hos_log("renhdrum: dualsense bt haptics restarted");
 }
 
+static const uint8_t OFF_EFFECT11[11] = {0x05};
+
 static void rh_ds_trigger_step(int slot_idx, int64_t now_us, int is_right) {
     if (slot_idx < 0 || slot_idx >= RH_MAX_PADS) return;
     RhDsSlot *slot = &rh_ds_slots[slot_idx];
@@ -1330,6 +1430,8 @@ static void rh_ds_trigger_step(int slot_idx, int64_t now_us, int is_right) {
     uint8_t effect11[11];
     int changed = 0;
     int bt36 = 0;
+    int log_pulse = 0, log_pulse_tri = 0;   /* logged after slot->lock is released */
+    static uint32_t pulse_log_ms[2];
     AcquireSRWLockExclusive(&slot->lock);
     if (slot->active && slot->tri[is_right]) {
         uint32_t now_ms = (uint32_t)(now_us / 1000);
@@ -1339,13 +1441,73 @@ static void rh_ds_trigger_step(int slot_idx, int64_t now_us, int is_right) {
         int fresh = slot->tri_fresh[is_right];
         slot->tri_fresh[is_right] = 0;
         const float *s = slot->tri_sample[is_right];
-        changed = rh.tri_update(slot->tri[is_right], now_ms, depth,
-                                s[0], s[1], s[2], s[3], fresh != 0, effect11);
+        uint8_t tri_eff[11];
+        int tri_changed = rh.tri_update(slot->tri[is_right], now_ms, depth,
+                                        s[0], s[1], s[2], s[3], fresh != 0, tri_eff);
+        if (tri_changed == 1) {
+            memcpy(slot->tri_last[is_right], tri_eff, 11);
+            slot->tri_last_valid[is_right] = (tri_eff[0] != 0x05);
+        }
+        if (slot->preset[is_right] && rh.preset_set && rh.preset_tick) {
+            LONG g = InterlockedCompareExchange(&rh_preset_gen[is_right], 0, 0);
+            if (g != slot->preset_gen[is_right]) {
+                slot->preset_gen[is_right] = g;
+                LONG packed = InterlockedCompareExchange(&rh_preset_packed[is_right], 0, 0);
+                uint8_t pid = (uint8_t)((packed >> 16) & 0xFF);
+                float plvl = (float)(packed & 0xFFFF) / 1000.0f;
+                rh.preset_set(slot->preset[is_right], pid, plvl, now_ms);
+                if (pid == 12) {   /* IMPACT_PULSE: for RH_PULSE_BEATS_TRI_MS it beats layer 1 (plan 143 6c round 1) */
+                    slot->pulse_until_ms[is_right] = now_ms + RH_PULSE_BEATS_TRI_MS;
+                    if (now_ms - pulse_log_ms[is_right] >= 200) {
+                        pulse_log_ms[is_right] = now_ms;
+                        log_pulse = 1;
+                        log_pulse_tri = slot->tri_last_valid[is_right];
+                    }
+                }
+            }
+            const int in_pulse = slot->pulse_until_ms[is_right] && now_ms < slot->pulse_until_ms[is_right];
+            uint8_t p11[11];
+            int pt = rh.preset_tick(slot->preset[is_right], now_ms, p11);
+            /* Which bytes go out (plan 143 6c round 7), in this order: (a) a pulse is on: the preset's bytes; (b) layer 1 (the game's
+               rumble-following trigger) has an effect: its new bytes whenever they change, whatever the preset does; (c) layer 1 has
+               none: the preset's bytes (Off too); (d) layer 1 just went Off: the running preset's last bytes, else Off. */
+            if (pt == 1) {
+                slot->preset_active[is_right] = p11[0] != 0x05;
+                if (slot->preset_active[is_right]) memcpy(slot->preset_last[is_right], p11, 11);
+            }
+            if (in_pulse && pt == 1) {
+                memcpy(effect11, p11, 11);
+                changed = 1;
+            } else if (in_pulse) {
+                /* pulse holds the trigger */
+            } else if (slot->tri_last_valid[is_right]) {
+                if (tri_changed == 1) memcpy(effect11, tri_eff, 11), changed = 1;
+            } else if (pt == 1) {
+                memcpy(effect11, p11, 11);
+                changed = 1;
+            } else if (tri_changed == 1) {
+                memcpy(effect11, slot->preset_active[is_right] ? slot->preset_last[is_right] : OFF_EFFECT11, 11);
+                changed = 1;
+            }
+            /* The pulse is over: give the trigger back to layer 1 if it has an effect, else the running preset, else Off. */
+            if (slot->pulse_until_ms[is_right] && !in_pulse) {
+                slot->pulse_until_ms[is_right] = 0;
+                if (!changed) {
+                    memcpy(effect11, slot->tri_last_valid[is_right] ? slot->tri_last[is_right]
+                                     : slot->preset_active[is_right] ? slot->preset_last[is_right] : OFF_EFFECT11, 11);
+                    changed = 1;
+                }
+            }
+        } else if (tri_changed == 1) {
+            memcpy(effect11, tri_eff, 11);
+            changed = 1;
+        }
         bt36 = slot->bt_report36;
         joy = slot->joy;
     }
     ReleaseSRWLockExclusive(&slot->lock);
 
+    if (log_pulse) hos_log("trigger: pulse side=%d tri=%d", is_right, log_pulse_tri);
     if (changed == 1) {
         if (bt36) {
             AcquireSRWLockExclusive(&slot->dsp_lock);
@@ -1386,7 +1548,9 @@ static int rh_ds_detach_slot(int slot_idx, int untrack_pad) {
     int speaker_on = slot->speaker_on;
     RenHdcTriTrigger *tri0 = slot->tri[0];
     RenHdcTriTrigger *tri1 = slot->tri[1];
-    int had_tri = (tri0 != NULL || tri1 != NULL);
+    RenHdcTriggerPreset *preset0 = slot->preset[0];
+    RenHdcTriggerPreset *preset1 = slot->preset[1];
+    int had_tri = (tri0 != NULL || tri1 != NULL || preset0 != NULL || preset1 != NULL);
 
     AcquireSRWLockExclusive(&slot->dsp_lock);
     RenHdcDualSenseDsp *dsp = slot->dsp;
@@ -1419,11 +1583,20 @@ static int rh_ds_detach_slot(int slot_idx, int untrack_pad) {
     slot->tri[0] = NULL;
     slot->tri[1] = NULL;
     slot->tri_fresh[0] = slot->tri_fresh[1] = 0;
+    slot->preset[0] = NULL;
+    slot->preset[1] = NULL;
+    slot->preset_gen[0] = slot->preset_gen[1] = 0;
+    slot->preset_active[0] = slot->preset_active[1] = 0;
+    slot->pulse_until_ms[0] = slot->pulse_until_ms[1] = 0;
+    slot->tri_last_valid[0] = slot->tri_last_valid[1] = 0;
+    memset(slot->tri_last, 0, sizeof(slot->tri_last));
     InterlockedExchange(&slot->bt_run, 0);
     ReleaseSRWLockExclusive(&slot->lock);
 
     if (tri0 && rh.tri_destroy) rh.tri_destroy(tri0);
     if (tri1 && rh.tri_destroy) rh.tri_destroy(tri1);
+    if (preset0 && rh.preset_destroy) rh.preset_destroy(preset0);
+    if (preset1 && rh.preset_destroy) rh.preset_destroy(preset1);
     if (had_tri && joy && rh.hd_trigger_block && sdl.send_effect) {
         for (int is_right = 0; is_right <= 1; is_right++) {
             uint8_t blk[RENHDRUM_DS5_EFFECTS_SIZE];
@@ -1702,6 +1875,55 @@ static DWORD WINAPI rh_worker(void *arg) {
             sdl.send_effect(target, pkt, 10);
         }
 
+        /* 1b. Switch 2 Pro Controller (experimental) */
+        int send_pro2 = 0;
+        uint8_t pro2_pkt[RENHDRUM_PRO2_REPORT_SIZE];
+        void *pro2_target = NULL;
+        void *pro2_pad_cur = NULL;
+        AcquireSRWLockExclusive(&rh_pro2_lock);
+        if (rh_pro2 && rh.pro2_push && rh.pro2_build) {
+            for (int s = 0; s < 2; s++) {
+                if (rh_pro2_at[s] && !rh_pro2_muted[s] && (now_us - rh_pro2_at[s] > RH_STALE_US)) {
+                    rh.pro2_push(rh_pro2, now_us, s == 1, 0.0f, 80.0f, 0.0f, 160.0f);
+                    rh_pro2_muted[s] = 1;
+                }
+            }
+            if (rh.pro2_build(rh_pro2, now_us, pro2_pkt) == 1) {
+                pro2_target = rh_pro2_joy ? rh_pro2_joy : rh_pro2_pad;
+                pro2_pad_cur = rh_pro2_pad;
+                send_pro2 = 1;
+            }
+        }
+        ReleaseSRWLockExclusive(&rh_pro2_lock);
+
+        if (send_pro2 && pro2_target && sdl.send_effect) {
+            int ok = sdl_ok(sdl.send_effect(pro2_target, pro2_pkt, RENHDRUM_PRO2_REPORT_SIZE));
+            RenHdcPro2 *drop = NULL;
+            void *drop_pad = NULL;
+            AcquireSRWLockExclusive(&rh_pro2_lock);
+            if (rh_pro2 && rh_pro2_pad == pro2_pad_cur) {
+                if (ok) {
+                    rh_pro2_fails = 0;
+                } else if (++rh_pro2_fails >= RH_PRO2_FAILS_MAX) {
+                    drop = rh_pro2;
+                    drop_pad = rh_pro2_pad;
+                    rh_pro2 = NULL;
+                    rh_pro2_pad = NULL;
+                    rh_pro2_joy = NULL;
+                    rh_pro2_at[0] = rh_pro2_at[1] = 0;
+                    rh_pro2_muted[0] = rh_pro2_muted[1] = 0;
+                    rh_pro2_fails = 0;
+                }
+            }
+            ReleaseSRWLockExclusive(&rh_pro2_lock);
+            if (drop) {
+                if (drop_pad) rh_pads_set_claimed(drop_pad, 0);
+                if (rh.pro2_destroy) rh.pro2_destroy(drop);
+                hos_log("renhdrum: Switch 2 Pro Controller refused %d packets, falling back to normal rumble",
+                        RH_PRO2_FAILS_MAX);
+            }
+        }
+
         /* 2. Xbox One S: stale watchdog & tick (RenHDrum and Direct modes) */
         uint16_t motors[4] = {0, 0, 0, 0};
         int send_xb = 0;
@@ -1955,6 +2177,9 @@ static int rh_detach_engines(void *pad, int untrack) {
         }
     }
 
+    /* Switch 2 Pro Controller detach */
+    rh_pro2_detach(pad);
+
     /* Xbox detach */
     rh_xb_detach(pad);
 
@@ -1965,6 +2190,10 @@ static int rh_detach_engines(void *pad, int untrack) {
     AcquireSRWLockShared(&rh_lock);
     int pro_active = (rh_engine != NULL);
     ReleaseSRWLockShared(&rh_lock);
+
+    AcquireSRWLockShared(&rh_pro2_lock);
+    int pro2_active = (rh_pro2 != NULL);
+    ReleaseSRWLockShared(&rh_pro2_lock);
 
     int ds_active = 0;
     for (int i = 0; i < RH_MAX_PADS; i++) {
@@ -1981,7 +2210,7 @@ static int rh_detach_engines(void *pad, int untrack) {
     int sv_active = (rh_sv_dsp != NULL);
     ReleaseSRWLockShared(&rh_sv_lock);
 
-    if (!pro_active && !ds_active && !xb_active && !sv_active) {
+    if (!pro_active && !pro2_active && !ds_active && !xb_active && !sv_active) {
         HANDLE t = rh_thread;
         rh_thread = NULL;
         InterlockedExchange(&rh_run, 0);
@@ -2223,12 +2452,12 @@ int rh_load(void) {
     }
 
     uint32_t ver = rh.version();
-    if ((ver >> 8) != ((uint32_t)RENHDRUM_VERSION >> 8)) {
-        hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected branch 0x%04xxx)",
-                (unsigned)ver, (unsigned)((uint32_t)RENHDRUM_VERSION >> 8));
+    if (!RENHDRUM_ABI_COMPATIBLE(ver)) {
+        hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected >= 0x%06x)",
+                (unsigned)ver, (unsigned)RENHDRUM_VERSION);
         snprintf(rh_load_err, sizeof(rh_load_err),
-                 "Incompatible renhdrum.dll (0x%06x, need 0x%04xxx): normal rumble",
-                 (unsigned)ver, (unsigned)((uint32_t)RENHDRUM_VERSION >> 8));
+                 "Incompatible renhdrum.dll (0x%06x, need >= 0x%06x): normal rumble",
+                 (unsigned)ver, (unsigned)RENHDRUM_VERSION);
         FreeLibrary(rh.dll);
         memset(&rh, 0, sizeof(rh));
         rh.tried = 1;
@@ -2263,6 +2492,14 @@ int rh_load(void) {
     rh_load_proc(&rh.tri_destroy, rh.dll, "renhdrum_tri_trigger_destroy");
     rh_load_proc(&rh.tri_update, rh.dll, "renhdrum_tri_trigger_update");
     rh_load_proc(&rh.tri_note_action, rh.dll, "renhdrum_tri_trigger_note_action");
+    rh_load_proc(&rh.preset_create, rh.dll, "renhdrum_trigger_preset_create");
+    rh_load_proc(&rh.preset_destroy, rh.dll, "renhdrum_trigger_preset_destroy");
+    rh_load_proc(&rh.preset_set, rh.dll, "renhdrum_trigger_preset_set");
+    rh_load_proc(&rh.preset_tick, rh.dll, "renhdrum_trigger_preset_tick");
+    if (rh_has_trigger_preset_api()) {
+        InterlockedExchange(&rh_presets_ready, 1);
+        hos_log("renhdrum: trigger presets on");
+    }
     rh_load_proc(&rh.hd_speaker_block, rh.dll, "renhdrum_hd_haptics_speaker_block");
     rh_load_proc(&rh.hd_trigger_block, rh.dll, "renhdrum_hd_haptics_trigger_block");
 
@@ -2283,6 +2520,13 @@ int rh_load(void) {
     rh_load_proc(&rh.sv_build, rh.dll, "renhdrum_valve_grip_build_report");
     rh_load_proc(&rh.sv_mode_tick, rh.dll, "renhdrum_valve_grip_mode_tick");
     rh_load_proc(&rh.sv_mode_off, rh.dll, "renhdrum_valve_grip_mode_off");
+
+    /* Optional Switch 2 Pro Controller exports */
+    rh_load_proc(&rh.pro2_create, rh.dll, "renhdrum_pro2_create");
+    rh_load_proc(&rh.pro2_destroy, rh.dll, "renhdrum_pro2_destroy");
+    rh_load_proc(&rh.pro2_push, rh.dll, "renhdrum_pro2_push_half_sample");
+    rh_load_proc(&rh.pro2_build, rh.dll, "renhdrum_pro2_build_report");
+    rh_load_proc(&rh.pro2_silent, rh.dll, "renhdrum_pro2_silent_report");
 
     int ini_enable = 1;
     AcquireSRWLockExclusive(&rh_store_lock);
@@ -2306,14 +2550,23 @@ int rh_load(void) {
 
 void rh_attach(void *pad) {
     if (!pad) return;
+    init_sdl();
+    uint16_t vid = sdl.get_vid ? sdl.get_vid(pad) : 0;
+    uint16_t pid = sdl.get_pid ? sdl.get_pid(pad) : 0;
+    void *early_joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
+    int is_virtual = 0;
+    if (sdl.is_sdl3 && sdl.is_joy_virtual && sdl.get_joy_id && early_joy) {
+        uint32_t jid = sdl.get_joy_id(early_joy);
+        if (jid != 0) is_virtual = sdl.is_joy_virtual(jid) ? 1 : 0;
+    }
+    /* Ignore SDL virtual joysticks except a Switch 2 Pro pad (057E:2069). */
+    if (is_virtual && !(vid == 0x057E && pid == 0x2069)) {
+        return;
+    }
     rh_pads_track(pad);
     if (rh_env_disabled()) return;
     if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) return;
-    init_sdl();
     if (!sdl.get_vid || !sdl.get_pid) return;
-
-    uint16_t vid = sdl.get_vid(pad);
-    uint16_t pid = sdl.get_pid(pad);
 
     /* Steam Input stand-in pad: never claimed; stops direct HID grips so Steam Input takes over */
     if (sdl.get_steam_handle && sdl.get_steam_handle(pad) != 0) {
@@ -2396,6 +2649,57 @@ void rh_attach(void *pad) {
         return;
     }
 
+    /* 1b. Nintendo Switch 2 Pro Controller (VID 0x057E, PID 0x2069, experimental) */
+    if (vid == 0x057E && pid == 0x2069) {
+        if (!rh_load()) return;
+        if (!rh.pro2_create || !rh.pro2_destroy || !rh.pro2_push || !rh.pro2_build || !rh.pro2_silent) {
+            hos_log("renhdrum: Switch 2 Pro Controller functions missing in renhdrum.dll, using normal rumble");
+            return;
+        }
+        if (!sdl.send_effect) {
+            hos_log("renhdrum: Switch 2 Pro Controller: SDL_SendJoystickEffect missing, using normal rumble");
+            return;
+        }
+
+        AcquireSRWLockShared(&rh_pro2_lock);
+        int pro2_busy = (rh_pro2 != NULL);
+        ReleaseSRWLockShared(&rh_pro2_lock);
+        if (pro2_busy) return;
+
+        RenHdcPro2 *h = rh.pro2_create(0);
+        if (!h) {
+            hos_log("renhdrum: off (switch2 pro2 create failed)");
+            return;
+        }
+        void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
+        uint8_t probe[RENHDRUM_PRO2_REPORT_SIZE];
+        if (!joy || rh.pro2_silent(h, probe) != RENHDRUM_OK ||
+            !sdl_ok(sdl.send_effect(joy, probe, RENHDRUM_PRO2_REPORT_SIZE))) {
+            rh.pro2_destroy(h);
+            hos_log("renhdrum: Switch 2 Pro Controller refused raw HD Rumble 2 report, using normal rumble");
+            return;
+        }
+
+        AcquireSRWLockExclusive(&rh_pro2_lock);
+        if (rh_pro2) {
+            ReleaseSRWLockExclusive(&rh_pro2_lock);
+            rh.pro2_destroy(h);
+            return;
+        }
+        rh_pro2 = h;
+        rh_pro2_pad = pad;
+        rh_pro2_joy = joy;
+        rh_pro2_at[0] = rh_pro2_at[1] = 0;
+        rh_pro2_muted[0] = rh_pro2_muted[1] = 0;
+        rh_pro2_fails = 0;
+        ReleaseSRWLockExclusive(&rh_pro2_lock);
+
+        rh_pads_set_claimed(pad, 1);
+        rh_ensure_worker();
+        hos_log("renhdrum: Switch 2 Pro Controller (USB, experimental)");
+        return;
+    }
+
     /* 2. Sony DualSense / DualSense Edge (VID 0x054C, PID 0x0CE6 or 0x0DF2) */
     if (vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)) {
         if (!rh_load()) return;
@@ -2471,6 +2775,14 @@ void rh_attach(void *pad) {
             slot->speaker_logged = 0;
             slot->trigger_logged = 0;
             slot->bt_report36 = 0;
+            slot->preset[0] = slot->preset[1] = NULL;
+            slot->preset_gen[0] = slot->preset_gen[1] = 0;
+            slot->preset_active[0] = slot->preset_active[1] = 0;
+            slot->pulse_until_ms[0] = slot->pulse_until_ms[1] = 0;
+            slot->tri_last_valid[0] = slot->tri_last_valid[1] = 0;
+            memset(slot->tri_last, 0, sizeof(slot->tri_last));
+            slot->tri_last[0][0] = 0x05;
+            slot->tri_last[1][0] = 0x05;
             slot->at[0] = slot->at[1] = 0;
             slot->muted[0] = slot->muted[1] = 0;
             memset(slot->bt_effect_set, 0, sizeof(slot->bt_effect_set));
@@ -2531,6 +2843,14 @@ void rh_attach(void *pad) {
         slot->speaker_logged = 0;
         slot->trigger_logged = 0;
         slot->bt_report36 = 0;
+        slot->preset[0] = slot->preset[1] = NULL;
+        slot->preset_gen[0] = slot->preset_gen[1] = 0;
+        slot->preset_active[0] = slot->preset_active[1] = 0;
+        slot->pulse_until_ms[0] = slot->pulse_until_ms[1] = 0;
+        slot->tri_last_valid[0] = slot->tri_last_valid[1] = 0;
+        memset(slot->tri_last, 0, sizeof(slot->tri_last));
+        slot->tri_last[0][0] = 0x05;
+        slot->tri_last[1][0] = 0x05;
         slot->at[0] = slot->at[1] = 0;
         slot->muted[0] = slot->muted[1] = 0;
         ReleaseSRWLockExclusive(&slot->lock);
@@ -2724,6 +3044,13 @@ const char *rh_status_line(void) {
     }
     ReleaseSRWLockShared(&rh_lock);
 
+    AcquireSRWLockShared(&rh_pro2_lock);
+    if (rh_pro2) {
+        ReleaseSRWLockShared(&rh_pro2_lock);
+        return "Connected: Switch 2 Pro Controller (USB, experimental), HD Rumble";
+    }
+    ReleaseSRWLockShared(&rh_pro2_lock);
+
     for (int i = 0; i < RH_MAX_PADS; i++) {
         RhDsSlot *slot = &rh_ds_slots[i];
         AcquireSRWLockShared(&slot->lock);
@@ -2758,6 +3085,22 @@ const char *rh_status_line(void) {
     return "No controller HD Rumble supports: normal rumble";
 }
 
+/* The game's last rumble amplitude per side (x1000) and when (hos_now_ns() / 1000), for rh_game_rumble_amp (no lock). */
+static volatile LONG rh_game_amp_milli[2];
+static volatile LONG64 rh_game_amp_us[2];
+
+float rh_game_rumble_amp(void) {
+    const int64_t now_us = hos_now_ns() / 1000;
+    LONG best = 0;
+    for (int s = 0; s < 2; s++) {
+        const LONG64 at = InterlockedCompareExchange64(&rh_game_amp_us[s], 0, 0);
+        if (at <= 0 || now_us - at > 60000) continue;
+        const LONG a = InterlockedCompareExchange(&rh_game_amp_milli[s], 0, 0);
+        if (a > best) best = a;
+    }
+    return (float)best / 1000.0f;
+}
+
 int rh_vibration(int side, float al, float fl, float ah, float fh) {
     if (side < 0 || side > 1) return 0;
     if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) return 0;
@@ -2775,6 +3118,16 @@ int rh_vibration(int side, float al, float fl, float ah, float fh) {
         handled = 1;
     }
     ReleaseSRWLockExclusive(&rh_lock);
+
+    /* Switch 2 Pro Controller (experimental) */
+    AcquireSRWLockExclusive(&rh_pro2_lock);
+    if (rh_pro2 && rh.pro2_push) {
+        rh.pro2_push(rh_pro2, now_us, side == 1, s_al, fl, s_ah, fh);
+        rh_pro2_at[side] = now_us;
+        rh_pro2_muted[side] = 0;
+        handled = 1;
+    }
+    ReleaseSRWLockExclusive(&rh_pro2_lock);
 
     /* DualSense slots (DSP + reactive trigger sample; trigger packets go out from rh_worker only) */
     for (int i = 0; i < RH_MAX_PADS; i++) {
@@ -2798,6 +3151,12 @@ int rh_vibration(int side, float al, float fl, float ah, float fh) {
                     slot->tri_sample[side][2] = ah;
                     slot->tri_sample[side][3] = fh;
                     slot->tri_fresh[side] = 1;
+                    {
+                        float m = al > ah ? al : ah;
+                        m = m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m);
+                        InterlockedExchange(&rh_game_amp_milli[side], (LONG)(m * 1000.0f + 0.5f));
+                        InterlockedExchange64(&rh_game_amp_us[side], now_us);
+                    }
                 }
                 slot->at[side] = now_us;
                 slot->muted[side] = 0;
@@ -2872,6 +3231,13 @@ int rh_is_active(void *pad) {
         return 1;
     }
     ReleaseSRWLockShared(&rh_lock);
+
+    AcquireSRWLockShared(&rh_pro2_lock);
+    if (rh_pro2 && rh_pro2_pad == pad) {
+        ReleaseSRWLockShared(&rh_pro2_lock);
+        return 1;
+    }
+    ReleaseSRWLockShared(&rh_pro2_lock);
 
     for (int i = 0; i < RH_MAX_PADS; i++) {
         RhDsSlot *slot = &rh_ds_slots[i];
@@ -2955,6 +3321,16 @@ int rh_option_set(const char *key, int value) {
     rh_apply_settings_live();
     rh_ini_save();
     return RENHDRUM_OK;
+}
+
+void rh_trigger_preset(int side, uint8_t id, float level) {
+    if ((side != 0 && side != 1) || InterlockedCompareExchange(&rh_presets_ready, 0, 0) == 0) return;
+    int lvl_milli = 0;
+    if (level > 0.0f) {
+        lvl_milli = (level >= 1.0f) ? 1000 : (int)(level * 1000.0f + 0.5f);
+    }
+    InterlockedExchange(&rh_preset_packed[side], ((LONG)id << 16) | (LONG)lvl_milli);
+    InterlockedIncrement(&rh_preset_gen[side]);
 }
 
 void rh_option_reset(void) {

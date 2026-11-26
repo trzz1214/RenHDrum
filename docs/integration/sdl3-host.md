@@ -3,11 +3,11 @@
 This guide explains how to integrate `renhdrum.dll` into a C / C++ emulator or game engine using SDL3 (`libsdl-org/SDL`).
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)` · `🧪 Switch 2 Pro Controller (USB, experimental)`.
 
 > [!WARNING]
-> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
-> In Eden, yuzu, and PokeDinner derivatives, host configurations **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) in controller settings or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+> **15 ms rate filter: bypass it only for pads RenHDrum drives**
+> In Eden, yuzu, and PokeDinner derivatives, the host rate-limiting block (`src/hid_core/frontend/emulated_controller.cpp`) swallows micro-timed HD Rumble sub-packets before they reach RenHDrum. I do not ask users to turn on `Accurate Vibration`. The host skips that filter conditionally, only for a pad that RenHDrum is currently driving; other pads keep the normal filter. The user changes no setting.
 
 Before shipping, go through the [integration checklist](recomp-games.md#integration-checklist).
 
@@ -51,12 +51,13 @@ High-fidelity HD Rumble requires two cooperating layers:
 
 ## 2. Upstream SDL3 Patches
 
-Upstream SDL3 (`libsdl-org/SDL` tag `release-3.4.8`, commit `d9d5536704d585616d4db3c8ba3c4ff6fc2757e1`) requires two patches located in `integrations/sdl3/sdl3-patches/`:
+Upstream SDL3 (`libsdl-org/SDL`, `release-3.4.8` through `release-3.4.20`) uses patches located in `integrations/sdl3/sdl3-patches/`:
 
 | Patch | Key Changes | Purpose |
 |---|---|---|
 | `0001-hdrumble.patch` | Extends BT refresh to 150 ms; adds `SDL_HDRumbleSetNoQueue` and `SDL_HDRumbleSetBluetoothAfterInput`. | Eliminates Bluetooth packet flooding and synchronizes writes immediately following input reports. |
 | `0002-hdrumble-idle-write.patch` | Tracks atomic `rumble_busy`; adds `HDSync_MergeSide` peak merging and `SDL_HDRumbleSetNoQueueBluetooth`. | Prevents HID write queue blocking on USB and allows idle-gated 5 ms framing over Bluetooth. |
+| `0003-switch2-raw-hd-rumble.patch` | Accepts 64-byte raw report `0x02` in `SendJoystickEffect` for Switch 2 Pro (`057E:2069`, USB only); sends immediately in `UpdateRumble` bypassing `RUMBLE_INTERVAL` (12 ms) and `RUMBLE_MAX`, with a 100 ms suppression window; Joy-Con 2, GameCube NSO, and Switch 1 are untouched. | **Experimental** Switch 2 Pro HD Rumble 2 pass-through (requires `SDL_HIDAPI_LIBUSB=ON`; zlib license like SDL). |
 
 ### C Function Signatures in Patched SDL3
 

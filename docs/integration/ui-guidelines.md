@@ -29,6 +29,7 @@ Rules:
 | `switch_bt_mode` | Switch Pro, Joy-Con (Bluetooth only) | Bluetooth mode | Chế độ Bluetooth | Detailed (5 ms) / Compatible | Detailed (5 ms) | Detailed (5 ms): every detail, like wired. Compatible: works on every Bluetooth adapter; used automatically when Detailed cannot run. |
 | `dualsense_haptics` | DualSense, DualSense Edge | Haptics | Rung xúc giác | on / off | on | Rumble through the two haptic voice coils. Off: the standard rumble. |
 | `dualsense_hd_haptics` | DualSense (USB; Bluetooth: rumble + triggers) | HD Haptics | HD Haptics | on / off | on | HD Rumble upgraded for DualSense. The controller speaker and the L2/R2 triggers react to the rumble. Off = standard HD Rumble. |
+| (host setting) | DualSense | HD Triggers | Cò HD | on / off | on | The triggers follow the game (Tier 2 presets via `renhdrum_trigger_preset_*`). Off = the HD Haptics triggers (Tier 1). Show only when HD Haptics is on, or leave it visible and ignore it while HD Haptics is off. Only meaningful when the game has a game-state trigger layer (such as Longshot's `oot_trigger.c`). Not in the core table: the host keeps it (suggested key `hd_triggers`). |
 | `dualsense_volume` | DualSense | Strength | Độ mạnh | 10–100 % | 100 % | Lower it if the rumble feels too strong. |
 | `xbox_enabled` | Xbox and Xbox-style | HD Rumble on Xbox | HD Rumble cho Xbox | on / off | on | The game's HD Rumble translated for the Xbox motors. Off: the standard rumble. |
 | (host setting) | official Xbox with trigger motors | Trigger rumble | Rung cò | on / off | off | Lets the two trigger motors join in. Show only when the controller has them; if the host needs its own setting turned on first (Eden: XInput 8 player support), show a one-click **Turn it on** next to it. Not in the core table. |
@@ -79,6 +80,10 @@ The entry point is the **HD Rumble** button on the Controls page. It sits below 
 
 ![HD Rumble button on the Controls page, Brontide-NS2](../assets/controls-hd-rumble-button-ns2.png)
 ![HD Rumble button on the Controls page, Brontide-oot](../assets/controls-hd-rumble-button-oot.png)
+
+## 7a. "Test" button
+
+I suggest a "Test" button on the controller card. It calls `renhdrum_demo_sample` (`c-abi-reference.md`, section 5e) on every tick the host already has: keep the press time, pass `now - start` in milliseconds, send both sides to the same sink the game's rumble uses, and stop when it returns `0`. Use `RENHDRUM_DEMO_QUICK_PING` ("which pad is this slot", left then right) as the default and `RENHDRUM_DEMO_TECH_SHOW` for a longer check of the low and high bands. The button needs no state in the core, so pressing it twice just restarts the clock.
 
 ## 7. In practice
 

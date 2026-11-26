@@ -1,0 +1,986 @@
+From 2427b8f0a43dfd5dc9af81aefccc447da17fd1fd Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 20:43:54 +0700
+Subject: [PATCH 39/41] lichii/qt: add Song Rung Art theme and hero banner
+
+---
+ src/lichii/CMakeLists.txt                 |   1 +
+ src/lichii/configuration/configure_ui.cpp |  21 +-
+ src/lichii/game/game_list.cpp             | 118 ++++++-
+ src/lichii/game/game_list.h               |  13 +-
+ src/lichii/game/hero_banner.cpp           | 410 ++++++++++++++++++++++
+ src/lichii/game/hero_banner.h             |  64 ++++
+ src/lichii/main_window.cpp                |  12 +-
+ src/lichii/util/util.cpp                  |   3 +-
+ src/qt_common/config/uisettings.cpp       |   4 +-
+ src/qt_common/config/uisettings.h         |   3 +-
+ src/qt_common/game_list/game_list_p.h     |  18 +-
+ 11 files changed, 644 insertions(+), 23 deletions(-)
+ create mode 100644 src/lichii/game/hero_banner.cpp
+ create mode 100644 src/lichii/game/hero_banner.h
+
+diff --git a/src/lichii/CMakeLists.txt b/src/lichii/CMakeLists.txt
+index 8c4c09a58d..56b862acc1 100644
+--- a/src/lichii/CMakeLists.txt
++++ b/src/lichii/CMakeLists.txt
+@@ -196,6 +196,7 @@ add_executable(lichii
+ 
+     game/game_tree.h game/game_tree.cpp
+     game/game_card.h game/game_card.cpp
++    game/hero_banner.h game/hero_banner.cpp
+     game/search_field.h game/search_field.cpp
+ 
+     hotkeys.cpp
+diff --git a/src/lichii/configuration/configure_ui.cpp b/src/lichii/configuration/configure_ui.cpp
+index 61e3dc3690..093b15f9ec 100644
+--- a/src/lichii/configuration/configure_ui.cpp
++++ b/src/lichii/configuration/configure_ui.cpp
+@@ -114,12 +114,12 @@ ConfigureUi::ConfigureUi(Core::System& system_, QWidget* parent)
+         auto* const key_label = new QLabel(tr("SteamGridDB API key:"), this);
+         steamgriddb_key_edit = new QLineEdit(this);
+         steamgriddb_key_edit->setEchoMode(QLineEdit::Password);
+-        steamgriddb_key_edit->setPlaceholderText(tr("Empty: no online lookup"));
++        steamgriddb_key_edit->setPlaceholderText(tr("Optional"));
+         steamgriddb_key_edit->setClearButtonEnabled(true);
+         const QString tooltip =
+-            tr("Artwork is looked up on steamgriddb.com only when a key is set, for games that "
+-               "have no icon and no custom artwork. The picture is saved as the game's custom "
+-               "artwork, so you can still replace it in Configure Game.");
++            tr("Cover art and background art are looked up on steamgriddb.com only when a key is "
++               "set, for games that have no icon and no custom artwork. The pictures are saved as "
++               "the game's custom artwork, so you can still replace them in Configure Game.");
+         key_label->setToolTip(tooltip);
+         steamgriddb_key_edit->setToolTip(tooltip);
+         auto* const key_link = new QLabel(
+@@ -132,6 +132,19 @@ ConfigureUi::ConfigureUi(Core::System& system_, QWidget* parent)
+         key_layout->addWidget(steamgriddb_key_edit, 1);
+         key_layout->addWidget(key_link);
+         ui->GeneralVerticalLayout->addLayout(key_layout);
++
++        auto* const key_hint = new QLabel(
++            tr("Optional: with a key, cover art and background art are downloaded automatically. "
++               "Without one, games use their own icon and a blurred background."),
++            this);
++        key_hint->setWordWrap(true);
++        key_hint->setForegroundRole(QPalette::PlaceholderText);
++        QFont hint_font = key_hint->font();
++        if (hint_font.pointSizeF() > 0.0) {
++            hint_font.setPointSizeF(std::max(8.0, hint_font.pointSizeF() - 1.0));
++        }
++        key_hint->setFont(hint_font);
++        ui->GeneralVerticalLayout->addWidget(key_hint);
+     }
+ 
+     InitializeLanguageComboBox();
+diff --git a/src/lichii/game/game_list.cpp b/src/lichii/game/game_list.cpp
+index 95006ed051..77a87eaccc 100644
+--- a/src/lichii/game/game_list.cpp
++++ b/src/lichii/game/game_list.cpp
+@@ -50,6 +50,7 @@
+ #include "lichii/game/game_grid.h"
+ #include "lichii/game/game_list.h"
+ #include "lichii/game/game_tree.h"
++#include "lichii/game/hero_banner.h"
+ #include "lichii/game/search_field.h"
+ #include "lichii/main_window.h"
+ #include "lichii/shader_warm_dialog.h"
+@@ -79,6 +80,20 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
+ 
+     SetupViews();
+ 
++    hero_banner = new HeroBanner(this);
++    hero_banner->hide();
++    connect(hero_banner, &HeroBanner::PlayClicked, this, [this] {
++        if (current_hero_index.isValid()) {
++            ValidateEntry(current_hero_index);
++        }
++    });
++    connect(hero_banner, &HeroBanner::ChangeArtClicked, this, [this] {
++        if (current_hero_program_id != 0) {
++            emit OpenPerGameGeneralRequested(current_hero_program_id, current_hero_path);
++        }
++    });
++    connect(this, &GameList::CustomHeroChanged, hero_banner, &HeroBanner::InvalidateHero);
++
+     ambient_backdrop = new RenHDrumQt::AmbientBackdrop(this);
+     for (QAbstractItemView* view :
+          std::array<QAbstractItemView*, 3>{tree_view, grid_view, carousel_view}) {
+@@ -88,6 +103,7 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
+                     &GameList::OnCurrentGameChanged);
+         }
+     }
++    song_rung_art_enabled = IsSongRungArt();
+     SetAmbientBackdropEnabled(IsSongRungTheme());
+ 
+     search_field = new GameListSearchField(this);
+@@ -268,7 +284,7 @@ void GameList::ResetViewMode() {
+     // MainWindow switches the view right after starting the first populate; keep it disabled
+     // until that finishes, as OnPopulate does for every other populate.
+     m_currentView->setEnabled(!m_populating);
+-    layout->insertWidget(0, m_currentView);
++    UpdateArtLayout();
+ 
+     auto view = m_currentView->viewport();
+     view->installEventFilter(this);
+@@ -292,6 +308,8 @@ void GameList::ResetViewMode() {
+         if (!UISettings::values.game_dirs.empty()) {
+             item_model->PopulateAsync(UISettings::values.game_dirs);
+         }
++    } else {
++        ApplyInitialBackdrop();
+     }
+ }
+ 
+@@ -410,43 +428,101 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
+ }
+ 
+ void GameList::SetAmbientBackdropEnabled(bool enabled) {
++    ambient_backdrop_requested = enabled;
++    UpdateArtLayout();
++}
++
++void GameList::SetSongRungArtEnabled(bool enabled) {
++    song_rung_art_enabled = enabled;
++    UpdateArtLayout();
++}
++
++void GameList::UpdateArtLayout() {
++    const bool art_view = song_rung_art_enabled &&
++                          (game_list_mode == Settings::GameListMode::GridView ||
++                           game_list_mode == Settings::GameListMode::CarouselView);
++    const bool backdrop_on = ambient_backdrop_requested && !art_view;
++
++    if (hero_banner) {
++        layout->removeWidget(hero_banner);
++        if (art_view) {
++            const int search_h =
++                (search_field && search_field->isVisible()) ? search_field->sizeHint().height() : 0;
++            const int avail_h = std::max(0, height() - search_h);
++            hero_banner->setFixedHeight(HeroBanner::ComputeHeight(avail_h));
++            layout->insertWidget(0, hero_banner);
++            hero_banner->show();
++            hero_banner->RefreshTheme();
++        } else {
++            hero_banner->hide();
++        }
++    }
++    if (m_currentView) {
++        layout->removeWidget(m_currentView);
++        layout->insertWidget(art_view ? 1 : 0, m_currentView, 1);
++    }
++
+     if (ambient_backdrop) {
+-        ambient_backdrop->SetEnabled(enabled);
++        ambient_backdrop->SetEnabled(backdrop_on);
+     }
+-    tree_view->setAlternatingRowColors(!enabled);
++    tree_view->setAlternatingRowColors(!ambient_backdrop_requested);
++    setAutoFillBackground(art_view);
+     for (QAbstractItemView* view :
+          std::array<QAbstractItemView*, 3>{tree_view, grid_view, carousel_view}) {
+         if (view && view->viewport()) {
+-            view->viewport()->setAutoFillBackground(!enabled);
++            view->viewport()->setAutoFillBackground(!ambient_backdrop_requested);
+             view->viewport()->update();
+         }
+     }
++    UpdateIconSizes();
+     update();
+ }
+ 
+ void GameList::OnCurrentGameChanged(const QModelIndex& index) {
+-    if (!index.isValid() || !ambient_backdrop) {
++    if (!index.isValid()) {
+         return;
+     }
+     const QModelIndex first_col = index.siblingAtColumn(0);
+     const auto type = first_col.data(GameListItem::TypeRole).value<GameListItemType>();
+-    if (type != GameListItemType::Game || !first_col.data(GameListItemPath::HasIconRole).toBool()) {
++    if (type != GameListItemType::Game) {
+         return;
+     }
+-    const QPixmap cover = first_col.data(Qt::DecorationRole).value<QPixmap>();
+-    if (!cover.isNull()) {
++
++    const bool has_icon = first_col.data(GameListItemPath::HasIconRole).toBool();
++    const QPixmap cover =
++        has_icon ? first_col.data(Qt::DecorationRole).value<QPixmap>() : QPixmap{};
++    if (ambient_backdrop && has_icon && !cover.isNull()) {
+         ambient_backdrop->SetCover(cover);
+     }
++
++    const u64 program_id = first_col.data(GameListItemPath::ProgramIdRole).toULongLong();
++    const QString title = first_col.data(GameListItemPath::TitleRole).toString();
++    const QString path = first_col.data(GameListItemPath::FullPathRole).toString();
++    current_hero_index = first_col;
++    current_hero_program_id = program_id;
++    current_hero_path = path.toStdString();
++
++    if (hero_banner) {
++        const u64 play_time = program_id != 0 ? play_time_manager.GetPlayTime(program_id) : 0;
++        const QString meta =
++            play_time > 0
++                ? tr("Play Time: %1")
++                      .arg(QString::fromStdString(
++                          PlayTime::PlayTimeManager::GetReadablePlayTime(play_time)))
++                : QString{};
++        hero_banner->SetGame(program_id, title, meta, cover);
++    }
+ }
+ 
+ void GameList::ApplyInitialBackdrop() {
+-    if (!ambient_backdrop || !item_model) {
++    if (!item_model) {
+         return;
+     }
+     if (m_currentView && m_currentView->currentIndex().isValid()) {
+         OnCurrentGameChanged(m_currentView->currentIndex());
+         return;
+     }
++    QModelIndex first_any_game;
+     const std::function<QModelIndex(const QStandardItem*)> find_first =
+         [&](const QStandardItem* parent) -> QModelIndex {
+         for (int row = 0; row < parent->rowCount(); ++row) {
+@@ -459,6 +535,9 @@ void GameList::ApplyInitialBackdrop() {
+             }
+             const auto type = child->data(GameListItem::TypeRole).value<GameListItemType>();
+             if (type == GameListItemType::Game) {
++                if (!first_any_game.isValid()) {
++                    first_any_game = child->index();
++                }
+                 if (child->data(GameListItemPath::HasIconRole).toBool()) {
+                     return child->index();
+                 }
+@@ -471,7 +550,10 @@ void GameList::ApplyInitialBackdrop() {
+         }
+         return {};
+     };
+-    const QModelIndex first_game = find_first(item_model->invisibleRootItem());
++    QModelIndex first_game = find_first(item_model->invisibleRootItem());
++    if (!first_game.isValid()) {
++        first_game = first_any_game;
++    }
+     if (first_game.isValid()) {
+         OnCurrentGameChanged(first_game);
+         if (m_currentView && !m_currentView->currentIndex().isValid()) {
+@@ -730,6 +812,9 @@ void GameList::SetGameTitle(u64 program_id, const QString& title) {
+     if (program_id == 0 || title.isEmpty()) {
+         return;
+     }
++    if (hero_banner) {
++        hero_banner->SetTitle(program_id, title);
++    }
+     // Favorites are plain copies of a library entry that store their shown text, so they take it
+     // from an updated library entry afterwards.
+     QList<QStandardItem*> copies;
+@@ -1303,6 +1388,19 @@ void GameList::changeEvent(QEvent* event) {
+     QWidget::changeEvent(event);
+ }
+ 
++void GameList::resizeEvent(QResizeEvent* event) {
++    QWidget::resizeEvent(event);
++    if (hero_banner && hero_banner->isVisible()) {
++        const int search_h =
++            (search_field && search_field->isVisible()) ? search_field->sizeHint().height() : 0;
++        const int avail_h = std::max(0, height() - search_h);
++        const int h = HeroBanner::ComputeHeight(avail_h);
++        if (hero_banner->height() != h) {
++            hero_banner->setFixedHeight(h);
++        }
++    }
++}
++
+ void GameList::RetranslateUI() {
+     item_model->RetranslateUI();
+ }
+diff --git a/src/lichii/game/game_list.h b/src/lichii/game/game_list.h
+index 75cff8df0e..3365d4b6a4 100644
+--- a/src/lichii/game/game_list.h
++++ b/src/lichii/game/game_list.h
+@@ -10,6 +10,7 @@
+ #include <QLineEdit>
+ #include <QHash>
+ #include <QList>
++#include <QPersistentModelIndex>
+ #include <QSet>
+ #include <QPushButton>
+ #include <QStandardItemModel>
+@@ -34,6 +35,7 @@ class GameCard;
+ class GameListModel;
+ class GameTree;
+ class GameGrid;
++class HeroBanner;
+ class GameListSearchField;
+ class ControllerNavigation;
+ class GameListWorker;
+@@ -99,6 +101,7 @@ public:
+     void ResetViewMode();
+ 
+     void SetAmbientBackdropEnabled(bool enabled);
++    void SetSongRungArtEnabled(bool enabled);
+ 
+ public slots:
+     void SetNupConversionRunning(bool running);
+@@ -160,10 +163,12 @@ private slots:
+ private:
+     void SetupViews();
+     void SetupScrollAnimation();
++    void UpdateArtLayout();
+     void OnCurrentGameChanged(const QModelIndex& index);
+     void ApplyInitialBackdrop();
+     bool eventFilter(QObject* obj, QEvent* event) override;
+     void changeEvent(QEvent*) override;
++    void resizeEvent(QResizeEvent* event) override;
+ 
+     void ValidateEntry(const QModelIndex& item);
+ 
+@@ -200,8 +205,14 @@ private:
+     GameGrid* grid_view = nullptr;
+     GameCarousel* carousel_view = nullptr;
+     GameListModel* item_model = nullptr;
+-    Settings::GameListMode game_list_mode;
++    Settings::GameListMode game_list_mode{Settings::GameListMode::TreeView};
+     RenHDrumQt::AmbientBackdrop* ambient_backdrop = nullptr;
++    HeroBanner* hero_banner = nullptr;
++    bool ambient_backdrop_requested = false;
++    bool song_rung_art_enabled = false;
++    QPersistentModelIndex current_hero_index;
++    u64 current_hero_program_id = 0;
++    std::string current_hero_path;
+ 
+     ControllerNavigation* controller_navigation = nullptr;
+ 
+diff --git a/src/lichii/game/hero_banner.cpp b/src/lichii/game/hero_banner.cpp
+new file mode 100644
+index 0000000000..4e804485d3
+--- /dev/null
++++ b/src/lichii/game/hero_banner.cpp
+@@ -0,0 +1,410 @@
++// SPDX-FileCopyrightText: Copyright 2026 Brontide
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#include "lichii/game/hero_banner.h"
++
++#include <algorithm>
++#include <cmath>
++
++#include <QEasingCurve>
++#include <QEvent>
++#include <QFontMetrics>
++#include <QGraphicsDropShadowEffect>
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QLinearGradient>
++#include <QPainter>
++#include <QPalette>
++#include <QPixmapCache>
++#include <QPushButton>
++#include <QRadialGradient>
++#include <QStyle>
++#include <QVBoxLayout>
++
++#include "qt_common/brand/song_rung_theme.h"
++#include "qt_common/config/uisettings.h"
++#include "qt_common/util/game.h"
++
++namespace {
++
++// tune after review
++constexpr qreal kHeroHeightRatio = 0.55;
++constexpr int kHeroMinHeight = 240;
++constexpr int kHeroShelfReserveMin = 140;
++constexpr int kHeroFadeMs = 250;
++constexpr qreal kHeroCropFocusY = 1.0 / 3.0;
++constexpr qreal kHeroTitlePointSize = 30.0;
++
++constexpr qreal kOverlayAlphaTop = 0.55;
++constexpr qreal kOverlayAlphaUpper = 0.10;
++constexpr qreal kOverlayAlphaMid = 0.25;
++constexpr qreal kOverlayAlphaBottom = 0.94;
++constexpr qreal kOverlayStopUpper = 0.22;
++constexpr qreal kOverlayStopMid = 0.55;
++
++QColor WithAlphaF(QColor c, qreal alpha) {
++    c.setAlphaF(alpha);
++    return c;
++}
++
++void PaintHeroGradient(QPainter& painter, const QSize& size, const QColor& window_color) {
++    QLinearGradient overlay(0, 0, 0, size.height());
++    overlay.setColorAt(0.0, WithAlphaF(window_color, kOverlayAlphaTop));
++    overlay.setColorAt(kOverlayStopUpper, WithAlphaF(window_color, kOverlayAlphaUpper));
++    overlay.setColorAt(kOverlayStopMid, WithAlphaF(window_color, kOverlayAlphaMid));
++    overlay.setColorAt(1.0, WithAlphaF(window_color, kOverlayAlphaBottom));
++    painter.fillRect(QRect(QPoint(0, 0), size), overlay);
++}
++
++QPixmap RenderBlurredCover(const QPixmap& source, const QSize& size, const QColor& window_color,
++                           bool dark) {
++    QPixmap out(size);
++    out.fill(window_color);
++    if (source.isNull() || size.isEmpty()) {
++        return out;
++    }
++
++    QPainter painter(&out);
++    painter.setRenderHint(QPainter::SmoothPixmapTransform);
++
++    const QColor average = source.scaled(1, 1, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
++                               .toImage()
++                               .pixelColor(0, 0);
++    QRadialGradient glow(QPointF(size.width() * 0.5, size.height() * 0.28), size.width() * 0.72);
++    QColor glow_color = dark ? average.darker(175) : average;
++    glow_color.setAlpha(dark ? 125 : 85);
++    glow.setColorAt(0.0, glow_color);
++    glow.setColorAt(1.0, Qt::transparent);
++    painter.fillRect(out.rect(), glow);
++
++    const QPixmap tiny = source.scaledToWidth(24, Qt::SmoothTransformation)
++                             .scaledToWidth(96, Qt::SmoothTransformation);
++    const QSize expanded = size * 1.25;
++    const QPixmap blurred =
++        tiny.scaled(expanded, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
++    painter.setOpacity(dark ? 0.42 : 0.30);
++    painter.drawPixmap((size.width() - blurred.width()) / 2,
++                       (size.height() - blurred.height()) / 2, blurred);
++    painter.setOpacity(1.0);
++    return out;
++}
++
++} // namespace
++
++HeroBanner::HeroBanner(QWidget* parent) : QWidget{parent} {
++    setAttribute(Qt::WA_OpaquePaintEvent, true);
++    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
++
++    fade.setStartValue(0.0);
++    fade.setEndValue(1.0);
++    fade.setDuration(kHeroFadeMs);
++    fade.setEasingCurve(QEasingCurve::OutCubic);
++    connect(&fade, &QVariantAnimation::valueChanged, this, [this] { update(); });
++    connect(&fade, &QVariantAnimation::finished, this, [this] { previous_pixmap = {}; });
++
++    auto* const root = new QVBoxLayout(this);
++    root->setContentsMargins(32, 16, 32, 20);
++    root->setSpacing(6);
++    root->addStretch(1);
++
++    title_label = new QLabel(this);
++    title_label->setWordWrap(false);
++    title_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
++    title_label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
++    root->addWidget(title_label);
++
++    meta_label = new QLabel(this);
++    meta_label->setWordWrap(false);
++    meta_label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
++    meta_label->hide();
++    root->addWidget(meta_label);
++
++    auto* const buttons = new QHBoxLayout;
++    buttons->setContentsMargins(0, 6, 0, 0);
++    buttons->setSpacing(10);
++
++    play_button = new QPushButton(tr("Play"), this);
++    play_button->setProperty("songRungPrimary", true);
++    play_button->setCursor(Qt::PointingHandCursor);
++    play_button->setMinimumWidth(100);
++    connect(play_button, &QPushButton::clicked, this, &HeroBanner::PlayClicked);
++    buttons->addWidget(play_button);
++
++    change_art_button = new QPushButton(tr("Change Art\u2026"), this);
++    change_art_button->setCursor(Qt::PointingHandCursor);
++    connect(change_art_button, &QPushButton::clicked, this, &HeroBanner::ChangeArtClicked);
++    buttons->addWidget(change_art_button);
++    buttons->addStretch(1);
++
++    root->addLayout(buttons);
++
++    title_label->hide();
++    play_button->hide();
++    change_art_button->hide();
++
++    ApplyThemeStyles();
++}
++
++int HeroBanner::ComputeHeight(int available_height) {
++    if (available_height <= 0) {
++        return kHeroMinHeight;
++    }
++    const int desired =
++        std::max(kHeroMinHeight, static_cast<int>(std::lround(available_height * kHeroHeightRatio)));
++    if (available_height <= kHeroShelfReserveMin) {
++        return std::max(0, available_height);
++    }
++    return std::min(desired, available_height - kHeroShelfReserveMin);
++}
++
++void HeroBanner::SetGame(u64 program_id, const QString& title, const QString& meta,
++                         const QPixmap& fallback) {
++    const bool same_game = (program_id == current_program_id && current_program_id != 0);
++    if (same_game && title == current_title && meta == current_meta &&
++        fallback.cacheKey() == fallback_cover.cacheKey()) {
++        return;
++    }
++
++    const QPixmap prev = CurrentComposedPixmap();
++    const bool game_changed = (program_id != current_program_id) ||
++                              (fallback.cacheKey() != fallback_cover.cacheKey());
++
++    current_program_id = program_id;
++    current_title = title;
++    current_meta = meta;
++    fallback_cover = fallback;
++
++    if (!same_game) {
++        ReloadHeroFromDisk();
++    }
++
++    const bool has_game = (current_program_id != 0 || !current_title.isEmpty());
++    title_label->setVisible(has_game);
++    play_button->setVisible(has_game);
++    change_art_button->setVisible(current_program_id != 0);
++    meta_label->setText(current_meta);
++    meta_label->setVisible(has_game && !current_meta.isEmpty());
++    UpdateTitleText();
++
++    if (game_changed && !prev.isNull() && isVisible()) {
++        previous_pixmap = prev;
++        fade.stop();
++        fade.start();
++    }
++    update();
++}
++
++void HeroBanner::SetTitle(u64 program_id, const QString& title) {
++    if (program_id == 0 || program_id != current_program_id || title == current_title) {
++        return;
++    }
++    current_title = title;
++    UpdateTitleText();
++}
++
++void HeroBanner::InvalidateHero(u64 program_id) {
++    if (program_id == 0) {
++        return;
++    }
++    hero_generations[program_id] = hero_generations.value(program_id, 0) + 1;
++    if (program_id != current_program_id) {
++        return;
++    }
++    const QPixmap prev = CurrentComposedPixmap();
++    ReloadHeroFromDisk();
++    if (!prev.isNull() && isVisible()) {
++        previous_pixmap = prev;
++        fade.stop();
++        fade.start();
++    }
++    update();
++}
++
++void HeroBanner::RefreshTheme() {
++    previous_pixmap = {};
++    ApplyThemeStyles();
++    update();
++}
++
++void HeroBanner::ReloadHeroFromDisk() {
++    raw_hero = {};
++    if (current_program_id == 0) {
++        return;
++    }
++    const std::vector<u8> bytes = QtCommon::Game::ReadCustomHero(current_program_id);
++    if (!bytes.empty()) {
++        raw_hero.loadFromData(bytes.data(), static_cast<uint>(bytes.size()));
++    }
++}
++
++void HeroBanner::UpdateTitleText() {
++    if (!title_label) {
++        return;
++    }
++    const int avail = std::max(120, width() - 64);
++    const QFontMetrics fm(title_label->font());
++    title_label->setText(fm.elidedText(current_title, Qt::ElideRight, avail));
++}
++
++bool HeroBanner::EffectiveDark() const {
++    return UISettings::IsDarkTheme();
++}
++
++void HeroBanner::ApplyThemeStyles() {
++    const bool dark = EffectiveDark();
++    const RenHDrumQt::PaletteTokens t = RenHDrumQt::Tokens(dark);
++
++    QFont title_font = RenHDrumQt::UiFont(kHeroTitlePointSize);
++    title_font.setWeight(QFont::Bold);
++    title_label->setFont(title_font);
++    title_label->setStyleSheet(QStringLiteral("color: %1; background: transparent;").arg(t.text.name()));
++
++    auto* const shadow = new QGraphicsDropShadowEffect(title_label);
++    shadow->setBlurRadius(dark ? 16 : 10);
++    shadow->setOffset(0, dark ? 2 : 1);
++    shadow->setColor(dark ? QColor(0, 0, 0, 195) : QColor(255, 255, 255, 200));
++    title_label->setGraphicsEffect(shadow);
++
++    QFont meta_font = RenHDrumQt::UiFont(10.0);
++    meta_font.setWeight(QFont::Medium);
++    meta_label->setFont(meta_font);
++    meta_label->setStyleSheet(QStringLiteral("color: %1; background: transparent;").arg(t.muted.name()));
++
++    if (play_button) {
++        play_button->setFont(RenHDrumQt::UiFont(10.0));
++        if (play_button->style()) {
++            play_button->style()->unpolish(play_button);
++            play_button->style()->polish(play_button);
++        }
++    }
++
++    if (change_art_button) {
++        change_art_button->setFont(RenHDrumQt::UiFont(9.5));
++        const QString bg = dark ? QStringLiteral("rgba(32, 30, 28, 178)")
++                                : QStringLiteral("rgba(255, 255, 255, 205)");
++        const QString hover_bg = dark ? QStringLiteral("rgba(48, 44, 40, 220)")
++                                      : QStringLiteral("rgba(253, 235, 214, 235)");
++        const QString border = dark ? QStringLiteral("rgba(255, 255, 255, 42)")
++                                    : QStringLiteral("rgba(30, 27, 24, 38)");
++        change_art_button->setStyleSheet(
++            QStringLiteral("QPushButton {"
++                           "  background-color: %1;"
++                           "  color: %2;"
++                           "  border: 1px solid %3;"
++                           "  border-radius: 5px;"
++                           "  padding: 5px 14px;"
++                           "  min-height: 26px;"
++                           "}"
++                           "QPushButton:hover {"
++                           "  background-color: %4;"
++                           "  border-color: %5;"
++                           "}")
++                .arg(bg, t.text.name(), border, hover_bg, t.accent.name()));
++    }
++}
++
++QString HeroBanner::CacheKey(const QSize& logical_size, qreal dpr, bool dark) const {
++    const int dpr_pct = static_cast<int>(std::lround(dpr * 100.0));
++    if (!raw_hero.isNull()) {
++        const u64 gen = hero_generations.value(current_program_id, 0);
++        return QStringLiteral("hero:%1:%2x%3:%4:%5:%6")
++            .arg(current_program_id, 0, 16)
++            .arg(logical_size.width())
++            .arg(logical_size.height())
++            .arg(dpr_pct)
++            .arg(dark ? 1 : 0)
++            .arg(gen);
++    }
++    if (!fallback_cover.isNull()) {
++        return QStringLiteral("hero_fb:%1:%2x%3:%4:%5")
++            .arg(fallback_cover.cacheKey())
++            .arg(logical_size.width())
++            .arg(logical_size.height())
++            .arg(dpr_pct)
++            .arg(dark ? 1 : 0);
++    }
++    return QStringLiteral("hero_empty:%1x%2:%3:%4")
++        .arg(logical_size.width())
++        .arg(logical_size.height())
++        .arg(dpr_pct)
++        .arg(dark ? 1 : 0);
++}
++
++QPixmap HeroBanner::BuildComposedPixmap(const QSize& logical_size, qreal dpr, bool dark) const {
++    if (logical_size.isEmpty()) {
++        return {};
++    }
++    const QSize pixel_size(std::max(1, static_cast<int>(std::lround(logical_size.width() * dpr))),
++                           std::max(1, static_cast<int>(std::lround(logical_size.height() * dpr))));
++    const QColor window_color = RenHDrumQt::Tokens(dark).window;
++
++    QPixmap out(pixel_size);
++    out.fill(window_color);
++
++    if (!raw_hero.isNull()) {
++        const QPixmap scaled =
++            raw_hero.scaled(pixel_size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
++        const int src_x = std::max(0, (scaled.width() - pixel_size.width()) / 2);
++        const int src_y = std::max(
++            0, static_cast<int>(std::lround((scaled.height() - pixel_size.height()) * kHeroCropFocusY)));
++        QPainter painter(&out);
++        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
++        painter.drawPixmap(QRect(QPoint(0, 0), pixel_size), scaled,
++                           QRect(src_x, src_y, pixel_size.width(), pixel_size.height()));
++        PaintHeroGradient(painter, pixel_size, window_color);
++    } else if (!fallback_cover.isNull()) {
++        out = RenderBlurredCover(fallback_cover, pixel_size, window_color, dark);
++        QPainter painter(&out);
++        PaintHeroGradient(painter, pixel_size, window_color);
++    }
++
++    out.setDevicePixelRatio(dpr);
++    return out;
++}
++
++QPixmap HeroBanner::CurrentComposedPixmap() const {
++    const QSize logical_size = size();
++    if (logical_size.isEmpty()) {
++        return {};
++    }
++    const qreal dpr = std::max<qreal>(1.0, devicePixelRatioF());
++    const bool dark = EffectiveDark();
++    const QString key = CacheKey(logical_size, dpr, dark);
++    QPixmap composed;
++    if (!QPixmapCache::find(key, &composed)) {
++        composed = BuildComposedPixmap(logical_size, dpr, dark);
++        if (!composed.isNull()) {
++            QPixmapCache::insert(key, composed);
++        }
++    }
++    return composed;
++}
++
++void HeroBanner::paintEvent(QPaintEvent*) {
++    const QPixmap current = CurrentComposedPixmap();
++    QPainter painter(this);
++    if (fade.state() == QAbstractAnimation::Running && !previous_pixmap.isNull()) {
++        painter.drawPixmap(rect(), previous_pixmap);
++        painter.setOpacity(fade.currentValue().toReal());
++    }
++    if (!current.isNull()) {
++        painter.drawPixmap(rect(), current);
++    } else {
++        painter.fillRect(rect(), RenHDrumQt::Tokens(EffectiveDark()).window);
++    }
++}
++
++void HeroBanner::resizeEvent(QResizeEvent* event) {
++    QWidget::resizeEvent(event);
++    UpdateTitleText();
++}
++
++void HeroBanner::changeEvent(QEvent* event) {
++    if (event->type() == QEvent::PaletteChange ||
++        event->type() == QEvent::ApplicationPaletteChange) {
++        previous_pixmap = {};
++        ApplyThemeStyles();
++        update();
++    }
++    QWidget::changeEvent(event);
++}
+diff --git a/src/lichii/game/hero_banner.h b/src/lichii/game/hero_banner.h
+new file mode 100644
+index 0000000000..4d878b5689
+--- /dev/null
++++ b/src/lichii/game/hero_banner.h
+@@ -0,0 +1,64 @@
++// SPDX-FileCopyrightText: Copyright 2026 Brontide
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <QHash>
++#include <QPixmap>
++#include <QVariantAnimation>
++#include <QWidget>
++
++#include "common/common_types.h"
++
++class QLabel;
++class QPushButton;
++
++/// Top hero banner for the Song Rung Art theme: shows the selected game's horizontal hero image
++/// (or a blurred cover fallback) fading into the shelf below, with title, metadata, Play, and
++/// Change Art controls overlaid at bottom-left.
++class HeroBanner final : public QWidget {
++    Q_OBJECT
++
++public:
++    explicit HeroBanner(QWidget* parent = nullptr);
++
++    void SetGame(u64 program_id, const QString& title, const QString& meta,
++                 const QPixmap& fallback_cover);
++    void SetTitle(u64 program_id, const QString& title);
++    void InvalidateHero(u64 program_id);
++    void RefreshTheme();
++
++    static int ComputeHeight(int available_height);
++
++signals:
++    void PlayClicked();
++    void ChangeArtClicked();
++
++protected:
++    void paintEvent(QPaintEvent* event) override;
++    void resizeEvent(QResizeEvent* event) override;
++    void changeEvent(QEvent* event) override;
++
++private:
++    void ReloadHeroFromDisk();
++    void UpdateTitleText();
++    void ApplyThemeStyles();
++    bool EffectiveDark() const;
++    QPixmap CurrentComposedPixmap() const;
++    QPixmap BuildComposedPixmap(const QSize& logical_size, qreal dpr, bool dark) const;
++    QString CacheKey(const QSize& logical_size, qreal dpr, bool dark) const;
++
++    u64 current_program_id = 0;
++    QString current_title;
++    QString current_meta;
++    QPixmap raw_hero;
++    QPixmap fallback_cover;
++    QPixmap previous_pixmap;
++    QHash<u64, u64> hero_generations;
++
++    QVariantAnimation fade;
++    QLabel* title_label = nullptr;
++    QLabel* meta_label = nullptr;
++    QPushButton* play_button = nullptr;
++    QPushButton* change_art_button = nullptr;
++};
+diff --git a/src/lichii/main_window.cpp b/src/lichii/main_window.cpp
+index 08ff36b1e5..5c2112ba77 100644
+--- a/src/lichii/main_window.cpp
++++ b/src/lichii/main_window.cpp
+@@ -503,7 +503,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
+ 
+     UpdateUITheme();
+     RenHDrumQt::WatchSystemColorScheme(this, [this](bool) {
+-        if (UISettings::values.theme.empty() || UISettings::values.theme == "song_rung") {
++        if (UISettings::values.theme.empty() || UISettings::values.theme == "song_rung" ||
++            UISettings::values.theme == "song_rung_art") {
+             UpdateUITheme();
+         }
+     });
+@@ -4321,7 +4322,8 @@ void MainWindow::HideFullscreen() {
+         ui->menubar->show();
+         if (ui->brandAccentBar) {
+             ui->brandAccentBar->setVisible(UISettings::values.theme.empty() ||
+-                                           UISettings::values.theme == "song_rung");
++                                           UISettings::values.theme == "song_rung" ||
++                                           UISettings::values.theme == "song_rung_art");
+         }
+     } else {
+         if (UsingExclusiveFullscreen()) {
+@@ -7092,7 +7094,9 @@ void MainWindow::UpdateUITheme() {
+ 
+     static bool song_rung_active = false;
+     static bool lichii_palette = false;
+-    const bool use_song_rung = (current_theme == QStringLiteral("song_rung"));
++    const bool use_song_rung = (current_theme == QStringLiteral("song_rung") ||
++                                current_theme == QStringLiteral("song_rung_art"));
++    const bool use_art = (current_theme == QStringLiteral("song_rung_art"));
+ 
+     if (use_song_rung) {
+         lichii_palette = false;
+@@ -7106,6 +7110,7 @@ void MainWindow::UpdateUITheme() {
+         UpdateMenuIcons();
+ 
+         if (game_list) {
++            game_list->SetSongRungArtEnabled(use_art);
+             game_list->SetAmbientBackdropEnabled(true);
+         }
+         if (ui->brandAccentBar) {
+@@ -7125,6 +7130,7 @@ void MainWindow::UpdateUITheme() {
+         song_rung_active = false;
+     }
+     if (game_list) {
++        game_list->SetSongRungArtEnabled(false);
+         game_list->SetAmbientBackdropEnabled(false);
+     }
+     if (ui->brandAccentBar) {
+diff --git a/src/lichii/util/util.cpp b/src/lichii/util/util.cpp
+index 4b226344f4..ae5c66028e 100644
+--- a/src/lichii/util/util.cpp
++++ b/src/lichii/util/util.cpp
+@@ -20,7 +20,8 @@
+ #endif
+ 
+ QFont GetMonospaceFont() {
+-    if (UISettings::values.theme == "song_rung" || UISettings::values.theme.empty()) {
++    if (UISettings::values.theme == "song_rung" || UISettings::values.theme == "song_rung_art" ||
++        UISettings::values.theme.empty()) {
+         return RenHDrumQt::MonoFont();
+     }
+     QFont font(QStringLiteral("monospace"));
+diff --git a/src/qt_common/config/uisettings.cpp b/src/qt_common/config/uisettings.cpp
+index c604c0db53..c7bcf5a0fc 100644
+--- a/src/qt_common/config/uisettings.cpp
++++ b/src/qt_common/config/uisettings.cpp
+@@ -79,11 +79,13 @@ const Themes themes{{
+     {"Midnight Blue Colorful", "colorful_midnight_blue"},
+     {"Brontide Dark", "lichii"},
+     {"Song Rung", "song_rung"},
++    {"Song Rung Art", "song_rung_art"},
+ }};
+ 
+ bool IsDarkTheme() {
+     const auto& theme = UISettings::values.theme;
+-    if (theme.empty() || theme == std::string("song_rung")) {
++    if (theme.empty() || theme == std::string("song_rung") ||
++        theme == std::string("song_rung_art")) {
+         return RenHDrumQt::IsSystemDark();
+     }
+     return theme == std::string("qdarkstyle") || theme == std::string("qdarkstyle_midnight_blue") ||
+diff --git a/src/qt_common/config/uisettings.h b/src/qt_common/config/uisettings.h
+index 30b23267dc..5dd68a1c88 100644
+--- a/src/qt_common/config/uisettings.h
++++ b/src/qt_common/config/uisettings.h
+@@ -63,11 +63,12 @@ enum class Theme {
+     MidnightBlueColorful,
+     LichiiDark,
+     SongRung,
++    SongRungArt,
+ };
+ 
+ static constexpr Theme default_theme{Theme::SongRung};
+ 
+-using Themes = std::array<std::pair<const char*, const char*>, 8>;
++using Themes = std::array<std::pair<const char*, const char*>, 9>;
+ extern const Themes themes;
+ 
+ struct GameDir {
+diff --git a/src/qt_common/game_list/game_list_p.h b/src/qt_common/game_list/game_list_p.h
+index 14595a60cf..42d4b69345 100644
+--- a/src/qt_common/game_list/game_list_p.h
++++ b/src/qt_common/game_list/game_list_p.h
+@@ -51,7 +51,12 @@ static bool IsLichiiTheme() {
+ }
+ 
+ static bool IsSongRungTheme() {
+-    return UISettings::values.theme.empty() || UISettings::values.theme == "song_rung";
++    return UISettings::values.theme.empty() || UISettings::values.theme == "song_rung" ||
++           UISettings::values.theme == "song_rung_art";
++}
++
++static bool IsSongRungArt() {
++    return UISettings::values.theme == "song_rung_art";
+ }
+ 
+ static QPixmap GetDefaultIcon(u32 size) {
+@@ -69,7 +74,12 @@ static QPixmap GetDefaultIcon(u32 size) {
+     painter.setRenderHint(QPainter::SmoothPixmapTransform);
+     painter.setPen(Qt::NoPen);
+     painter.setBrush(QColor(0x23, 0x24, 0x2a));
+-    painter.drawRoundedRect(QRectF(0, 0, side, side), side * 0.18, side * 0.18);
++    if (IsSongRungArt() &&
++        UISettings::values.game_list_mode.GetValue() != Settings::GameListMode::TreeView) {
++        painter.drawRect(QRectF(0, 0, side, side));
++    } else {
++        painter.drawRoundedRect(QRectF(0, 0, side, side), side * 0.18, side * 0.18);
++    }
+     const int glyph = side * 3 / 8;
+     painter.drawImage(QRect((side - glyph) / 2, (side - glyph) / 2, glyph, glyph),
+                       QImage(QStringLiteral(":/lichii/icons/menu_gamepad@2x.png")));
+@@ -81,6 +91,10 @@ static QPixmap RoundedIcon(const QPixmap& picture) {
+     if ((!IsLichiiTheme() && !IsSongRungTheme()) || picture.isNull()) {
+         return picture;
+     }
++    if (IsSongRungArt() &&
++        UISettings::values.game_list_mode.GetValue() != Settings::GameListMode::TreeView) {
++        return picture;
++    }
+     QImage icon(picture.size(), QImage::Format_ARGB32_Premultiplied);
+     icon.fill(Qt::transparent);
+     QPainter painter(&icon);
+-- 
+2.55.0.windows.5
+

@@ -1,11 +1,11 @@
 # Generic Recomp C Bridge for RenHDrum
 
-A drop-in C/C++ bridge connecting Nintendo Switch static recompilation projects directly to **RenHDrum** (`renhdrum.dll` `0.5.0`), enabling authentic, low-latency **HD Rumble** and **DualSense HD Haptics** across all four supported controllers, complete with a core-driven **HD Rumble** settings store (`renhdrum.ini`) and per-pad compatibility with native recomp rumble.
+A drop-in C/C++ bridge connecting Nintendo Switch static recompilation projects directly to **RenHDrum** (`renhdrum.dll` `0.6.0`), enabling authentic, low-latency **HD Rumble** and **DualSense HD Haptics** across all five supported controllers, complete with a core-driven **HD Rumble** settings store (`renhdrum.ini`) and per-pad compatibility with native recomp rumble.
 
 For deeper architecture notes, lock-ordering rules, standalone Pro Controller fixes, and [real-world lessons from the Longshot, totk-pc-recomp, dkb-pc-recomp and mkw-recomp ports](../../docs/integration/recomp-games.md#11-lessons-from-the-longshot-totk-pc-recomp-dkb-pc-recomp-and-mkw-recomp-ports), see [`docs/integration/recomp-games.md`](../../docs/integration/recomp-games.md).
 
 > [!NOTE]
-> **Supported Controllers**: `✅ Sony DualSense / Edge (HD Haptics)` · `✅ Nintendo Pro Controller` · `✅ Xbox One S (RenHDrum & Direct)` · `🧪 Steam Controller 2026 (experimental)`.
+> **Supported Controllers**: `✅ Sony DualSense / Edge (HD Haptics)` · `✅ Nintendo Pro Controller` · `✅ Xbox One S (RenHDrum & Direct)` · `🧪 Steam Controller 2026 (experimental)` · `🧪 Switch 2 Pro Controller (USB, experimental)`.
 
 ---
 
@@ -18,18 +18,20 @@ integrations/recomp-c/
 │   └── renhdrum_recomp_bridge.h   # Public C/C++ interface
 ├── reference/
 │   ├── recomp-c-reference.patch   # Legacy reference patch against Hookshot v2.2.0-rc.2 (GPL-3.0; Hookshot is no longer supported, use longshot-reference.patch for Ocarina of Time)
-│   ├── longshot-reference.patch   # Reference patch against Longshot (GPL-3.0-or-later)
+│   ├── longshot-reference.patch   # Reference patch against Longshot v3.2.0 (GPL-3.0-or-later, RenHDrum 0.6.0)
 │   ├── totk-reference.patch       # Reference patch against totk-pc-recomp v0.4.1 (MIT)
 │   └── dkb-reference.patch        # Reference patch against dkb-pc-recomp v0.5.1 (GPL-3.0-or-later)
 └── README.md
 ```
 
+Note: [dkb-pc-recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp) and [mkw-recomp](https://github.com/adriadam10/mkw-recomp) now ship their own RenHDrum integration (0.5 bridge, needs `renhdrum.dll` 0.5.0).
+
 ---
 
 ## 1. What You Need
 
-- **`renhdrum.dll` (`0.5.0`)** placed beside the compiled game executable (Windows x64, built with `+crt-static`).
-- **`include/renhdrum.h`** (branch matching `RENHDRUM_VERSION >> 8`, `0x0005xx` for `0.5.0`) on your compiler include path (and alongside the bridge header).
+- **`renhdrum.dll` (`0.6.0`)** placed beside the compiled game executable (Windows x64, built with `+crt-static`).
+- **`include/renhdrum.h`** (`RENHDRUM_VERSION` `0x000600` for `0.6.0`) on your compiler include path (and alongside the bridge header).
 - **`bridge/renhdrum_recomp_bridge.c`** and **`bridge/renhdrum_recomp_bridge.h`** copied into your host runtime (e.g., `host/rh_bridge.c/.h` or `runtime/renhdrum_recomp_bridge.c/.h`).
 
 The bridge resolves both `renhdrum.dll` and SDL3/SDL2 exports dynamically (`LoadLibraryExW` + `GetModuleHandleA` + `GetProcAddress`), so no `.lib` import library is required at link time.
@@ -49,10 +51,10 @@ Never load `"renhdrum.dll"` by bare filename (Windows searches CWD and `PATH` fi
 1. Build the absolute path next to the executable using `GetModuleFileNameW`.
 2. Load it with `LoadLibraryExW(dll_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)`.
 3. Resolve the 8 required core exports (`renhdrum_version`, `renhdrum_engine_*`, `renhdrum_settings_default`, `renhdrum_set_nx2_mode`).
-4. Enforce an exact `major.minor` branch match against `RENHDRUM_VERSION`:
+4. Enforce ABI compatibility against `RENHDRUM_VERSION` (same major version, DLL version `>=` header version):
    ```c
    uint32_t ver = rh.version();
-   if ((ver >> 8) != ((uint32_t)RENHDRUM_VERSION >> 8)) {
+   if (!RENHDRUM_ABI_COMPATIBLE(ver)) {
        /* Unload DLL, claim no controllers, report mismatch via rh_status_line() */
        FreeLibrary(rh.dll);
        return 0;
@@ -84,6 +86,16 @@ Never load `"renhdrum.dll"` by bare filename (Windows searches CWD and `PATH` fi
 - `int rh_option_get(const char *key, int *out)` — Reads the current integer value from the bridge's `RenHdcStore`.
 - `int rh_option_set(const char *key, int value)` — Updates the store, applies changes live (`renhdrum_store_to_config` + `renhdrum_engine_apply_settings`, DualSense DSP/HD Haptics, Xbox/Steam), and saves `renhdrum.ini`.
 - `void rh_option_reset(void)` — Resets all core options to recommended defaults, applies live, and saves `renhdrum.ini`.
+
+### New `0.6.0` Functions (Adaptive Trigger Presets)
+- `void rh_trigger_preset(int side, uint8_t id, float level)` — Feeds a Tier 2 adaptive trigger preset (`RENHDRUM_TRIG_*`, `side`: `0` = L2, `1` = R2, `level` in `0..1`). Sending `RENHDRUM_TRIG_OFF` (`0`) or letting the 500 ms TTL expire returns the trigger to Tier 1 vibration-reactive triggers (`HD Haptics`).
+- `float rh_game_rumble_amp(void)` — Returns the game's latest rumble amplitude (`0..1`, `0` after 60 ms of silence) so game-state trigger layers can synchronize with active rumble.
+
+**Optional host toggle (`HD Triggers`):** If your game adds a game-state trigger layer on top of `rh_trigger_preset`, expose an optional host-side switch so players can drop back to Tier 1 HD Haptics triggers without disabling HD Haptics:
+- Suggested UI label: **`HD Triggers`** (or **`DualSense: HD Triggers`** in flat lists), suggested key: **`hd_triggers`**, default: **on (`1`)**.
+- Keep this key in the host rather than the core store (`renhdrum_store_set` only accepts keys from `renhdrum_options()`): intercept `hd_triggers` in `rh_option_get` / `rh_option_set` / `rh_option_reset` and persist it alongside core settings in `renhdrum.ini`.
+- Behavior: while the toggle is off (or when `dualsense_haptics` / `dualsense_hd_haptics` is off), the game-state layer skips calling `rh_trigger_preset(...)`. On the exact transition from on to off, send `rh_trigger_preset(0, RENHDRUM_TRIG_OFF, 0.0f)` and `rh_trigger_preset(1, RENHDRUM_TRIG_OFF, 0.0f)` once so both triggers immediately fall back to Tier 1 instead of holding resistance.
+- Reference implementation: see the **Longshot fork** (`renhdrum-137`: `host/renhdrum_recomp_bridge.c`, `host/oot_trigger.c`, and `gpu/vk/menu/hd_rumble.cpp`).
 
 ### Settings File (`renhdrum.ini`)
 The bridge maintains a single `RenHdcStore` and reads/writes `renhdrum.ini` next to the game executable (`key=value` format under `[RenHDrum]`, using the keys from `renhdrum_options()`). When `renhdrum.ini` does not exist, all options start at the core's recommended defaults. Hosts should render their HD Rumble settings UI dynamically from `rh_option_*` (following `docs/integration/ui-guidelines.md`) rather than hardcoding separate rumble keys. If the menu cannot link the bridge directly (Longshot's menu is a separate DLL), expose the same calls through the host's function table, as described in lesson 6 of the integration guide.
@@ -117,7 +129,7 @@ if (rh_pad_claimed(i)) {
 
 ---
 
-## 5. The Four Supported Controllers
+## 5. The Five Supported Controllers
 
 1. **Sony DualSense / DualSense Edge (`054C:0CE6` / `0x0DF2`)**:
    - **USB (Wired)**: Opens an independent 4-channel `48000 Hz` `SDL_AUDIO_F32` stream per wired DualSense (`SDL_PumpEvents()` before enumeration, 2 s hotplug retry, safe stream teardown under slot lock with automatic fallback & rediscovery if the audio endpoint disappears). When **HD Haptics** is enabled (`dualsense_hd_haptics`), activates the speaker channel (`renhdrum_dualsense_dsp_set_speaker` + `renhdrum_hd_haptics_speaker_block`) and drives vibration-reactive adaptive triggers (`renhdrum_tri_trigger_*` + `renhdrum_hd_haptics_trigger_block`) from the single worker thread so trigger packets match state-machine order.
@@ -131,6 +143,13 @@ if (rh_pad_claimed(i)) {
    - Created with `renhdrum_valve_grip_dsp_create_ex(..., true)` (40 ppm drift compensation; skips `0x88` writes on `RENHDRUM_VALVE_GRIP_SKIP`).
    - Manages `0x86` PCM mode keep-alives via `renhdrum_valve_grip_mode_tick` (passes `stalled = true` on failed or slow HID writes) and sends `renhdrum_valve_grip_mode_off` on detach and `rh_shutdown()`.
    - Never claims Steam Input virtual stand-in pads (`SDL_GetGamepadSteamHandle(pad) != 0`), releasing grips back to Steam Input if a stand-in appears.
+5. **Switch 2 Pro Controller (experimental) (`057E:2069`, USB)**:
+   - Uses `RenHdcPro2` (`renhdrum_pro2_*`) to send 64-byte raw HD Rumble 2 reports (`0x02`) via `SDL_SendJoystickEffect` outside the Pro 2 lock.
+   - **What the host needs for Pro 2** (either option works):
+     1. **Patched SDL3**: Apply SDL3 patches `0001`–`0003` (including [`integrations/sdl3/sdl3-patches/0003-switch2-raw-hd-rumble.patch`](../sdl3/sdl3-patches/0003-switch2-raw-hd-rumble.patch)) and build SDL3 with `SDL_HIDAPI_LIBUSB=ON` (static libusb, or `SDL_HIDAPI_LIBUSB_SHARED=ON` with `libusb-1.0.dll` beside the executable).
+     2. **Host-managed virtual joystick (Longshot pattern)**: The host opens and polls the Switch 2 Pro Controller directly and exposes an SDL virtual joystick (`057E:2069`) implementing `SendEffect`. The bridge checks `SDL_IsJoystickVirtual(SDL_GetJoystickID(joy))` and admits `057E:2069` while still ignoring all other SDL virtual joysticks.
+   - **Close Steam completely**: If Steam is running, it claims the Switch 2 Pro interface before the host can send raw reports.
+   - **Automatic fallback**: If any `renhdrum_pro2_*` export or `SDL_SendJoystickEffect` is missing, the silent probe fails on attach, or 100 consecutive packets fail (`RH_PRO2_FAILS_MAX`), the bridge unclaims the pad and falls back to normal rumble. On detach or `rh_shutdown()`, it sends 3 silent stop reports before destroying the handle.
 
 ---
 
@@ -144,6 +163,6 @@ if (rh_pad_claimed(i)) {
 
 - Bridge implementation (`renhdrum_recomp_bridge.c`, `renhdrum_recomp_bridge.h`): **MIT OR Apache-2.0**.
 - Hookshot reference patch (`reference/recomp-c-reference.patch`): **GPL-3.0**. Credit to **NotRexed** and the Hookshot contributors (legacy reference; Hookshot is no longer supported, use Longshot for Ocarina of Time).
-- Longshot reference patch (`reference/longshot-reference.patch`, applies cleanly on upstream tag `v3.2.0` (commit `79d192c6`); it includes the HD Rumble menu page): **GPL-3.0-or-later**. Credit to **MagicBeanDev** and the Longshot contributors.
+- Longshot reference patch (`reference/longshot-reference.patch`, applies cleanly on upstream tag `v3.2.0` (commit `79d192c6`), refreshed 26 Nov 2026 from fork `renhdrum-137` `8d0b4863` for RenHDrum `0.6.0`; includes the HD Rumble menu page, OoT adaptive triggers with an HD Triggers on/off toggle, DualSense light bar / touchpad / USB volume pin, and Switch 2 Pro USB experimental): **GPL-3.0-or-later**. Credit to **MagicBeanDev** and the Longshot contributors.
 - totk-pc-recomp reference patch (`reference/totk-reference.patch`, applies cleanly on tag `v0.4.1`, `6151ac4`; a Switch 1 game, so it calls `rh_set_switch_gen(1)`): **MIT**, as totk-pc-recomp. Credit to the totk-pc-recomp contributors.
 - dkb-pc-recomp reference patch (`reference/dkb-reference.patch`, applies cleanly on tag `v0.5.1`, `44ba6b1`; a Switch 2 game, so it calls `rh_set_switch_gen(2)`; only player 1's pad goes through the bridge, player 2 keeps the game's two-motor rumble; it also fixes two `.nx` reading bugs of the installer): **GPL-3.0-or-later**, as dkb-pc-recomp. Credit to Lucas-blip-png and the dkb-pc-recomp contributors.

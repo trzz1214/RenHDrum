@@ -4,11 +4,11 @@ Header location: [`include/renhdrum.h`](../../include/renhdrum.h)
 Library name: `renhdrum.dll` (Windows), `librenhdrum.so` (Linux), `librenhdrum.dylib` (macOS)
 
 > [!WARNING]
-> **CRITICAL REQUIREMENT: Accurate Vibration / 15 ms Throttle Bypass**
-> In Eden, yuzu, and PokeDinner derivatives, host configurations **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+> **15 ms rate filter: bypass it only for pads RenHDrum drives**
+> In Eden, yuzu, and PokeDinner derivatives, the host rate-limiting block (`src/hid_core/frontend/emulated_controller.cpp`) swallows micro-timed HD Rumble sub-packets before they reach RenHDrum. I do not ask users to turn on `Accurate Vibration`. Instead the host skips that filter conditionally: only for a pad that RenHDrum is currently driving. Every other pad keeps the host's normal filter. The user changes no setting.
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)` · `🧪 Switch 2 Pro Controller (USB + Bluetooth, experimental)`.
 
 ---
 
@@ -16,7 +16,7 @@ Library name: `renhdrum.dll` (Windows), `librenhdrum.so` (Linux), `librenhdrum.d
 
 | Constant | Value | Description |
 |---|---|---|
-| `RENHDRUM_VERSION` | `0x000500` | Encoded as `0xMMNNPP` (Major 0, Minor 5, Patch 0). |
+| `RENHDRUM_VERSION` | `0x000600` | Encoded as `0xMMNNPP` (Major 0, Minor 6, Patch 0). |
 | `RENHDRUM_OK` | `0` | Call completed successfully. |
 | `RENHDRUM_ERR_NULL_PTR` | `-1` | A required pointer argument was null. |
 | `RENHDRUM_ERR_INVALID_ARG` | `-2` | An argument value was outside acceptable bounds. |
@@ -98,7 +98,7 @@ These functions perform pure mathematical transformations and packet encoding wi
 ```c
 uint32_t renhdrum_version(void);
 ```
-Returns the integer library version `0x000500`.
+Returns the integer library version `0x000600`.
 
 ### `renhdrum_set_nx2_mode`
 ```c
@@ -304,6 +304,95 @@ Marks the last values as unsent, so the next `tick` returns `1` again. Use it wh
 
 ---
 
+## 5c. Switch 2 Pro Controller HD Rumble 2 (`RenHdcPro2`, experimental)
+
+> **🧪 Switch 2 Pro Controller (USB + Bluetooth, experimental).** Frequency law measured on a real Switch 2 Pro Controller by `101Leafy` (`Frizti/Fritchii#6`), packet layout from `ndeadly` (`switch2_controller_research`) and `BlueRetro` (Apache-2.0), and 15 ms BLE pacing from `NS2Pro-Bridge-Windows` (MIT). I do not own the controller, so feedback from anyone who has one is welcome.
+
+Packs both HD Rumble bands (`al`/`fl`, `ah`/`fh`) into 64-byte USB output reports (`0x02`) carrying three 5 ms samples per side under `0x70 | tid`, with a configurable amplitude ceiling (`RENHDRUM_PRO2_AMP_CEILING_DEFAULT = 450`, `0` selects the default, clamped to `1023`). When `renhdrum_set_nx2_mode(2)` is active, amplitudes pass through the Switch 2 Mode 2 law (`a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`) before scaling to the ceiling.
+
+Constants:
+- `RENHDRUM_PRO2_REPORT_SIZE` (`64`)
+- `RENHDRUM_PRO2_PERIOD_US` (`15000`)
+- `RENHDRUM_PRO2_VID` (`0x057E`)
+- `RENHDRUM_PRO2_PID` (`0x2069`)
+- `RENHDRUM_PRO2_AMP_CEILING_DEFAULT` (`450`)
+
+```c
+RenHdcPro2 *renhdrum_pro2_create(uint16_t amp_ceiling);
+void renhdrum_pro2_destroy(RenHdcPro2 *h);
+int32_t renhdrum_pro2_push_half_sample(
+    RenHdcPro2 *h, int64_t now_us, bool is_right,
+    float al, float fl, float ah, float fh
+);
+int32_t renhdrum_pro2_build_report(RenHdcPro2 *h, int64_t now_us, uint8_t *out_report64);
+int32_t renhdrum_pro2_silent_report(RenHdcPro2 *h, uint8_t *out_report64);
+```
+
+- **Host send loop (USB via SDL)**: send the 64-byte block via `SDL_SendGamepadEffect` / `SDL_SendJoystickEffect` on patched SDL (patch `0003`, `SDL_hidapi_switch2.c`). Poll `renhdrum_pro2_build_report` roughly every 5 ms using a monotonic microsecond clock `now_us`; the core returns `1` only once every 15 ms (`RENHDRUM_PRO2_PERIOD_US`) when a report is due, emits three silent packets when vibration stops (or after 2 s with no pushes), and then returns `0` until vibration resumes.
+- **Bluetooth**: send bytes 1..32 of the report after a `0x00` byte (33 bytes) to the vibration characteristic (handle `0x0012`, write without response), every 15 ms, latest wins, but always deliver the silent reports. SDL has no Switch 2 Bluetooth yet (`libsdl-org/SDL#15963`), so the host must own the BLE link.
+- **Virtual-joystick `SendEffect` bridge (Brontide-NS2 / Longshot pattern)**: when the host owns the transport itself (BLE GATT in Brontide-NS2, or WinUSB in Longshot), expose the controller as an SDL virtual joystick (`SDL_AttachVirtualJoystick`) with `SDL_VirtualJoystickDesc::SendEffect` implemented. Inside `SendEffect`, accept only `size == 64 && data[0] == 0x02` (return `SDL_Unsupported()` / `false` otherwise), copy the payload under a tiny dedicated lock with **no** WinRT, `WriteFile`, or SDL calls inside the callback, set a short raw-mode timeout (e.g. 100 ms), and count 3 stop writes when all samples have zero amplitude so silent reports are never dropped. A dedicated writer thread takes the buffered bytes after releasing that lock and sends either the 33-byte `0x00` packet (BLE) or the 64-byte `0x02` report (USB). On the RenHDrum side, probe once on attach with `renhdrum_pro2_silent_report` via `SDL_SendJoystickEffect` (falling back to standard rumble if rejected) and always call `SDL_SendJoystickEffect` outside any driver lock.
+- **`renhdrum_pro2_silent_report`**: fills `out_report64` with a zero-amplitude `0x02` report and increments `tid` (used for probing `SDL_SendGamepadEffect` / `SDL_SendJoystickEffect` on open and sending 3 stop packets on shutdown or disable).
+
+---
+
+## 5d. Device table and claim status (v0.6.0)
+
+One VID/PID table for every host, so hosts do not each keep their own list.
+
+```c
+#define RENHDRUM_ABI_COMPATIBLE(v) /* same major.minor-high bits, DLL >= header */
+int32_t renhdrum_device_classify(uint16_t vid, uint16_t pid, RenHdcDeviceInfo *out);
+const char *renhdrum_claim_status_text(int32_t code);
+```
+
+- **Version check**: at load time test `RENHDRUM_ABI_COMPATIBLE(renhdrum_version())`; if false, report `RENHDRUM_CLAIM_ABI_MISMATCH` and do not call further.
+- **`renhdrum_device_classify`**: set `out->struct_size = sizeof(RenHdcDeviceInfo)` first. Returns `RENHDRUM_OK` for a known family, `RENHDRUM_CLAIM_UNSUPPORTED_DEVICE` (`1`) when the family is `RENHDRUM_FAMILY_NONE` (`out` is still filled), `RENHDRUM_ERR_NULL_PTR` for `out == NULL`, `RENHDRUM_ERR_INVALID_ARG` when `struct_size < 16` (nothing written).
+- **`RENHDRUM_DEVICE_NO_HD_WRITE`**: never send HD Rumble packets to this pad. `057E:2073` (GameCube controller) powers off when it receives them. `2008` is SDL's virtual combined Joy-Con pair (`RENHDRUM_DEVICE_COMBINED_JOYCON`). Microsoft `045E` is matched by VID alone (any PID), as the recomp bridge does, so only call the function for a device the host already opened as a gamepad. Steam `28DE:1302/1303/1304` carry `RENHDRUM_DEVICE_EXPERIMENTAL` and `steam_grip_format` 8 / 9 / 9.
+- **`renhdrum_claim_status_text`**: static NUL-terminated English text with the fix for codes `0..8` (`RENHDRUM_CLAIM_*`); any other code gives `"Unknown status."`. Never NULL, no allocation. The host fills codes 2 to 6 itself (the core opens no device).
+
+## 5e. Test vibration (v0.6.0)
+
+A "Test" button needs no state in the core: the script is a pure function of time.
+
+```c
+#define RENHDRUM_DEMO_QUICK_PING 0  /* 150 ms tap left, then right */
+#define RENHDRUM_DEMO_TECH_SHOW 1   /* ~2.4 s: tap, low-band sweep, high-band notes */
+#define RENHDRUM_DEMO_CHECKUP 2     /* ~4 s: tap, sweep, 4 notes, 4 strength steps, stop */
+int32_t renhdrum_demo_sample(int32_t preset, uint32_t t_ms, RenHdSideSample *out_left, RenHdSideSample *out_right);
+```
+
+- Call it every tick with `t_ms` = milliseconds since the host pressed "Test", and send both sides to the pad's usual sink (engine `push_sample`, DualSense / Steam `set_target`, Xbox, Pro 2).
+- Returns `1` while running, `0` once finished (outputs are zero; stop calling), `RENHDRUM_ERR_NULL_PTR` for a NULL output, `RENHDRUM_ERR_INVALID_ARG` for an unknown preset.
+- `QUICK_PING` (ends at 450 ms): 0 to 150 ms left side 0.6 at 160 / 320 Hz, 300 to 450 ms right side.
+- `TECH_SHOW` (ends at 2400 ms): 0 to 150 ms tap 0.7; 300 to 1100 ms low band 0.5 sweeping 40 to 160 Hz on a log scale; 1200 to 2400 ms four 300 ms high-band notes at 0.5 on 160, 240, 320 and 480 Hz. Both sides are identical.
+- `CHECKUP` (ends at 4000 ms, both sides identical):
+
+| Window (ms) | Part | Signal |
+|---|---|---|
+| `0..149` | 1. Tap | Both bands at amplitude `0.7` (`160` / `320` Hz) |
+| `300..1099` | 2. Sweep | Low band `0.5` sweeping `40 -> 160` Hz on a log scale |
+| `1200..2399` | 3. Four notes | High band `0.5` at `160`, `240`, `320`, `480` Hz (300 ms each) |
+| `2500..3699` | 4. Strength steps | Low band `160` Hz at `0.25`, `0.5`, `0.75`, `1.0` (300 ms each) |
+| `3700..3999` | 5. Stop | Silence (`0.0`) so the player feels the controller stop cleanly |
+
+- No state, no heap allocation, safe to call from the rumble thread.
+
+### Send-rate meter (`renhdrum_test_meter_*`)
+
+```c
+typedef struct RenHdTestMeter RenHdTestMeter;
+RenHdTestMeter *renhdrum_test_meter_create(void);
+void renhdrum_test_meter_destroy(RenHdTestMeter *meter);
+void renhdrum_test_meter_record(RenHdTestMeter *meter, uint64_t t_us, bool ok);
+int32_t renhdrum_test_meter_format(const RenHdTestMeter *meter, char *out, size_t cap);
+```
+
+- Create one meter per connected pad when starting a checkup test, and destroy it once formatting is complete and no send thread can still call `record`.
+- **Call `renhdrum_test_meter_record` at the actual packet write site** (where the host sends a HID, SDL, or audio packet to the controller), not where the game pushes a rumble sample. Internally mutex-protected with poison recovery, so it is safe to call from any send thread (`NULL` is a no-op).
+- `renhdrum_test_meter_format` writes a NUL-terminated ASCII summary `sent <ok>/<total>, <avg> ms avg, stuck <yes|no>` (`n/a` when fewer than 2 writes were recorded; `stuck yes` if any gap between consecutive `record` calls exceeds 100 ms or 3+ consecutive writes failed). Returns the byte count written excluding NUL, `RENHDRUM_ERR_NULL_PTR`, or `RENHDRUM_ERR_INVALID_ARG` if `cap` is too small.
+
+---
+
 ## 6. Real-Time Memory Guarantees
 
 The following functions are strictly guaranteed to perform **zero heap allocations**:
@@ -313,4 +402,22 @@ The following functions are strictly guaranteed to perform **zero heap allocatio
 - `renhdrum_dualsense_dsp_set_target`
 - `renhdrum_dualsense_dsp_set_half_target`
 - `renhdrum_dualsense_dsp_fill_f32`
+- `renhdrum_pro2_push_half_sample`
+- `renhdrum_pro2_build_report`
+- `renhdrum_pro2_silent_report`
+- `renhdrum_demo_sample`
 - All stateless encoders (`renhdrum_encode_*`, `renhdrum_amfm_*`, `renhdrum_crisp_*`)
+
+---
+
+## Upgrading from 0.5 to 0.6
+
+1. **Replace `include/renhdrum.h` and `renhdrum.dll` together.** Check compatibility at load time with `RENHDRUM_ABI_COMPATIBLE(renhdrum_version())`.
+2. **All 0.5 functions keep identical signatures and behavior.** Existing hosts continue to work with zero breaking changes.
+3. **All new 0.6 functions are optional.** Load them by name if you use them:
+   - Adaptive trigger presets: `renhdrum_trigger_preset_create` / `destroy` / `set` / `tick`
+   - Switch 2 Pro HD Rumble 2 (experimental): `renhdrum_pro2_create` / `destroy` / `push_half_sample` / `build_report` / `silent_report`
+   - Shared device table & claim status: `renhdrum_device_classify`, `renhdrum_claim_status_text`
+   - Test vibration & send-rate meter: `renhdrum_demo_sample` (`RENHDRUM_DEMO_CHECKUP`) and `renhdrum_test_meter_create` / `destroy` / `record` / `format`
+4. **Standard checkup report line format** (for copy-paste bug/controller reports):
+   `<pad name> | <VID:PID> | <USB|BT> | RenHDrum <x.y.z> | <host> <ver> | <meter text> | <answer>`

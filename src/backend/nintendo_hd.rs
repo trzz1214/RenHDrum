@@ -632,12 +632,12 @@ mod tests {
 
     #[test]
     fn test_bluetooth_sync_profile_constants() {
-        assert!(BT_SYNC_MIN_GAP_MS >= 60);
-        assert!(BT_SYNC_MAX_GAP_MS > BT_SYNC_MIN_GAP_MS);
-        assert!(BT_SYNC_MAX_GAP_MS <= 150);
-        assert!(BT_SYNC_SKIP_AMP >= 2);
-        assert!(BT_SYNC_SKIP_HIGH_FREQ >= 16);
-        assert!(BT_SYNC_SKIP_LOW_FREQ >= 4);
+        const _: () = assert!(BT_SYNC_MIN_GAP_MS >= 60);
+        const _: () = assert!(BT_SYNC_MAX_GAP_MS > BT_SYNC_MIN_GAP_MS);
+        const _: () = assert!(BT_SYNC_MAX_GAP_MS <= 150);
+        const _: () = assert!(BT_SYNC_SKIP_AMP >= 2);
+        const _: () = assert!(BT_SYNC_SKIP_HIGH_FREQ >= 16);
+        const _: () = assert!(BT_SYNC_SKIP_LOW_FREQ >= 4);
     }
 
     #[test]
@@ -678,9 +678,11 @@ mod tests {
     }
 
     fn level4_engine() -> NintendoHdEngine {
-        let mut settings = HdRumbleSettings::default();
-        settings.bluetooth_level = 4;
-        settings.bt_fast = false;
+        let settings = HdRumbleSettings {
+            bluetooth_level: 4,
+            bt_fast: false,
+            ..HdRumbleSettings::default()
+        };
         let mut engine = NintendoHdEngine::new(true, true);
         engine.apply_settings(&settings);
         engine
@@ -771,9 +773,11 @@ mod tests {
 
     #[test]
     fn test_level3_does_not_resend_while_game_keeps_pushing() {
-        let mut settings = HdRumbleSettings::default();
-        settings.bluetooth_level = 3;
-        settings.bt_fast = false;
+        let settings = HdRumbleSettings {
+            bluetooth_level: 3,
+            bt_fast: false,
+            ..HdRumbleSettings::default()
+        };
         let mut e = NintendoHdEngine::new(true, true);
         e.apply_settings(&settings);
 
@@ -840,9 +844,11 @@ mod tests {
     #[test]
     fn test_5ms_planner_needs_idle_gated_writes() {
         // Like Ryuhdr HdApplyEnvelope: wired = card 3 + USB no-queue, Bluetooth = card B3 only.
-        let mut settings = HdRumbleSettings::default();
-        settings.envelope_5ms = true;
-        settings.usb_no_queue = true;
+        let mut settings = HdRumbleSettings {
+            envelope_5ms: true,
+            usb_no_queue: true,
+            ..HdRumbleSettings::default()
+        };
 
         let mut bt = NintendoHdEngine::new(true, true);
         bt.apply_settings(&settings);
@@ -869,8 +875,10 @@ mod tests {
 
     #[test]
     fn test_usb_auto_slow_off_while_no_queue_runs() {
-        let mut settings = HdRumbleSettings::default();
-        settings.usb_auto_slow = true;
+        let mut settings = HdRumbleSettings {
+            usb_auto_slow: true,
+            ..HdRumbleSettings::default()
+        };
 
         let mut usb = NintendoHdEngine::new(false, true);
         usb.apply_settings(&settings);
@@ -902,9 +910,11 @@ mod tests {
     }
 
     fn wired_envelope_engine() -> NintendoHdEngine {
-        let mut settings = HdRumbleSettings::default();
-        settings.envelope_5ms = true;
-        settings.usb_no_queue = true;
+        let settings = HdRumbleSettings {
+            envelope_5ms: true,
+            usb_no_queue: true,
+            ..HdRumbleSettings::default()
+        };
         let mut engine = NintendoHdEngine::new(false, true);
         engine.apply_settings(&settings);
         engine

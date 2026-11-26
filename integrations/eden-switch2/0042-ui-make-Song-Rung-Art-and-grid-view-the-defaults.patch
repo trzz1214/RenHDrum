@@ -1,0 +1,49 @@
+From 015bb6d72f4d721e5f674559503682a24eced1cb Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 21:41:46 +0700
+Subject: [PATCH] ui: make Song Rung Art and grid view the defaults
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/qt_common/config/uisettings.h     | 4 ++--
+ src/qt_common/game_list/game_list_p.h | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/qt_common/config/uisettings.h b/src/qt_common/config/uisettings.h
+index 5dd68a1c88..e28e4ac147 100644
+--- a/src/qt_common/config/uisettings.h
++++ b/src/qt_common/config/uisettings.h
+@@ -66,7 +66,7 @@ enum class Theme {
+     SongRungArt,
+ };
+ 
+-static constexpr Theme default_theme{Theme::SongRung};
++static constexpr Theme default_theme{Theme::SongRungArt};
+ 
+ using Themes = std::array<std::pair<const char*, const char*>, 9>;
+ extern const Themes themes;
+@@ -222,7 +222,7 @@ struct Values {
+     Setting<u32, true> folder_icon_size{linkage, 48, 8, 512, "folder_icon_size", Category::UiGameList};
+     Setting<u8> row_1_text_id{linkage, 3, "row_1_text_id", Category::UiGameList};
+     Setting<u8> row_2_text_id{linkage, 2, "row_2_text_id", Category::UiGameList};
+-    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::TreeView, "game_list_mode", Category::UiGameList};
++    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::GridView, "game_list_mode", Category::UiGameList};
+     Setting<bool> show_game_name{linkage, true, "show_game_name", Category::UiGameList};
+ 
+     std::atomic_bool is_game_list_reload_pending{false};
+diff --git a/src/qt_common/game_list/game_list_p.h b/src/qt_common/game_list/game_list_p.h
+index 42d4b69345..fd63b09140 100644
+--- a/src/qt_common/game_list/game_list_p.h
++++ b/src/qt_common/game_list/game_list_p.h
+@@ -56,7 +56,7 @@ static bool IsSongRungTheme() {
+ }
+ 
+ static bool IsSongRungArt() {
+-    return UISettings::values.theme == "song_rung_art";
++    return UISettings::values.theme.empty() || UISettings::values.theme == "song_rung_art";
+ }
+ 
+ static QPixmap GetDefaultIcon(u32 size) {
+-- 
+2.55.0.windows.5
+

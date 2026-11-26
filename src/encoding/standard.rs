@@ -235,6 +235,22 @@ pub fn hd_is_small_change(old_packet: &[u8], new_packet: &[u8], level: &HdBtLeve
 mod tests {
     use super::*;
 
+    #[test]
+    fn hd_amp_index_never_decreases() {
+        let mut prev = 0usize;
+        for i in 0..=150 {
+            let v = hd_amp_index(i as f32 * 0.001);
+            assert!(v >= prev, "small range i {i}");
+            prev = v;
+        }
+        prev = 0;
+        for i in 0..=10_000 {
+            let v = hd_amp_index(i as f32 / 10_000.0);
+            assert!(v >= prev, "full range i {i}");
+            prev = v;
+        }
+    }
+
     fn encode(amp_low: f32, freq_low: f32, amp_high: f32, freq_high: f32) -> [u8; 4] {
         let mut dst = [0u8; 4];
         hd_encode_side(&mut dst, amp_low, freq_low, amp_high, freq_high);

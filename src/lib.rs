@@ -2,11 +2,14 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod backend;
+pub mod demo;
 pub mod detectors;
+pub mod device;
 pub mod dualsense;
 pub mod encoding;
 pub mod ffi;
 pub mod ipc;
+pub mod nintendo2;
 pub mod nx2;
 pub mod options;
 pub mod planner;
@@ -14,6 +17,7 @@ pub mod play_report;
 pub mod preset;
 pub mod settings;
 pub mod status;
+pub mod test_meter;
 pub mod test_pattern;
 pub mod trace;
 pub mod valve;

@@ -6,8 +6,8 @@ This guide covers integrating `renhdrum.dll` into managed C# / .NET applications
 > **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 > [!WARNING]
-> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
-> Host emulators **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) or bypass frontend rate-limiting in controller management. If accurate vibration is disabled, the host drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+> **15 ms rate filter: bypass it only for pads RenHDrum drives**
+> The host's frontend rate limiter drops micro-timed HD Rumble sub-packets before they reach RenHDrum. I do not ask users to turn on `Accurate Vibration`. The host skips the filter conditionally, only for a pad that RenHDrum is currently driving; other pads keep the normal filter. The user changes no setting.
 
 ---
 

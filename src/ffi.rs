@@ -13,6 +13,7 @@ use crate::encoding::amfm::HdAmFmEncoding;
 use crate::encoding::click::{HdClickEncoding, HdClickKind, HdClickSide};
 use crate::encoding::crisp_notes::{HdCrispNotes, HdSideSample};
 use crate::encoding::standard::{hd_encode_packet, hd_encode_side};
+use crate::nintendo2::{Pro2Rumble, PRO2_REPORT_SIZE};
 use crate::preset::{HdRumblePreset, HdRumblePresetKind};
 use crate::settings::{HdRumbleSettings, RumbleConfigController};
 use crate::valve::{
@@ -22,12 +23,17 @@ use crate::valve::{
 };
 use crate::xbox::{XboxRumbleMapper, XboxRumbleTuning};
 
-pub const RENHDRUM_VERSION: u32 = 0x000500; // 0.5.0
+pub const RENHDRUM_VERSION: u32 = 0x000600; // 0.6.0
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
 pub const RENHDRUM_ERR_INVALID_ARG: i32 = -2;
 pub const RENHDRUM_ERR_DECODE_FAILED: i32 = -3;
+
+/// Lock a mutex, recovering the data if a previous holder panicked (engine must not go silent).
+pub(crate) fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[inline]
 pub(crate) fn ffi_guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
@@ -812,7 +818,8 @@ impl RenHdcDualSenseDsp {
         raw_ah: f32,
     ) {
         if let Some(trace) = &self.trace {
-            if let Ok(mut t) = trace.lock() {
+            {
+                let mut t = lock_recover(trace);
                 let now = t.elapsed_us();
                 t.log_sample_raw(now, is_right, al, fl, ah, fh, raw_al, raw_ah);
             }
@@ -854,11 +861,10 @@ pub unsafe extern "C" fn renhdrum_engine_apply_settings(
             return RENHDRUM_ERR_NULL_PTR;
         }
         let s: HdRumbleSettings = (&*settings).into();
-        if let Ok(mut guard) = (*engine).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*engine).inner);
             guard.apply_settings(&s);
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
     })
 }
@@ -906,22 +912,26 @@ pub unsafe extern "C" fn renhdrum_engine_push_sample(
         }
         let u_now = now_us.max(0) as u64;
         let (raw_l, raw_lh, raw_r, raw_rh) = (left_al, left_ah, right_al, right_ah);
-        if let Ok(mut b) = (*engine).nx2_boost_left.lock() {
+        {
+            let mut b = lock_recover(&(*engine).nx2_boost_left);
             let (al, ah) = b.apply_pro_nx2(left_al, left_fl, left_ah, left_fh, u_now);
             left_al = al;
             left_ah = ah;
         }
-        if let Ok(mut b) = (*engine).nx2_boost_right.lock() {
+        {
+            let mut b = lock_recover(&(*engine).nx2_boost_right);
             let (al, ah) = b.apply_pro_nx2(right_al, right_fl, right_ah, right_fh, u_now);
             right_al = al;
             right_ah = ah;
         }
-        if let Ok(mut guard) = (*engine).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*engine).inner);
             guard.push_sample(
                 now_us, left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
             );
             if let Some(trace) = &(*engine).trace {
-                if let Ok(mut t) = trace.lock() {
+                {
+                    let mut t = lock_recover(trace);
                     t.log_sample_raw(
                         now_us, false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh,
                     );
@@ -931,8 +941,6 @@ pub unsafe extern "C" fn renhdrum_engine_push_sample(
                 }
             }
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
     })
 }
@@ -966,26 +974,27 @@ pub unsafe extern "C" fn renhdrum_engine_push_half_sample(
         let u_now = now_us.max(0) as u64;
         let (raw_al, raw_ah) = (al, ah);
         let boost_lock = if is_right {
-            (*engine).nx2_boost_right.lock()
+            lock_recover(&(*engine).nx2_boost_right)
         } else {
-            (*engine).nx2_boost_left.lock()
+            lock_recover(&(*engine).nx2_boost_left)
         };
-        if let Ok(mut b) = boost_lock {
+        {
+            let mut b = boost_lock;
             let (out_al, out_ah) = b.apply_pro_nx2(al, fl, ah, fh, u_now);
             al = out_al;
             ah = out_ah;
         }
-        if let Ok(mut guard) = (*engine).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*engine).inner);
             guard.push_half_sample(now_us, is_right, al, fl, ah, fh);
             if let Some(trace) = &(*engine).trace {
-                if let Ok(mut t) = trace.lock() {
+                {
+                    let mut t = lock_recover(trace);
                     t.log_sample_raw(now_us, is_right, al, fl, ah, fh, raw_al, raw_ah);
                 }
             }
             crate::ipc::note_sample(u_now, al, fl, ah, fh);
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
     })
 }
@@ -1000,13 +1009,15 @@ pub unsafe extern "C" fn renhdrum_engine_tick(
         if engine.is_null() || out_packet10.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
-        if let Ok(mut guard) = (*engine).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*engine).inner);
             let mut packet = [0u8; 10];
             if guard.tick(now_us, &mut packet) {
                 slice::from_raw_parts_mut(out_packet10, 10).copy_from_slice(&packet);
                 crate::ipc::note_packet(&packet);
                 if let Some(trace) = &(*engine).trace {
-                    if let Ok(mut t) = trace.lock() {
+                    {
+                        let mut t = lock_recover(trace);
                         t.log_packet(now_us, &packet);
                     }
                 }
@@ -1014,8 +1025,6 @@ pub unsafe extern "C" fn renhdrum_engine_tick(
             } else {
                 0
             }
-        } else {
-            0
         }
     })
 }
@@ -1128,15 +1137,14 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_target(
         right_al = r_al;
         right_ah = r_ah;
 
-        if let Ok(mut guard) = (*dsp).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*dsp).inner);
             guard.set_target(
                 left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
             );
             (*dsp).trace_half(false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh);
             (*dsp).trace_half(true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh);
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
     })
 }
@@ -1159,12 +1167,11 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_half_target(
         al = out_al;
         ah = out_ah;
 
-        if let Ok(mut guard) = (*dsp).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*dsp).inner);
             guard.set_half_target(is_right, al, fl, ah, fh);
             (*dsp).trace_half(is_right, al, fl, ah, fh, raw_al, raw_ah);
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
     })
 }
@@ -1179,7 +1186,8 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_speaker(
         if dsp.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
-        if let Ok(mut guard) = (*dsp).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*dsp).inner);
             (*dsp)
                 .speaker_explicit
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1188,8 +1196,6 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_speaker(
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             guard.set_speaker(percent);
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
     })
 }
@@ -1235,9 +1241,7 @@ pub unsafe extern "C" fn renhdrum_tri_trigger_update(
         if h.is_null() || out11.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
-        let Ok(mut guard) = (*h).inner.lock() else {
-            return RENHDRUM_ERR_INVALID_ARG;
-        };
+        let mut guard = lock_recover(&(*h).inner);
         let mut buf = [0u8; 11];
         let changed = guard.update(
             now_ms,
@@ -1263,10 +1267,78 @@ pub unsafe extern "C" fn renhdrum_tri_trigger_note_action(h: *mut RenHdcTriTrigg
         if h.is_null() {
             return;
         }
-        if let Ok(mut guard) = (*h).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*h).inner);
             guard.note_action(now_ms);
         }
     });
+}
+
+/// Shared adaptive trigger preset state machine (Tier 2, plan 140). One handle per trigger.
+pub struct RenHdcTriggerPreset {
+    inner: std::sync::Mutex<crate::dualsense::TriggerPreset>,
+}
+
+#[no_mangle]
+pub extern "C" fn renhdrum_trigger_preset_create() -> *mut RenHdcTriggerPreset {
+    ffi_guard(std::ptr::null_mut(), || {
+        Box::into_raw(Box::new(RenHdcTriggerPreset {
+            inner: std::sync::Mutex::new(crate::dualsense::TriggerPreset::new()),
+        }))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_trigger_preset_destroy(h: *mut RenHdcTriggerPreset) {
+    ffi_guard((), || {
+        if !h.is_null() {
+            drop(Box::from_raw(h));
+        }
+    });
+}
+
+/// Sets or refreshes a trigger preset (`0..13`) with normalized intensity `level` (`0.0..=1.0`).
+/// Unknown IDs or `level <= 0` release to Off. Preset `12` fires a 100 ms impact pulse overlay.
+/// Same monotonic clock as `renhdrum_trigger_preset_tick`. Null-safe.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_trigger_preset_set(
+    h: *mut RenHdcTriggerPreset,
+    preset_id: u8,
+    level: f32,
+    now_ms: u32,
+) {
+    ffi_guard((), || {
+        if h.is_null() {
+            return;
+        }
+        {
+            let mut guard = lock_recover(&(*h).inner);
+            guard.set(preset_id, level, now_ms);
+        }
+    });
+}
+
+/// Advances timers and writes 11 bytes to `out11` when the effect changes or an Off reminder is due.
+/// Returns `1` = send `out11`, `0` = unchanged, `< 0` = error (`RENHDRUM_ERR_NULL_PTR` on null).
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_trigger_preset_tick(
+    h: *mut RenHdcTriggerPreset,
+    now_ms: u32,
+    out11: *mut u8,
+) -> i32 {
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if h.is_null() || out11.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let mut guard = lock_recover(&(*h).inner);
+        let mut buf = [0u8; 11];
+        if guard.tick(now_ms, &mut buf) {
+            slice::from_raw_parts_mut(out11, 11).copy_from_slice(&buf);
+            1
+        } else {
+            0
+        }
+    })
 }
 
 /// Builds a 47-byte `DS5EffectsState_t` USB block to open (`on != 0`) or release (`on == 0`) the
@@ -1353,11 +1425,10 @@ pub unsafe extern "C" fn renhdrum_xbox_rumble_push_half_sample(
         let low_amp = if low_amp.is_finite() { low_amp } else { 0.0 };
         let high_amp = if high_amp.is_finite() { high_amp } else { 0.0 };
         let (low_amp, high_amp) = crate::nx2::apply_xbox_nx2(low_amp, high_amp);
-        if let Ok(mut guard) = (*rumble).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*rumble).inner);
             guard.push_half_sample(now_us, is_right, low_amp, low_freq, high_amp, high_freq);
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
     })
 }
@@ -1373,9 +1444,7 @@ pub unsafe extern "C" fn renhdrum_xbox_rumble_tick(
         if rumble.is_null() || out_motors4.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
-        let Ok(mut guard) = (*rumble).inner.lock() else {
-            return RENHDRUM_ERR_INVALID_ARG;
-        };
+        let mut guard = lock_recover(&(*rumble).inner);
         match guard.tick(now_us) {
             Some(motors) => {
                 slice::from_raw_parts_mut(out_motors4, 4).copy_from_slice(&motors);
@@ -1392,12 +1461,96 @@ pub unsafe extern "C" fn renhdrum_xbox_rumble_resend(rumble: *mut RenHdcXboxRumb
         if rumble.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
-        if let Ok(mut guard) = (*rumble).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*rumble).inner);
             guard.resend();
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
+    })
+}
+
+pub struct RenHdcPro2 {
+    pub(crate) inner: std::sync::Mutex<Pro2Rumble>,
+}
+
+#[no_mangle]
+pub extern "C" fn renhdrum_pro2_create(amp_ceiling: u16) -> *mut RenHdcPro2 {
+    ffi_guard(std::ptr::null_mut(), || {
+        let pro2 = Pro2Rumble::new(amp_ceiling);
+        Box::into_raw(Box::new(RenHdcPro2 {
+            inner: std::sync::Mutex::new(pro2),
+        }))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_pro2_destroy(h: *mut RenHdcPro2) {
+    ffi_guard((), || {
+        if !h.is_null() {
+            drop(Box::from_raw(h));
+        }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_pro2_push_half_sample(
+    h: *mut RenHdcPro2,
+    now_us: i64,
+    is_right: bool,
+    al: f32,
+    fl: f32,
+    ah: f32,
+    fh: f32,
+) -> i32 {
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if h.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        {
+            let mut guard = lock_recover(&(*h).inner);
+            guard.push_half_sample(now_us, is_right, al, fl, ah, fh);
+            RENHDRUM_OK
+        }
+    })
+}
+
+/// Builds one 64-byte Switch 2 Pro HD Rumble 2 report (`0x02`) every 15 ms (3 x 5 ms samples).
+/// Returns 1 when `out_report64` should be sent, 0 when nothing to send, < 0 on error.
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_pro2_build_report(
+    h: *mut RenHdcPro2,
+    now_us: i64,
+    out_report64: *mut u8,
+) -> i32 {
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if h.is_null() || out_report64.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let mut guard = lock_recover(&(*h).inner);
+        let mut buf = [0u8; PRO2_REPORT_SIZE];
+        if guard.build_report(now_us, &mut buf) {
+            slice::from_raw_parts_mut(out_report64, PRO2_REPORT_SIZE).copy_from_slice(&buf);
+            1
+        } else {
+            0
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renhdrum_pro2_silent_report(
+    h: *mut RenHdcPro2,
+    out_report64: *mut u8,
+) -> i32 {
+    ffi_guard(RENHDRUM_ERR_INVALID_ARG, || {
+        if h.is_null() || out_report64.is_null() {
+            return RENHDRUM_ERR_NULL_PTR;
+        }
+        let mut guard = lock_recover(&(*h).inner);
+        let mut buf = [0u8; PRO2_REPORT_SIZE];
+        guard.silent_report(&mut buf);
+        slice::from_raw_parts_mut(out_report64, PRO2_REPORT_SIZE).copy_from_slice(&buf);
+        RENHDRUM_OK
     })
 }
 
@@ -1421,12 +1574,11 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_fill_f32(
         let Some(total_samples) = frame_count.checked_mul(4) else {
             return RENHDRUM_ERR_INVALID_ARG;
         };
-        if let Ok(mut guard) = (*dsp).inner.lock() {
+        {
+            let mut guard = lock_recover(&(*dsp).inner);
             let slice = slice::from_raw_parts_mut(out_interleaved_4ch, total_samples);
             guard.fill_interleaved_f32(slice);
             RENHDRUM_OK
-        } else {
-            RENHDRUM_ERR_INVALID_ARG
         }
     })
 }
@@ -1443,9 +1595,8 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt_report(
         if dsp.is_null() || out_report142.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
-        let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
-            return RENHDRUM_ERR_INVALID_ARG;
-        };
+        let mut packer = lock_recover(&(*dsp).bt_packer);
+        let mut inner = lock_recover(&(*dsp).inner);
         if (*dsp)
             .bt_auto_speaker
             .swap(false, std::sync::atomic::Ordering::Relaxed)
@@ -1481,9 +1632,8 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt36_report(
         if dsp.is_null() || out_report398.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
-        let (Ok(mut packer), Ok(mut inner)) = ((*dsp).bt_packer.lock(), (*dsp).inner.lock()) else {
-            return RENHDRUM_ERR_INVALID_ARG;
-        };
+        let mut packer = lock_recover(&(*dsp).bt_packer);
+        let mut inner = lock_recover(&(*dsp).inner);
         if inner.crisp_notes != (*dsp).bt_crisp_notes {
             inner.set_crisp_notes((*dsp).bt_crisp_notes);
         }
@@ -1531,9 +1681,8 @@ pub unsafe extern "C" fn renhdrum_valve_grip_build_report(
         if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
             return RENHDRUM_ERR_INVALID_ARG;
         }
-        let (Ok(mut inner), Ok(mut grip)) = ((*dsp).inner.lock(), (*dsp).valve_grip.lock()) else {
-            return RENHDRUM_ERR_INVALID_ARG;
-        };
+        let mut inner = lock_recover(&(*dsp).inner);
+        let mut grip = lock_recover(&(*dsp).valve_grip);
         let out = &mut *(out_report64 as *mut [u8; VALVE_GRIP_REPORT_SIZE]);
         match grip.build_report(&mut inner, format, out) {
             Some(outcome) => outcome as i32,
@@ -1561,9 +1710,8 @@ pub unsafe extern "C" fn renhdrum_valve_grip_mode_tick(
         if format != VALVE_GRIP_FORMAT_MULAW_8K && format != VALVE_GRIP_FORMAT_MULAW_4K {
             return RENHDRUM_ERR_INVALID_ARG;
         }
-        let (Ok(inner), Ok(mut grip)) = ((*dsp).inner.lock(), (*dsp).valve_grip.lock()) else {
-            return RENHDRUM_ERR_INVALID_ARG;
-        };
+        let inner = lock_recover(&(*dsp).inner);
+        let mut grip = lock_recover(&(*dsp).valve_grip);
         let out = &mut *(out_reports8
             as *mut [[u8; VALVE_GRIP_MODE_REPORT_SIZE]; VALVE_GRIP_MODE_REPORT_COUNT]);
         match grip.mode_tick(&inner, format, now_ns, stalled, out) {
@@ -1644,7 +1792,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000500);
+        assert_eq!(renhdrum_version(), 0x000600);
     }
 
     #[test]
@@ -1766,6 +1914,31 @@ mod tests {
             let tick_res2 = renhdrum_engine_tick(engine, 5_000, packet.as_mut_ptr());
             assert_eq!(tick_res2, 0); // Spaced out
 
+            renhdrum_engine_destroy(engine);
+        }
+    }
+
+    #[test]
+    fn poisoned_engine_mutex_still_works() {
+        unsafe {
+            let engine = renhdrum_engine_create(false, false);
+            assert!(!engine.is_null());
+            let addr = engine as usize;
+            let _ = std::thread::spawn(move || {
+                let e = addr as *mut RenHdcEngine;
+                let _g = (*e).inner.lock().unwrap();
+                panic!("poison");
+            })
+            .join();
+            assert!((*engine).inner.is_poisoned());
+            assert_eq!(
+                renhdrum_engine_push_sample(
+                    engine, 0, 0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0
+                ),
+                RENHDRUM_OK
+            );
+            let mut packet = [0u8; 10];
+            assert_eq!(renhdrum_engine_tick(engine, 0, packet.as_mut_ptr()), 1);
             renhdrum_engine_destroy(engine);
         }
     }
@@ -2569,5 +2742,79 @@ mod tests {
             );
             renhdrum_dualsense_dsp_destroy(dsp);
         }
+    }
+
+    #[test]
+    fn pro2_ffi_null_guards_and_report_roundtrip() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::nx2::set_nx2_mode(0);
+        unsafe {
+            let mut report = [0u8; PRO2_REPORT_SIZE];
+            renhdrum_pro2_destroy(std::ptr::null_mut());
+            assert_eq!(
+                renhdrum_pro2_push_half_sample(
+                    std::ptr::null_mut(),
+                    0,
+                    false,
+                    0.5,
+                    80.0,
+                    0.5,
+                    160.0
+                ),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            assert_eq!(
+                renhdrum_pro2_build_report(std::ptr::null_mut(), 0, report.as_mut_ptr()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            assert_eq!(
+                renhdrum_pro2_silent_report(std::ptr::null_mut(), report.as_mut_ptr()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+
+            let h = renhdrum_pro2_create(0);
+            assert!(!h.is_null());
+            assert_eq!(
+                renhdrum_pro2_build_report(h, 0, std::ptr::null_mut()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+            assert_eq!(
+                renhdrum_pro2_silent_report(h, std::ptr::null_mut()),
+                RENHDRUM_ERR_NULL_PTR
+            );
+
+            assert_eq!(
+                renhdrum_pro2_push_half_sample(h, 0, false, 0.5, 80.0, 0.25, 160.0),
+                RENHDRUM_OK
+            );
+            assert_eq!(renhdrum_pro2_build_report(h, 5_000, report.as_mut_ptr()), 0);
+            assert_eq!(
+                renhdrum_pro2_build_report(h, 15_000, report.as_mut_ptr()),
+                1
+            );
+            assert_eq!(report[0], 0x02);
+            assert_eq!(report[1], 0x70);
+            assert_eq!(report[17], 0x70);
+            assert!(report[2..17].iter().any(|&b| b != 0));
+            // Right side was untouched -> zeroed sample payload
+            assert!(report[18..33].iter().all(|&b| b == 0));
+
+            let mut silent = [0xFFu8; PRO2_REPORT_SIZE];
+            assert_eq!(
+                renhdrum_pro2_silent_report(h, silent.as_mut_ptr()),
+                RENHDRUM_OK
+            );
+            assert_eq!(silent[0], 0x02);
+            assert_eq!(silent[1], 0x71);
+            assert_eq!(silent[17], 0x71);
+            assert!(silent[2..17].iter().all(|&b| b == 0));
+            assert!(silent[18..33].iter().all(|&b| b == 0));
+            assert!(silent[33..].iter().all(|&b| b == 0));
+
+            renhdrum_pro2_destroy(h);
+        }
+        crate::nx2::set_nx2_mode(0);
     }
 }

@@ -3,12 +3,13 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define RENHDRUM_VERSION 0x000500
+#define RENHDRUM_VERSION 0x000600
 
 #define RENHDRUM_OK 0
 #define RENHDRUM_ERR_NULL_PTR -1
@@ -397,6 +398,30 @@ int32_t renhdrum_tri_trigger_update(
    a streak started with or after trigger hold (gap > 30 ms starts a new streak) mutes new pulses
    while held and for 500 ms after the last call. */
 void renhdrum_tri_trigger_note_action(RenHdcTriTrigger *h, uint32_t now_ms);
+/* Shared adaptive trigger presets (Tier 2, one handle per trigger).
+   Priority rule (the core does not blend Tier 1 and Tier 2): while a preset is active and non-Off
+   (out11[0] != 0x05), the host sends the preset's 11 bytes; when the preset is Off, the host falls
+   back to renhdrum_tri_trigger_update as before.
+   tick returns 1 = send out11, 0 = nothing to send, < 0 = error (null pointer). */
+#define RENHDRUM_TRIG_OFF          0  /* Forced release: smooth free trigger */
+#define RENHDRUM_TRIG_TENSION      1  /* Progressive pull: bow, slingshot, charge (caps after 10 s) */
+#define RENHDRUM_TRIG_TWO_STAGE    2  /* Two-stage: half-pull aim/mode, break through to fire */
+#define RENHDRUM_TRIG_CRISP_SHOT   3  /* Crisp break: semi-auto firearm trigger */
+#define RENHDRUM_TRIG_AUTO_FIRE    4  /* Automatic fire: pulsing kick (caps at 5 s) */
+#define RENHDRUM_TRIG_EMPTY_SOFT   5  /* Empty soft: dry trigger with light bottom tap */
+#define RENHDRUM_TRIG_JAMMED       6  /* Jammed wall: blocked early (caps after 3 s, soft release) */
+#define RENHDRUM_TRIG_BRAKE        7  /* Progressive brake: heavier near full pull (caps after 8 s) */
+#define RENHDRUM_TRIG_ABS_BRAKE    8  /* ABS brake: pulsed release (falls back to Brake after 4 s) */
+#define RENHDRUM_TRIG_WHEELSPIN    9  /* Wheelspin / drift vibration (stops after 5 s) */
+#define RENHDRUM_TRIG_THROTTLE     10 /* Throttle pedal: light continuous curve (capped at strength 4) */
+#define RENHDRUM_TRIG_HEAVY_LOAD   11 /* Heavy load: carrying weight / raised shield (caps after 12 s) */
+#define RENHDRUM_TRIG_IMPACT_PULSE 12 /* One-shot 100 ms impact pulse overlay (>= 80 ms gap) */
+#define RENHDRUM_TRIG_ENGINE_ROUGH 13 /* Engine / rough surface vibration (caps after 10 s) */
+typedef struct RenHdcTriggerPreset RenHdcTriggerPreset;
+RenHdcTriggerPreset *renhdrum_trigger_preset_create(void);
+void renhdrum_trigger_preset_destroy(RenHdcTriggerPreset *h);
+void renhdrum_trigger_preset_set(RenHdcTriggerPreset *h, uint8_t preset_id, float level, uint32_t now_ms);
+int32_t renhdrum_trigger_preset_tick(RenHdcTriggerPreset *h, uint32_t now_ms, uint8_t *out11);
 /* 47-byte DS5EffectsState_t USB blocks for HD Haptics (speaker open/release, single-trigger update/off).
    Returns 0 on success, -1 (RENHDRUM_ERR_NULL_PTR) if out47 is NULL. */
 #define RENHDRUM_DS5_EFFECTS_SIZE 47
@@ -431,8 +456,83 @@ int32_t renhdrum_xbox_rumble_push_half_sample(
 int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
 int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
 
+/* Experimental: Switch 2 Pro Controller (USB only, 057E:2069) HD Rumble 2 report 0x02 builder.
+   build_report returns 1 when out_report64 must be sent, 0 when nothing to send, < 0 on error. */
+typedef struct RenHdcPro2 RenHdcPro2;
+#define RENHDRUM_PRO2_REPORT_SIZE 64
+#define RENHDRUM_PRO2_PERIOD_US 15000
+#define RENHDRUM_PRO2_VID 0x057E
+#define RENHDRUM_PRO2_PID 0x2069
+#define RENHDRUM_PRO2_AMP_CEILING_DEFAULT 450
+RenHdcPro2 *renhdrum_pro2_create(uint16_t amp_ceiling);
+void renhdrum_pro2_destroy(RenHdcPro2 *h);
+int32_t renhdrum_pro2_push_half_sample(
+    RenHdcPro2 *h,
+    int64_t now_us,
+    bool is_right,
+    float al,
+    float fl,
+    float ah,
+    float fh
+);
+int32_t renhdrum_pro2_build_report(RenHdcPro2 *h, int64_t now_us, uint8_t *out_report64);
+int32_t renhdrum_pro2_silent_report(RenHdcPro2 *h, uint8_t *out_report64);
+
 /* Switch 2 rumble mode: 0 = Switch 1 default / untouched, 2 = Switch 2 Mode 2 translation */
 void renhdrum_set_nx2_mode(int32_t mode);
+
+/* Host compiled against this header can use DLL version v (renhdrum_version()). */
+#define RENHDRUM_ABI_COMPATIBLE(v) ((((uint32_t)(v)) >> 16) == ((uint32_t)RENHDRUM_VERSION >> 16) && ((uint32_t)(v)) >= (uint32_t)RENHDRUM_VERSION)
+
+#define RENHDRUM_FAMILY_NONE 0
+#define RENHDRUM_FAMILY_SWITCH1 1
+#define RENHDRUM_FAMILY_SWITCH2 2
+#define RENHDRUM_FAMILY_DUALSENSE 3
+#define RENHDRUM_FAMILY_DUALSENSE_EDGE 4
+#define RENHDRUM_FAMILY_XBOX 5
+#define RENHDRUM_FAMILY_STEAM 6
+#define RENHDRUM_DEVICE_EXPERIMENTAL 1u
+#define RENHDRUM_DEVICE_NO_HD_WRITE 2u      /* never send HD Rumble packets: the pad powers off (057E:2073) */
+#define RENHDRUM_DEVICE_COMBINED_JOYCON 4u  /* SDL's virtual Joy-Con pair */
+typedef struct RenHdcDeviceInfo {
+    uint32_t struct_size;       /* host sets sizeof(RenHdcDeviceInfo) */
+    int32_t family;
+    uint32_t flags;
+    int32_t steam_grip_format;  /* RENHDRUM_VALVE_GRIP_FORMAT_* or 0 */
+} RenHdcDeviceInfo;
+/* RENHDRUM_OK = known family, RENHDRUM_CLAIM_UNSUPPORTED_DEVICE = family NONE (out still filled). */
+int32_t renhdrum_device_classify(uint16_t vid, uint16_t pid, RenHdcDeviceInfo *out);
+
+#define RENHDRUM_CLAIM_OK 0
+#define RENHDRUM_CLAIM_UNSUPPORTED_DEVICE 1
+#define RENHDRUM_CLAIM_BLOCKED_BY_HOST_DRIVER 2
+#define RENHDRUM_CLAIM_RAW_PACKET_REFUSED 3
+#define RENHDRUM_CLAIM_AUDIO_ENDPOINT_MISSING 4
+#define RENHDRUM_CLAIM_AUDIO_FORMAT_MISMATCH 5
+#define RENHDRUM_CLAIM_WINUSB_MI01_REQUIRED 6
+#define RENHDRUM_CLAIM_ABI_MISMATCH 7
+#define RENHDRUM_CLAIM_NO_HD_WRITE 8
+/* Static English text with the fix, never NULL ("Unknown status." for other codes). */
+const char *renhdrum_claim_status_text(int32_t code);
+
+#define RENHDRUM_DEMO_QUICK_PING 0  /* 150 ms tap left, then right: which pad is this slot */
+#define RENHDRUM_DEMO_TECH_SHOW 1   /* ~2.4 s: tap, low-band sweep, high-band notes */
+#define RENHDRUM_DEMO_CHECKUP 2     /* ~4 s: tap, sweep, 4 notes, 4 strength steps, stop */
+/* Sample at t_ms since start. Returns 1 while running (feed both sides into the pad's usual sink:
+   engine push_sample, DualSense / Steam set_target, Xbox, Pro 2), 0 once finished (outputs zero),
+   <0 on error. */
+int32_t renhdrum_demo_sample(int32_t preset, uint32_t t_ms, RenHdSideSample *out_left, RenHdSideSample *out_right);
+
+/* Thread-safe send-rate meter used during checkup tests to record real packet writes. */
+typedef struct RenHdTestMeter RenHdTestMeter;
+/* Allocates a new meter; free with renhdrum_test_meter_destroy. */
+RenHdTestMeter *renhdrum_test_meter_create(void);
+/* Frees a meter (NULL is a no-op). */
+void renhdrum_test_meter_destroy(RenHdTestMeter *meter);
+/* Records one real packet write at monotonic timestamp t_us (NULL is a no-op). */
+void renhdrum_test_meter_record(RenHdTestMeter *meter, uint64_t t_us, bool ok);
+/* Formats "sent <ok>/<total>, <avg> ms avg, stuck <yes|no>" into out; returns bytes written (<0 on error). */
+int32_t renhdrum_test_meter_format(const RenHdTestMeter *meter, char *out, size_t cap);
 
 #ifdef __cplusplus
 }

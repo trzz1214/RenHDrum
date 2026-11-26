@@ -18,6 +18,11 @@ This directory contains upstream patches for [Simple DirectMedia Layer (SDL)](ht
 - **New Public C API**:
   - `SDL_HDRumbleSetNoQueueBluetooth(SDL_Joystick *joystick, bool enabled)`
 
+### `0003-switch2-raw-hd-rumble.patch`
+- **Experimental Switch 2 Pro Raw HD Rumble 2 Pass-Through**: Accepts 64-byte raw report `0x02` buffers via `SDL_SendJoystickEffect` / `SDL_SendGamepadEffect` for the Nintendo Switch 2 Pro Controller (`057E:2069`) only (Joy-Con 2 and GameCube NSO are untouched and return `SDL_Unsupported()`).
+- **Immediate Unclamped Dispatch**: Sends raw blocks immediately inside `UpdateRumble` without the 12 ms `RUMBLE_INTERVAL` or `RUMBLE_MAX` clamping (the core clamps amplitude), suppresses legacy `RumbleJoystick` overwrites for 100 ms, and exits raw mode cleanly on `RumbleJoystick` or timeout.
+- **License**: zlib license (matching upstream SDL).
+
 ## Applying Patches
 
 To apply these patches to your SDL source tree:
@@ -27,4 +32,5 @@ cd /path/to/SDL
 git checkout release-3.4.20
 git am /path/to/RenHDrum/integrations/sdl3/sdl3-patches/0001-hdrumble.patch
 git am /path/to/RenHDrum/integrations/sdl3/sdl3-patches/0002-hdrumble-idle-write.patch
+git am /path/to/RenHDrum/integrations/sdl3/sdl3-patches/0003-switch2-raw-hd-rumble.patch
 ```

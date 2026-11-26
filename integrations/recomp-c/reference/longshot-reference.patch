@@ -93,10 +93,10 @@ index 1a2704d3..3af74337 100644
  } // namespace mkwvk
 diff --git a/gpu/vk/menu/hd_rumble.cpp b/gpu/vk/menu/hd_rumble.cpp
 new file mode 100644
-index 00000000..b95f96f4
+index 00000000..350cbdcf
 --- /dev/null
 +++ b/gpu/vk/menu/hd_rumble.cpp
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,286 @@
 +// The Insert menu's HD Rumble settings page (gpu/vk/menu/hd_rumble.cpp): opens from the Controls tab's HD Rumble
 +// settings row (after the HD Rumble switch) and edits the core RenHDrum 0.5.0 options through MkwVkHost::rh_option,
 +// persisting to renhdrum.ini beside the game.
@@ -141,6 +141,9 @@ index 00000000..b95f96f4
 +     menu::Kind::Toggle, 0, 1, 1, 1, 0, 0, {}},
 +    {"rh_dualsense_hd_haptics", "dualsense_hd_haptics", "DualSense: HD Haptics",
 +     "HD Rumble upgraded for DualSense. The controller speaker and the L2/R2 triggers react to the rumble. Off = standard HD Rumble.",
++     menu::Kind::Toggle, 0, 1, 1, 1, 0, 0, {}},
++    {"rh_hd_triggers", "hd_triggers", "DualSense: HD Triggers",
++     "The L2/R2 triggers follow the game: bow and slingshot tension, Hookshot, Din's Fire and more. Off = the HD Haptics triggers.",
 +     menu::Kind::Toggle, 0, 1, 1, 1, 0, 0, {}},
 +    {"rh_dualsense_volume", "dualsense_volume", "DualSense: Strength",
 +     "Lower it if the rumble feels too strong.",
@@ -626,10 +629,25 @@ index a5cdfe4a..7b4a2422 100644
      hos_fs_wait_writes();
      hos_log("stop: close work done (a file the game was writing waited for, at most 3 s)");
 diff --git a/host/hos_sdl.c b/host/hos_sdl.c
-index 72c38f26..32915787 100644
+index 72c38f26..e02d0c32 100644
 --- a/host/hos_sdl.c
 +++ b/host/hos_sdl.c
-@@ -37,6 +37,7 @@ static struct {
+@@ -15,6 +15,7 @@
+ #include <setupapi.h>
+ #include <devpropdef.h>
+ #include <mmdeviceapi.h>
++#include <endpointvolume.h>
+ #include <propsys.h>
+ #include <objbase.h>
+ #endif
+@@ -31,12 +32,14 @@ static struct {
+     /* sound */
+     void *OpenAudioDevice, *PauseAudioDevice, *OpenAudioDeviceStream, *ResumeAudioStreamDevice, *PutAudioStreamData;
+     /* controllers */
++    void *PadFinger;   /* (plan 147) SDL_GetGamepadTouchpadFinger, optional */
+     void *PadOpen, *PadClose, *PadConnected, *PadsUpdate, *PadButton, *PadAxis, *PadName, *PadRumble;
+     void *PadType, *PadEffect;   /* (optional: HD rumble, host/pad_sdl.c) */
+     void *PadHasSensor, *PadSensorEnable, *PadSensorData;   /* (motion: optional, NULL in an SDL without them) */
      void *PadVendor, *PadProduct, *PadSteamHandle, *SetHintPriority;   /* (Steam's stand-in pads: optional, host/steam_pads.h; PadProduct also for vibration.h's Steam Controller (2026)) */
      void *JoystickGUID, *PadMapping;   /* (optional connection diagnostics: no serial number or device path) */
      void *PadWireless;   /* (optional: a pad's transport, SDL_GetJoystickConnectionState) */
@@ -637,7 +655,15 @@ index 72c38f26..32915787 100644
      /* (optional, host/pad_sdl.c's vibration: an Xbox pad's trigger motors; a pad's HID device, written beside SDL for a
         DualSense's Bluetooth haptics. Without them those pads keep their two motors) */
      void *PadTriggers, *HidOpenPath, *HidWrite, *HidClose, *HidReadTimeout;
-@@ -125,6 +126,7 @@ static int get_all(HMODULE m, int three) {
+@@ -83,6 +86,7 @@ static int get_all(HMODULE m, int three) {
+     GET2(PadName, "SDL_GetGamepadName", "SDL_GameControllerName");
+     GET2(PadRumble, "SDL_RumbleGamepad", "SDL_GameControllerRumble");
+     /* (SDL2 2.0.12 and 2.0.16 on, SDL3 3.2 on: without them every pad keeps the motor rumble) */
++    *(FARPROC *)&f.PadFinger = GetProcAddress(m, three ? "SDL_GetGamepadTouchpadFinger" : "SDL_GameControllerGetTouchpadFinger");
+     *(FARPROC *)&f.PadType = GetProcAddress(m, three ? "SDL_GetGamepadType" : "SDL_GameControllerGetType");
+     *(FARPROC *)&f.PadEffect = GetProcAddress(m, three ? "SDL_SendGamepadEffect" : "SDL_GameControllerSendEffect");
+     /* (longshot, vibration: SDL2 2.0.14 / 2.0.18 / 2.24 on, every SDL3) */
+@@ -125,6 +129,7 @@ static int get_all(HMODULE m, int three) {
          GET(Free, "SDL_free");
          /* (a pad's transport: SDL3 3.2 on. Optional: SDL2 cannot say, and a DualSense is then placed by its sound card) */
          *(FARPROC *)&f.PadWireless = GetProcAddress(m, "SDL_GetJoystickConnectionState");
@@ -645,7 +671,101 @@ index 72c38f26..32915787 100644
          *(FARPROC *)&f.LoadPNG = GetProcAddress(m, "SDL_LoadPNG");   /* (3.4 on: the icon, when there) */
          *(FARPROC *)&f.SetWindowIcon = GetProcAddress(m, "SDL_SetWindowIcon");
          *(FARPROC *)&f.DestroySurface = GetProcAddress(m, "SDL_DestroySurface");
-@@ -1177,6 +1179,12 @@ int hos_sdl_pad_wireless(void *pad) {
+@@ -635,7 +640,8 @@ int hos_sdl_output_resolve(const char *id) {
+ 
+ /* Match the HID interface and the Windows audio endpoint by device container. SDL exposes only the endpoint's
+    display name, so require that name to be unique in both lists; never guess when either identity is unavailable. */
+-int hos_sdl_pad_audio_endpoint(void *pad) {
++typedef struct { int set; float *level; int *mute; int done; } PadVolume;   /* (applied to the matched endpoint) */
++static int pad_endpoint(void *pad, PadVolume *vol) {
+ #ifdef _WIN32
+     static const DEVPROPKEY container = {{0x8c7ed206,0x3f8a,0x4827,{0xb3,0xab,0xae,0x9e,0x1f,0xae,0xfc,0x6c}},2};
+     static const PROPERTYKEY label = {{0xa45c254e,0xdf1c,0x4efd,{0x80,0x20,0x67,0xd1,0x46,0xa8,0x50,0xe0}},14};
+@@ -663,6 +669,7 @@ int hos_sdl_pad_audio_endpoint(void *pad) {
+     IMMDeviceEnumerator *e = NULL;
+     IMMDeviceCollection *list = NULL;
+     int token = -1, matches = 0;
++    IMMDevice *matched = NULL;
+     char matched_name[HOS_OUTPUT_NAME_CAP] = "";
+     if (SUCCEEDED(CoCreateInstance(&clsid, NULL, CLSCTX_ALL, &iid, (void **)&e)) && e &&
+         SUCCEEDED(e->lpVtbl->EnumAudioEndpoints(e, eRender, DEVICE_STATE_ACTIVE, &list)) && list) {
+@@ -686,7 +693,11 @@ int hos_sdl_pad_audio_endpoint(void *pad) {
+                         if (hos_sdl_output_info(j, id, sizeof id, sdl_name, sizeof sdl_name) &&
+                             !strcmp(name, sdl_name) && hos_sdl_output_channels(j) >= 4) {
+                             token = hos_sdl_output_resolve(id);
+-                            if (token >= 0) matches++, strcpy(matched_name, name);
++                            if (token >= 0) {
++                                matches++, strcpy(matched_name, name);
++                                if (matched) matched->lpVtbl->Release(matched);
++                                matched = d, d->lpVtbl->AddRef(d);
++                            }
+                         }
+                     }
+                 }
+@@ -715,15 +726,38 @@ int hos_sdl_pad_audio_endpoint(void *pad) {
+         }
+         if (labels != 1) matches = 0;
+     }
++    if (vol && matches == 1 && matched) {
++        static const GUID vol_iid = {0x5cdf2c82,0x841e,0x4546,{0x97,0x22,0x0c,0xf7,0x40,0x78,0x22,0x9a}};
++        IAudioEndpointVolume *v = NULL;
++        if (SUCCEEDED(matched->lpVtbl->Activate(matched, &vol_iid, CLSCTX_ALL, NULL, (void **)&v)) && v) {
++            BOOL m = FALSE;
++            if (vol->set)
++                vol->done = SUCCEEDED(v->lpVtbl->SetMasterVolumeLevelScalar(v, *vol->level, NULL)) &&
++                            SUCCEEDED(v->lpVtbl->SetMute(v, *vol->mute ? TRUE : FALSE, NULL));
++            else
++                vol->done = SUCCEEDED(v->lpVtbl->GetMasterVolumeLevelScalar(v, vol->level)) &&
++                            SUCCEEDED(v->lpVtbl->GetMute(v, &m)) && ((*vol->mute = m != FALSE), 1);
++            v->lpVtbl->Release(v);
++        }
++    }
++    if (matched) matched->lpVtbl->Release(matched);
+     if (list) list->lpVtbl->Release(list);
+     if (e) e->lpVtbl->Release(e);
+     if (SUCCEEDED(com)) CoUninitialize();
+     return matches == 1 ? token : -1;
+ #else
+-    (void)pad;
++    (void)pad, (void)vol;
+     return -1;
+ #endif
+ }
++int hos_sdl_pad_audio_endpoint(void *pad) { return pad_endpoint(pad, NULL); }
++/* Windows' own volume + mute of this pad's four-channel endpoint (USB rumble rides it). set 0 reads, 1 writes. */
++int hos_sdl_pad_volume(void *pad, float *level, int *mute, int set) {
++    PadVolume v = {set, level, mute, 0};
++    if (!level || !mute) return 0;
++    pad_endpoint(pad, &v);
++    return v.done;
++}
+ typedef struct {
+     void (*pull)(void *user, uint8_t *out, int len);
+     void *user;
+@@ -1135,6 +1169,22 @@ void hos_sdl_pad_rumble(void *pad, uint16_t low, uint16_t high, uint32_t ms) {
+     if (version == 3) CALL(_Bool (*)(void *, uint16_t, uint16_t, uint32_t), PadRumble)(pad, low, high, ms);
+     else CALL(int (*)(void *, uint16_t, uint16_t, uint32_t), PadRumble)(pad, low, high, ms);
+ }
++/* (plan 147) Where the first finger on the first touchpad is, x 0..1 from the left: 1 when it is down (and *x set), else 0 */
++int hos_sdl_pad_finger_x(void *pad, float *x) {
++    float fx = 0, fy = 0, pressure = 0;
++    if (!f.PadFinger || !pad) return 0;
++    if (version == 3) {
++        _Bool down = 0;
++        if (!CALL(_Bool (*)(void *, int, int, _Bool *, float *, float *, float *), PadFinger)(pad, 0, 0, &down, &fx, &fy, &pressure) || !down)
++            return 0;
++    } else {
++        uint8_t down = 0;
++        if (CALL(int (*)(void *, int, int, uint8_t *, float *, float *, float *), PadFinger)(pad, 0, 0, &down, &fx, &fy, &pressure) != 0 || !down)
++            return 0;
++    }
++    *x = fx;
++    return 1;
++}
+ int hos_sdl_pad_type(void *pad) { return f.PadType ? CALL(int (*)(void *), PadType)(pad) : 0; }
+ int hos_sdl_pad_has_effect(void) { return f.PadEffect != NULL; }
+ int hos_sdl_pad_effect(void *pad, const void *data, int size) {
+@@ -1177,6 +1227,12 @@ int hos_sdl_pad_wireless(void *pad) {
      if (state < 1) return -1;
      return state == 2 ? 1 : 0;
  }
@@ -659,10 +779,26 @@ index 72c38f26..32915787 100644
  int hos_sdl_pad_rumble_triggers(void *pad, uint16_t left, uint16_t right, uint32_t ms) {
      if (!f.PadTriggers) return 0;
 diff --git a/host/hos_sdl.h b/host/hos_sdl.h
-index 7fa5d887..5daf88b1 100644
+index 7fa5d887..c82e6042 100644
 --- a/host/hos_sdl.h
 +++ b/host/hos_sdl.h
-@@ -116,9 +116,11 @@ int hos_sdl_knows_steam_pads(void);
+@@ -69,6 +69,7 @@ int hos_sdl_output_info(int index, char *id, int id_capacity, char *name, int na
+ int hos_sdl_output_resolve(const char *id);
+ int hos_sdl_output_channels(int index);   /* (longshot) the index'th device's channels, after hos_sdl_output_count; 0 unknown */
+ int hos_sdl_pad_audio_endpoint(void *pad); /* token for this pad's four-channel endpoint, or -1 */
++int hos_sdl_pad_volume(void *pad, float *level, int *mute, int set); /* (longshot) Windows volume/mute of that endpoint; set 0 reads, 1 writes; 1 on success */
+ void *hos_sdl_audio_open(unsigned device, int freq, int channels, int s16, int frames,
+                          void (*pull)(void *user, uint8_t *out, int len), void *user);
+ void hos_sdl_audio_close(void *audio);   /* stops callbacks before freeing their state */
+@@ -102,6 +103,7 @@ void hos_sdl_pad_rumble(void *pad, uint16_t low, uint16_t high, uint32_t ms);
+ /* (HD rumble, host/pad_sdl.c) the pad's SDL_GetGamepadType / SDL_GameControllerGetType, in the loaded SDL's numbers (0
+    unknown, or no such call); whether the SDL has the effect call; a raw effect sent (SDL_SendGamepadEffect /
+    SDL_GameControllerSendEffect): 1 when SDL took it */
++int hos_sdl_pad_finger_x(void *pad, float *x);   /* (plan 147) the first finger on the touchpad is down: 1, its x 0..1 from the left */
+ int hos_sdl_pad_type(void *pad);
+ int hos_sdl_pad_has_effect(void);
+ int hos_sdl_pad_effect(void *pad, const void *data, int size);
+@@ -116,9 +118,11 @@ int hos_sdl_knows_steam_pads(void);
  uint16_t hos_sdl_pad_vendor(void *pad);
  uint16_t hos_sdl_pad_product(void *pad);   /* (its USB product id, 0 unknown: the Steam Deck's built-in controls and vibration.h's Steam Controller (2026)) */
  uint64_t hos_sdl_pad_steam_handle(void *pad);
@@ -676,11 +812,117 @@ index 7fa5d887..5daf88b1 100644
  int hos_sdl_pad_rumble_triggers(void *pad, uint16_t left, uint16_t right, uint32_t ms);
  const char *hos_sdl_pad_path(void *pad);
  int hos_sdl_hid_can(void);
+diff --git a/host/mouse_native.c b/host/mouse_native.c
+index 2149fe0e..12fd9179 100644
+--- a/host/mouse_native.c
++++ b/host/mouse_native.c
+@@ -60,6 +60,7 @@ enum { LIMITS_AT = 0x178, PITCH_AT = 0x18c, YAW_AT = 0x1a4, STATE_AT = 0x204 };
+ static volatile LONG64 last_hook_ns;
+ static volatile LONG64 last_camera;
+ static volatile LONG last_state = -1;   /* (the last camera's state at +0x204) */
++static volatile LONG cam_state = -1;    /* (state at +0x204 even when native mouse look is off) */
+ static volatile LONG game_free = 1;     /* (nn_hid.c: the game leaves the camera to the player this frame) */
+ static volatile LONG stick_held;        /* (nn_hid.c: the camera's keys or a pad turn the camera this frame) */
+ static uint64_t own_camera;             /* (the camera target_yaw and target_pitch belong to) */
+@@ -112,6 +113,8 @@ static int free_look(void) {
+    game calls it: the link fails without it) */
+ int hos_disable_camera_centering(void) { return rx_option(45, 0); }
+ 
++int hos_cam_state(void) { return (int)InterlockedCompareExchange(&cam_state, 0, 0); }
++
+ /* nn_hid.c, with each read of the controller: 1 while the game leaves the camera to the player, 0 while it takes the
+    right stick for its own use (ZR, the bow's aim; L, the item wheel; R) */
+ void hos_mouse_native_free(int free) { InterlockedExchange(&game_free, free ? 1 : 0); }
+@@ -127,12 +130,13 @@ void hos_mouse_native_stick(int held) { InterlockedExchange(&stick_held, held ?
+    replay gives them back at the same update (HOS_INPUT_PLAY) in place of the mouse, the menu's row and the window's
+    clock: the camera then turns as it did, whatever the mouse and the settings do now */
+ void hos_mouse_camera(uint64_t cam) {
+-    if (!cam) return;
++    if (!cam || !looks_like_camera(cam)) return;
++    InterlockedExchange(&cam_state, geti(cam + STATE_AT));
+     /* (no recording written or played: as before, the mouse camera's row first, and nothing of the guest's read while it is
+        off. With one, every update goes through it, the native camera on or not) */
+     const int recorded = hos_input_movie_active();
+     int native = recorded ? -1 : native_on();
+-    if (!native || !looks_like_camera(cam)) return;
++    if (!native) return;
+     MovieCam mc;
+     int movie = -1;   /* (-1 none, 0 recording, 1 playing) */
+     if (recorded) {
+diff --git a/host/nn_audio.c b/host/nn_audio.c
+index 93f8498c..ca88cdb6 100644
+--- a/host/nn_audio.c
++++ b/host/nn_audio.c
+@@ -43,6 +43,13 @@
+ #endif
+ 
+ void hos_audio_source_load_async(void);                   /* (audio_source.c) read the player's archives on a worker */
++int hos_oot_trigger_enabled(void);
++
++static volatile LONG64 last_ocarina_ns;
++
++int64_t hos_audio_last_ocarina_ns(void) {
++    return (int64_t)InterlockedCompareExchange64(&last_ocarina_ns, 0, 0);
++}
+ int hos_audio_source_ready(void);
+ int hos_audio_source_of(uint64_t data, uint32_t *crc);    /* a wave buffer's asset: its class, -1 when it starts none */
+ int hos_audio_source_trace(void);
+@@ -2061,7 +2068,9 @@ HLE(_ZN2nn5audio17SetVoicePlayStateEPNS0_9VoiceTypeENS1_9PlayStateE) {
+     au_unlock();
+ }
+ HLE(_ZN2nn5audio16AppendWaveBufferEPNS0_9VoiceTypeEPKNS0_10WaveBufferE) {
+-    if (hos_pad_speaker_active()) hos_audio_source_load_async();
++    const int spk_active = hos_pad_speaker_active();
++    const int trig_active = hos_oot_trigger_enabled();
++    if (spk_active || trig_active) hos_audio_source_load_async();
+     au_lock();
+     Voice *v = voice_of(ARG(0));
+     int ok = 0;
+@@ -2087,8 +2096,11 @@ HLE(_ZN2nn5audio16AppendWaveBufferEPNS0_9VoiceTypeEPKNS0_10WaveBufferE) {
+         }
+         Cmd k = {.op = OP_VOICE_APPEND, .idx = (int)(v - voices), .wbp = ARG(1), .wb = checked};   /* (as checked) */
+         uint32_t crc = 0;
+-        k.i0 = !hos_pad_speaker_active() ? -1 : !hos_audio_source_ready() ? AUDIO_SOURCE_NONE
+-                 : hos_audio_source_of(k.wb.buffer, &crc);   /* (the sound's class, by the archive its samples lie in) */
++        const int src_cls = !(spk_active || trig_active) ? -1 : !hos_audio_source_ready() ? AUDIO_SOURCE_NONE
++                              : hos_audio_source_of(k.wb.buffer, &crc);   /* (the sound's class, by the archive its samples lie in) */
++        if (src_cls == AUDIO_SOURCE_OCARINA)
++            InterlockedExchange64(&last_ocarina_ns, hos_now_ns());
++        k.i0 = spk_active ? src_cls : -1;
+         if (k.i0 > AUDIO_SOURCE_NONE && hos_audio_source_trace())
+             hos_log("audio: voice %d plays %08x: %s", k.idx, crc, hos_audio_source_name(k.i0));
+         v->pending_wb++;
 diff --git a/host/nn_hid.c b/host/nn_hid.c
-index e1e7da0d..8859b328 100644
+index e1e7da0d..09332366 100644
 --- a/host/nn_hid.c
 +++ b/host/nn_hid.c
-@@ -1880,10 +1880,10 @@ static void vibration_send(uint64_t handle, uint64_t value) {
+@@ -1459,6 +1459,14 @@ static void read_input(uint64_t *buttons, uint64_t *taps, int32_t stick[4]) {
+                     "the game's window behind another one, and the player's keyboard and mouse stay out");
+     }
+     input_in_front = game_in_front();
++    {   /* (plan 147) A DualSense / DualShock 4 touchpad click: the left half is Minus (the panel of Key Items, Threads of Time and Map), the
++           right half Plus (the pause menu, Items first), held as that real button from the click to the release. Only while the pads count
++           (the game's window in front, or the pads in the background) and not over the Insert menu */
++        int hos_pad_touch_zone_held(void);   /* (host/pad_sdl.c) */
++        const int zone = hos_pad_touch_zone_held();
++        if (zone >= 0 && !rx_option(1, 0) && (input_in_front || pads_in_background(getenv("HOS_INPUT_BACKGROUND"), rx_option(4, 0))))
++            *buttons |= 1ULL << (zone ? B_PLUS : B_MINUS);
++    }
+     if (!input_in_front) {   /* (the pads alone, when the player asked for them behind other windows) */
+         static const char *env;
+         static int looked;
+@@ -1630,6 +1638,10 @@ static void npad_states(Ctx *c) {
+         buttons &= ~(1ULL << B_SPRINT);
+         hos_hid_buttons = buttons;   /* (cheats.c: the cheats' button conditions) */
+         const int menu_open = rx_option(1, 0);
++        uint64_t hos_oot_trigger_frame(uint64_t buttons, int menu_open);
++        _Static_assert(B_ZR == 9, "oot_trigger.h OOT_TRIG_B_ZR");
++        _Static_assert(B_B == 1, "oot_trigger.h OOT_TRIG_B_B");
++        buttons = hos_oot_trigger_frame(buttons, menu_open);
+         const uint64_t enabled = (uint32_t)rx_option(HOS_OPT_HOLD_TOGGLE, 0) &
+                                  ~((1ULL << B_PLUS) | (1ULL << B_MINUS));
+         const int pads_behind = pads_in_background(getenv("HOS_INPUT_BACKGROUND"), rx_option(4, 0));
+@@ -1880,10 +1892,10 @@ static void vibration_send(uint64_t handle, uint64_t value) {
      }
      void hos_sdl_rumble_hd(int side, const float value[4]);   /* pad_sdl.c: the value as it is, for HD rumble */
      hos_sdl_rumble_hd(dev, v);
@@ -695,7 +937,7 @@ index e1e7da0d..8859b328 100644
      void hos_sdl_rumble(float low, float high);   /* pad_sdl.c */
      hos_sdl_rumble(amp[0][0] > amp[1][0] ? amp[0][0] : amp[1][0], amp[0][1] > amp[1][1] ? amp[0][1] : amp[1][1]);
  }
-@@ -1891,7 +1891,14 @@ static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low,
+@@ -1891,7 +1903,14 @@ static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low,
      float idle[4] = {0.0f, 160.0f, 0.0f, 320.0f};
      memcpy(GP(v), idle, sizeof idle);
  }
@@ -711,11 +953,841 @@ index e1e7da0d..8859b328 100644
  HLE(_ZN2nn3hid6detail20IsVibrationPermittedEPb) { *(uint8_t *)GP(ARG(0)) = 1; RET(0); }
  HLE(_ZN2nn3hid6detail27BeginPermitVibrationSessionEv) { RET(0); }
  HLE(_ZN2nn3hid6detail25EndPermitVibrationSessionEv) { RET(0); }
+diff --git a/host/oot_leds.c b/host/oot_leds.c
+new file mode 100644
+index 00000000..3e2e836c
+--- /dev/null
++++ b/host/oot_leds.c
+@@ -0,0 +1,36 @@
++/* (longshot) The DualSense's light bar follows Link (Plans 147, 149): a red flash when he is hit, a breath at one heart or less.
++   The rules are host/oot_pad_light.h; the bridge sends the colour (rh_leds, host/renhdrum_recomp_bridge.c) only when it changes
++   and also breathes the microphone LED on a low battery. HOS_PAD_LEDS=0 leaves the lights as they were. */
++#include "hos.h"
++#include "rh_host.h"
++#include "oot_pad_light.h"
++#include <stdint.h>
++#include <stdlib.h>
++#ifndef LONGSHOT_ENV_H
++#include "../gpu/vk/compat/longshot_env.h"
++#endif
++
++int64_t hos_now_ns(void);
++int hos_oot_gamedata_int(uint32_t hash, int64_t *v);   /* host/oot_state_tap.c */
++
++#define LED_LIFE     0x31ab5580u   /* PlayerStatus.Life, quarter hearts */
++#define LED_MAX_LIFE 0xfbe01da1u   /* PlayerStatus.MaxLife */
++
++/* Called each read of the pads (host/oot_trigger.c) */
++void hos_oot_leds_frame(void) {
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("HOS_PAD_LEDS");
++        on = !e || !env_value_off(e);
++    }
++    if (!on) return;
++    static int64_t next;
++    static OotBarState bar = OOT_BAR_STATE_INIT;
++    const int64_t now = hos_now_ns();
++    if (now < next) return;
++    next = now + 20000000LL;   /* (50 a second: a hit's 150 ms flash is caught, the bridge sends at most about 12) */
++    int64_t life, max_life;
++    if (!hos_oot_gamedata_int(LED_LIFE, &life) || !hos_oot_gamedata_int(LED_MAX_LIFE, &max_life)) return;
++    const OotBar l = oot_bar_color(&bar, life, max_life, now);
++    if (l.valid) rh_leds(l.r, l.g, l.b);
++}
+diff --git a/host/oot_menu.c b/host/oot_menu.c
+index a6f5bfb5..3b3b9126 100644
+--- a/host/oot_menu.c
++++ b/host/oot_menu.c
+@@ -17,15 +17,17 @@
+ /* Screen updates are the game's menu signal. Consume it at Link's update so the first update after the screens stop
+    releases the sprint even when Link remains stationary. The panel frame runs on all three panel pages and in pause. */
+ static volatile int sprint_menu_seen;
++static volatile unsigned sprint_menu_ticks;   /* the same updates, counted and never consumed (host/oot_trigprobe.c) */
+ int hos_oot_menu_sprint_active(void) {
+     return __atomic_exchange_n(&sprint_menu_seen, 0, __ATOMIC_RELAXED);
+ }
++unsigned hos_oot_menu_ticks(void) { return __atomic_load_n(&sprint_menu_ticks, __ATOMIC_RELAXED); }
+ static void sprint_menu_tick(uint64_t screen) {
+     if (!screen || !hos_mem_region(screen, 8)) return;
+     const uint64_t vt = G64(screen);
+     if (vt == g_module_base + 0x84c0baa8ULL || vt == g_module_base + 0x84c08aa0ULL ||
+         vt == g_module_base + 0x84c07798ULL || vt == g_module_base + 0x84c04a18ULL)
+-        __atomic_store_n(&sprint_menu_seen, 1, __ATOMIC_RELAXED);
++        __atomic_store_n(&sprint_menu_seen, 1, __ATOMIC_RELAXED), __atomic_fetch_add(&sprint_menu_ticks, 1, __ATOMIC_RELAXED);
+ }
+ #ifndef LONGSHOT_ENV_H   /* (env_on: the switches' one rule) */
+ #include "../gpu/vk/compat/longshot_env.h"
+diff --git a/host/oot_pad_light.h b/host/oot_pad_light.h
+new file mode 100644
+index 00000000..9dba1b37
+--- /dev/null
++++ b/host/oot_pad_light.h
+@@ -0,0 +1,62 @@
++/* (longshot) Pure rules for the DualSense's lights and touchpad in OoT (Plans 147, 149).
++   The light bar: a short red flash when Link is hit, a slow orange breath at one heart or less, else the pad's own colour.
++   The microphone LED: breathes (the pad's own mode) while the pad runs on a battery of 20 % or less. A touchpad click's finger
++   x -> the map or the bag. Header-only so host/oot_leds.c, host/pad_sdl.c, the bridge and tests/test_oot_pad_light.py share the
++   exact logic without the game. */
++#ifndef LONGSHOT_OOT_PAD_LIGHT_H
++#define LONGSHOT_OOT_PAD_LIGHT_H
++
++#include <math.h>
++#include <stdint.h>
++
++#define OOT_LED_LOW_LIFE     4              /* quarter hearts: one heart or less */
++#define OOT_BAR_HIT_NS       150000000LL    /* a hit's red flash */
++#define OOT_BAR_HIT_GAP_NS   350000000LL    /* a new flash only this long after the last one ended (at most 2 a second) */
++#define OOT_BAR_BREATH_NS    1000000000LL   /* the low-life breath: 1 s a cycle */
++#define OOT_BAR_BASE_R 0                    /* SDL's colour for player 1 (SDL_hidapi_ps5.c, SetLedsForPlayerIndex: 0,0,0x40) */
++#define OOT_BAR_BASE_G 0
++#define OOT_BAR_BASE_B 64
++
++typedef struct OotBarState {
++    int64_t prev_life;   /* the last life seen, -1 none yet */
++    int64_t hit_ns;      /* when the last flash began, -1 none */
++} OotBarState;
++#define OOT_BAR_STATE_INIT {-1, -1}
++
++typedef struct OotBar {
++    int valid;   /* 0 = life not known: leave the light bar alone */
++    uint8_t r, g, b;
++} OotBar;
++
++/* The light bar for life out of max_life (quarter hearts) at now_ns. Life falling (and still above 0) starts a red flash; that
++   wins over the low-life breath. */
++static inline OotBar oot_bar_color(OotBarState *st, int64_t life, int64_t max_life, int64_t now_ns) {
++    OotBar out = {0, OOT_BAR_BASE_R, OOT_BAR_BASE_G, OOT_BAR_BASE_B};
++    if (life < 0 || max_life <= 0) return out;
++    out.valid = 1;
++    if (st->prev_life >= 0 && life < st->prev_life && life > 0 &&
++        (st->hit_ns < 0 || now_ns - st->hit_ns >= OOT_BAR_HIT_NS + OOT_BAR_HIT_GAP_NS))
++        st->hit_ns = now_ns;
++    st->prev_life = life;
++    if (st->hit_ns >= 0 && now_ns - st->hit_ns < OOT_BAR_HIT_NS) {
++        out.r = 255, out.g = 0, out.b = 0;
++    } else if (life > 0 && life <= OOT_LED_LOW_LIFE) {
++        const double t = (double)(now_ns % OOT_BAR_BREATH_NS) / (double)OOT_BAR_BREATH_NS;
++        const double k = 0.15 + 0.85 * (1.0 - cos(6.283185307179586 * t)) / 2.0;
++        out.r = (uint8_t)(255.0 * k + 0.5), out.g = (uint8_t)(64.0 * k + 0.5), out.b = 0;
++    }
++    return out;
++}
++
++/* The microphone LED mode (0 off, 2 breathing) for a power state (SDL_PowerState: 1 on battery) and percent (-1 unknown), cur
++   the mode now: on at 20 % or less on a battery, off above 25 % or when charging / wired / unknown, between the two as it was. */
++static inline int oot_mic_mode(int power_state, int pct, int cur) {
++    if (power_state != 1 || pct < 0 || pct > 25) return 0;
++    return pct <= 20 ? 2 : cur;
++}
++
++/* The touchpad: x 0..1 of the finger at the click. Left half = the map (Minus), right half = the bag (Plus). */
++enum { OOT_ZONE_MAP = 0, OOT_ZONE_BAG = 1 };
++static inline int oot_touch_zone(float x) { return x < 0.5f ? OOT_ZONE_MAP : OOT_ZONE_BAG; }
++
++#endif /* LONGSHOT_OOT_PAD_LIGHT_H */
+diff --git a/host/oot_state_tap.c b/host/oot_state_tap.c
+index 121e04ae..8f426917 100644
+--- a/host/oot_state_tap.c
++++ b/host/oot_state_tap.c
+@@ -359,6 +359,44 @@ static int state_scan(uint64_t mgr, StateChanges *out) {
+     return 0;
+ }
+ 
++/* (host/oot_trigprobe.c, plan 143 6b: read-only help for finding the item on ZR) the hash of a flag's name */
++uint32_t hos_oot_flag_hash(const char *name) { return state_murmur(name, strlen(name)); }
++
++/* a String64 flag's text into buf (64 bytes); 0 when it has none */
++int hos_oot_flag_text(uint32_t hash, char buf[64]) {
++    const uint64_t mgr = state_u64(state_u64(STATE_GAMEDATA_SLOT));
++    return mgr && state_text(mgr, hash, buf);
++}
++
++/* Every Int, Enum, UInt and String64 flag at this moment: key, value (a String64's: a hash of its text) and kind
++   ('I', 'E', 'U', 'T'). Up to cap entries; returns how many, 0 when the game data cannot be read. Slow (the whole
++   tables): the probe calls it only as the pause menu opens and closes. */
++int hos_oot_flags_snapshot(uint32_t *key, uint32_t *val, char *kind, int cap) {
++    static const int kinds[] = {KIND_INT, KIND_ENUM, KIND_UINT, KIND_TEXT};
++    static const char letters[] = {'I', 'E', 'U', 'T'};
++    const uint64_t mgr = state_u64(state_u64(STATE_GAMEDATA_SLOT));
++    int n = 0;
++    for (int k = 0; mgr && k < 4; k++) {
++        StateTable h;
++        if (!state_table(mgr, kinds[k], &h)) continue;
++        for (uint32_t slot = 0; slot < h.size && n < cap; slot++) {
++            uint32_t pair[2], v = 0;
++            if (!state_peek(h.table + slot * 8ULL, pair, sizeof pair) || !pair[0] || pair[1] >= h.count) continue;
++            const uint64_t at = h.entries + (uint64_t)pair[1] * state_kind[kinds[k]].stride + state_kind[kinds[k]].value;
++            if (kinds[k] == KIND_TEXT) {
++                char t[64];
++                const uint64_t p = state_u64(at);
++                if (!p || !state_peek(p, t, sizeof t)) continue;
++                t[63] = 0;
++                v = 2166136261u;   /* FNV-1a */
++                for (const char *c = t; *c; c++) v = (v ^ (unsigned char)*c) * 16777619u;
++            } else if (!state_peek(at, &v, 4)) continue;
++            key[n] = pair[0], val[n] = v, kind[n] = letters[k], n++;
++        }
++    }
++    return n;
++}
++
+ static void state_put_changes(StateLine *l, const StateChanges *changes) {
+     state_put(l, ",\"changed\":{");
+     for (unsigned i = 0; i < changes->n; i++) {
+diff --git a/host/oot_trigger.c b/host/oot_trigger.c
+new file mode 100644
+index 00000000..ee770932
+--- /dev/null
++++ b/host/oot_trigger.c
+@@ -0,0 +1,114 @@
++/* (longshot) Game-state adaptive trigger layer for OoT (Plan 143).
++   Reads button/menu/camera/audio signals each controller poll and drives DualSense trigger presets
++   via rh_trigger_preset without requiring Longshot rebuilds to tune numbers (HOS_TRIG_* env vars). */
++#include "hos.h"
++#include "rh_host.h"
++#include "oot_trigger.h"
++#include <math.h>
++#include <stdint.h>
++#include <stdlib.h>
++#ifndef LONGSHOT_ENV_H
++#include "../gpu/vk/compat/longshot_env.h"
++#endif
++
++int64_t hos_now_ns(void);
++int64_t hos_audio_last_ocarina_ns(void);
++float hos_pad_r2_depth(void);                       /* host/pad_sdl.c */
++void hos_oot_link_read(int32_t *verb, int32_t *sel); /* host/oot_trigprobe.c */
++int hos_oot_gamedata_int(uint32_t hash, int64_t *v);
++uint32_t hos_oot_flag_hash(const char *name);
++
++static volatile int trig_env_cache = -1;
++static OotTrigState trig_state = OOT_TRIG_STATE_INIT;
++
++int hos_oot_trigger_enabled(void) {
++    int v = __atomic_load_n(&trig_env_cache, __ATOMIC_ACQUIRE);
++    if (v < 0) {
++        const char *e = getenv("HOS_TRIG_PRESETS");
++        v = !e || !env_value_off(e);
++        __atomic_store_n(&trig_env_cache, v, __ATOMIC_RELEASE);
++    }
++    return v && rh_hd_triggers_on();
++}
++
++static float trig_env_float(const char *name, float def, float lo, float hi) {
++    const char *s = getenv(name);
++    if (!s || !*s) return def;
++    char *end = NULL;
++    float v = strtof(s, &end);
++    if (end == s || !isfinite(v)) return def;
++    while (*end == ' ' || *end == '\t') end++;
++    if (*end != '\0') return def;
++    if (v < lo) v = lo;
++    if (v > hi) v = hi;
++    return v;
++}
++
++static const OotTrigCfg *trig_config(void) {
++    static int loaded;
++    static OotTrigCfg cfg;
++    if (!loaded) {
++        cfg.sling = trig_env_float("HOS_TRIG_SLING", OOT_TRIG_SLING_DEFAULT, 0.0f, 1.0f);
++        cfg.bow = trig_env_float("HOS_TRIG_BOW", OOT_TRIG_BOW_DEFAULT, 0.0f, 1.0f);
++        cfg.hook = trig_env_float("HOS_TRIG_HOOK", OOT_TRIG_HOOK_DEFAULT, 0.0f, 1.0f);
++        cfg.din = trig_env_float("HOS_TRIG_DIN", OOT_TRIG_DIN_DEFAULT, 0.0f, 1.0f);
++        cfg.hook_pulse = trig_env_float("HOS_TRIG_HOOK_PULSE", OOT_TRIG_HOOK_PULSE_DEFAULT, 0.0f, 1.0f);
++        cfg.deep_fire = trig_env_float("HOS_TRIG_DEEP_FIRE", (float)OOT_TRIG_DEEP_FIRE_DEFAULT, 0.0f, 1.0f) >= 0.5f;
++        cfg.deep_at = trig_env_float("HOS_TRIG_DEEP_AT", OOT_TRIG_DEEP_AT_DEFAULT, 0.5f, 1.0f);
++        cfg.hammer = trig_env_float("HOS_TRIG_HAMMER", OOT_TRIG_HAMMER_DEFAULT, 0.0f, 1.0f);
++        cfg.rumble_on = trig_env_float("HOS_TRIG_RUMBLE_ON", OOT_TRIG_RUMBLE_ON_DEFAULT, 0.0f, 1.0f);
++        cfg.rumble_off = trig_env_float("HOS_TRIG_RUMBLE_OFF", OOT_TRIG_RUMBLE_OFF_DEFAULT, 0.0f, 1.0f);
++        cfg.hammer_hit = trig_env_float("HOS_TRIG_HAMMER_HIT", OOT_TRIG_HAMMER_HIT_DEFAULT, 0.0f, 1.0f);
++        cfg.hammer_pulse = trig_env_float("HOS_TRIG_HAMMER_PULSE", OOT_TRIG_HAMMER_PULSE_DEFAULT, 0.0f, 1.0f);
++        cfg.quake = trig_env_float("HOS_TRIG_QUAKE", OOT_TRIG_QUAKE_DEFAULT, 0.0f, 1.0f);
++        cfg.hook_cancel = trig_env_float("HOS_TRIG_HOOK_CANCEL", (float)OOT_TRIG_HOOK_CANCEL_DEFAULT, 0.0f, 1.0f) >= 0.5f;
++        cfg.cancel_after_ms = (int)trig_env_float("HOS_TRIG_CANCEL_AFTER_MS", (float)OOT_TRIG_CANCEL_AFTER_MS_DEFAULT, 0.0f, 5000.0f);
++        loaded = 1;
++    }
++    return &cfg;
++}
++
++void hos_oot_trigprobe_frame(void);   /* host/oot_trigprobe.c: HOS_TRIG_PROBE=1 */
++void hos_oot_leds_frame(void);   /* host/oot_leds.c (plans 147, 149) */
++
++/* Returns the buttons the game should see: ZR let go while deep fire has fired (the rest is untouched). */
++uint64_t hos_oot_trigger_frame(uint64_t buttons, int menu_open) {
++    hos_oot_trigprobe_frame();
++    static int trig_was_on = 0;
++    if (!hos_oot_trigger_enabled()) {
++        if (trig_was_on) {
++            trig_state = (OotTrigState)OOT_TRIG_STATE_INIT;
++            trig_was_on = 0;
++        }
++        return hos_oot_leds_frame(), buttons;
++    }
++    trig_was_on = 1;
++    static uint32_t h_arrow, h_seed;
++    if (!h_arrow) h_arrow = hos_oot_flag_hash("PouchData.Item_Arrow_Normal.StockNum"),
++                  h_seed = hos_oot_flag_hash("PouchData.Item_DekuSeed.StockNum");
++    OotTrigIn in = {hos_now_ns(), -1, -1, -1, -1, hos_pad_r2_depth(), menu_open != 0, hos_audio_last_ocarina_ns(),
++                  (int)(buttons >> OOT_TRIG_B_ZR & 1), rh_game_rumble_amp()};
++    int32_t verb, sel;
++    hos_oot_link_read(&verb, &sel);
++    in.verb = verb, in.sel = sel;
++    if (!hos_oot_gamedata_int(h_arrow, &in.arrows)) in.arrows = -1;
++    if (!hos_oot_gamedata_int(h_seed, &in.seeds)) in.seeds = -1;
++    const OotTrigOut out = oot_trigger_eval(&trig_state, trig_config(), &in);
++    hos_oot_leds_frame();   /* (the light bar: Link hit, or low life) */
++    static int64_t last_key = -1;
++    const int depth10 = (int)(in.depth * 10.0f + 0.5f);
++    const int sent = out.send_r ? out.id_r : 31;   /* what R2 got: 0 = OFF, 31 = nothing */
++    const int rumble10 = (int)(in.rumble * 10.0f + 0.5f);
++    const int64_t key = (int64_t)sent << 40 | (int64_t)rumble10 << 29 | out.rule | (in.menu_open << 3) | depth10 << 4 | ((out.sel + 1) & 0xff) << 8 | ((verb + 1) & 0x3ff) << 16 | out.clear_zr << 28 | (int64_t)(out.force_zr | out.force_b << 1) << 26;
++    static int64_t last_ammo = -2;
++    if (key != last_key || out.ammo != last_ammo) {
++        last_key = key, last_ammo = out.ammo;
++        hos_log("trigger: rule=%d sent=%d sel=0x%x ammo=%lld depth=%.1f verb=%d menu=%d deep=%d rumble=%.2f cancel=%d", out.rule, sent,
++                (unsigned)out.sel, (long long)out.ammo, depth10 / 10.0, verb, in.menu_open, out.clear_zr, (double)in.rumble, out.force_zr | out.force_b << 1);
++    }
++    if (out.send_l) rh_trigger_preset(0, out.id_l, out.level_l);
++    if (out.send_r) rh_trigger_preset(1, out.id_r, out.level_r);
++    if (out.force_zr) buttons |= 1ULL << OOT_TRIG_B_ZR;   /* the cancel chain: ZR held, B pressed then let go */
++    if (out.force_b) buttons |= 1ULL << OOT_TRIG_B_B;
++    return out.clear_zr ? buttons & ~(1ULL << OOT_TRIG_B_ZR) : buttons;
++}
+diff --git a/host/oot_trigger.h b/host/oot_trigger.h
+new file mode 100644
+index 00000000..f8030b5f
+--- /dev/null
++++ b/host/oot_trigger.h
+@@ -0,0 +1,279 @@
++/* (longshot) Pure game-state -> DualSense trigger preset rules for OoT (Plan 143, step 6c).
++   The item on ZR (player +0x7D0), its ammo, Link's verb and how deep R2 is pulled pick R2's preset; L2 never has one (layer 1).
++   Kept header-only so host/oot_trigger.c and tests/test_oot_trigger.py share the exact logic without the game. */
++#ifndef LONGSHOT_OOT_TRIGGER_H
++#define LONGSHOT_OOT_TRIGGER_H
++
++#include <stdint.h>
++
++#ifndef RENHDRUM_TRIG_OFF
++#define RENHDRUM_TRIG_OFF          0
++#endif
++#ifndef RENHDRUM_TRIG_TENSION
++#define RENHDRUM_TRIG_TENSION      1
++#endif
++#ifndef RENHDRUM_TRIG_HEAVY_LOAD
++#define RENHDRUM_TRIG_HEAVY_LOAD   11
++#endif
++#ifndef RENHDRUM_TRIG_IMPACT_PULSE
++#define RENHDRUM_TRIG_IMPACT_PULSE 12
++#endif
++#ifndef RENHDRUM_TRIG_TWO_STAGE
++#define RENHDRUM_TRIG_TWO_STAGE    2
++#endif
++#ifndef RENHDRUM_TRIG_ENGINE_ROUGH
++#define RENHDRUM_TRIG_ENGINE_ROUGH 13
++#endif
++
++#define OOT_TRIG_SLING_DEFAULT        0.5f    /* TENSION level while R2 is pulled with the slingshot on ZR */
++#define OOT_TRIG_BOW_DEFAULT          0.75f   /* ... with the bow */
++#define OOT_TRIG_HOOK_DEFAULT         0.6f    /* TWO_STAGE level: the "aiming" notch of the Hookshot / Longshot */
++#define OOT_TRIG_DIN_DEFAULT          0.6f    /* ENGINE_ROUGH level while Din's Fire is cast */
++#define OOT_TRIG_HAMMER_DEFAULT       0.7f    /* HEAVY_LOAD level while the Megaton Hammer is swung */
++#define OOT_TRIG_HOOK_PULSE_DEFAULT   1.0f    /* the Hookshot / Longshot pulse */
++#define OOT_TRIG_DEEP_FIRE_DEFAULT    1       /* 1 = squeezing R2 past the notch fires the Hookshot / Longshot (ZR let go for the game) */
++#define OOT_TRIG_DEEP_AT_DEFAULT      0.95f   /* "to the end" */
++/* (the deep-fire latch opens when the pad's own ZR bit is off: R2 under the button threshold, not a number of ours) */
++#define OOT_TRIG_ANALOG_LO            0.1f    /* a real analog trigger passes through LO..HI on its way down; */
++#define OOT_TRIG_ANALOG_HI            0.8f    /* a digital ZR (Pro 1 ...) jumps straight to 1.0 and never fires deep */
++#define OOT_TRIG_RUMBLE_ON_DEFAULT    0.03f   /* the game's rumble counts as "on" from this amplitude */
++#define OOT_TRIG_RUMBLE_OFF_DEFAULT   0.015f  /* ... and as "off" once it stays under this ... */
++#define OOT_TRIG_RUMBLE_OFF_NS    100000000LL  /* ... for this long (no flicker) */
++#define OOT_TRIG_QUAKE_MIN            0.3f    /* the quake never goes under this share of its level while the rumble lasts */
++#define OOT_TRIG_HAMMER_HIT_DEFAULT   0.06f    /* the game's rumble over this = the hammer has struck */
++#define OOT_TRIG_HAMMER_PULSE_DEFAULT 1.0f    /* the strike pulse */
++#define OOT_TRIG_QUAKE_DEFAULT        0.7f    /* ENGINE_ROUGH level of the quake at the strike's peak */
++#define OOT_TRIG_HOOK_CANCEL_DEFAULT  1       /* 1 = letting go of a Hookshot / Longshot aim before the deep squeeze cancels it */
++#define OOT_TRIG_CANCEL_AFTER_MS_DEFAULT 250  /* ZR held at least this long before a let-go counts as a cancel (a tap is a sword swing) */
++#define OOT_TRIG_CANCEL_B_NS      100000000LL  /* cancel chain, phase 1: the game sees ZR held + B held */
++#define OOT_TRIG_CANCEL_END_NS    150000000LL  /* phase 2 (to here): ZR held, B let go; then the real buttons */
++#define OOT_TRIG_B_B                  1       /* the B bit of nn_hid.c (static-asserted there) */
++#define OOT_TRIG_B_ZR                 9       /* the ZR bit of nn_hid.c (static-asserted there) */
++
++#define OOT_TRIG_AUDIO_QUIET_NS  300000000LL   /* Ocarina sound this recent -> both triggers Off */
++#define OOT_TRIG_SEL_HOLD_NS      80000000LL   /* a new item on ZR counts once it held this long (gear noise) */
++#define OOT_TRIG_PULL_MIN         0.03f        /* R2 deeper than this is "pulled" */
++
++enum { OOT_SEL_BOOMERANG = 0x03, OOT_SEL_SLING = 0x04, OOT_SEL_HOOK = 0x05, OOT_SEL_LONGSHOT = 0x06, OOT_SEL_BOW = 0x1E,
++       OOT_SEL_DIN = 0x0A /* Din's Fire */, OOT_SEL_HAMMER = 0x07 /* Megaton Hammer */,
++       OOT_SEL_ARROW_FIRE = 0x2E, OOT_SEL_ARROW_ICE = 0x2F, OOT_SEL_ARROW_LIGHT = 0x30 /* shot like a bow, ammo = arrows */ };
++enum { OOT_VERB_HOOK_SHOOT = 5, OOT_VERB_DIN_CAST = 243, OOT_VERB_HAMMER = 112 /* hammer swing / strike */ };
++/* PULSE (3) = the shot event: IMPACT_PULSE for the Hookshot / Longshot, OFF (one send) for the slingshot / bow */
++enum { OOT_RULE_NONE, OOT_RULE_SMOOTH, OOT_RULE_AIM, OOT_RULE_PULSE, OOT_RULE_HOOK, OOT_RULE_SPELL, OOT_RULE_HAMMER, OOT_RULE_QUAKE };
++
++typedef struct OotTrigCfg {
++    float sling;
++    float bow;
++    float hook;
++    float din;
++    float hook_pulse;
++    int deep_fire;
++    float deep_at;
++    float hammer;
++    float rumble_on;
++    float hammer_hit;
++    float hammer_pulse;
++    float quake;
++    int hook_cancel;
++    int cancel_after_ms;
++    float rumble_off;
++} OotTrigCfg;
++
++typedef struct OotTrigState {
++    int sel;                 /* the item that counts (held >= OOT_TRIG_SEL_HOLD_NS), -1 none / unknown */
++    int cand;                /* what ZR shows now, and since when */
++    int64_t cand_ns;
++    int64_t last_arrows, last_seeds;   /* -1 not known */
++    int last_verb;
++    int latched;             /* deep fire: ZR is held let go for the game until R2 comes back under DEEP_FREE */
++    int analog_seen;         /* this pull went through LO..HI (a real analog trigger) */
++    int last_sent;           /* sustained preset id (TENSION, TWO_STAGE, ENGINE_ROUGH, HEAVY_LOAD) R2 was last sent, -1 none */
++    int64_t rumble_low_ns;   /* since when the game's rumble is under RUMBLE_OFF, -1 not */
++    int hammer_hit;          /* this swing has struck (the game's rumble passed HAMMER_HIT) */
++    float hammer_peak;       /* the strongest game rumble of this strike */
++    int prev_zr;             /* the pad's ZR bit last call */
++    int64_t zr_since_ns;     /* when it went on, -1 off */
++    int pull_deep;           /* this ZR press reached the deep squeeze */
++    int cancel_phase;        /* 0 none, 1 ZR + B forced, 2 ZR forced */
++    int64_t cancel_ns;       /* when the chain began */
++    int rumble_active;       /* the game's rumble is on (with hysteresis) */
++    int din_rumbled;         /* this Din cast has had the game's rumble on */
++} OotTrigState;
++
++#define OOT_TRIG_STATE_INIT {-1, -1, 0, -1, -1, -1, 0, 0, -1, -1, 0, 0.0f, 0, -1, 0, 0, 0, 0, 0}
++
++typedef struct OotTrigIn {
++    int64_t now_ns;
++    int sel;                 /* player +0x7D0 as read, -1 when unreadable or empty (0xffffffff) */
++    int64_t arrows, seeds;   /* -1 unreadable */
++    int verb;                /* -1 unreadable */
++    float depth;             /* R2 pull 0..1 */
++    int menu_open;
++    int64_t last_ocarina_ns;
++    int zr_raw;              /* the pad's own ZR bit (before deep fire clears it) */
++    float rumble;            /* the game's rumble amplitude 0..1 (rh_game_rumble_amp) */
++} OotTrigIn;
++
++typedef struct OotTrigOut {
++    int send_l;
++    uint8_t id_l;
++    float level_l;
++    int send_r;
++    uint8_t id_r;
++    float level_r;
++    int rule;                /* OOT_RULE_* */
++    int sel;                 /* the item that counts */
++    int64_t ammo;            /* its ammo, -1 when it has none / unreadable */
++    int clear_zr;            /* deep fire: the game must see ZR let go */
++    int force_zr, force_b;   /* cancel chain: the game must see ZR / B held */
++} OotTrigOut;
++
++static inline float oot_trig_clamp01(float v) {
++    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
++}
++
++static inline OotTrigOut oot_trigger_rules(OotTrigState *st, const OotTrigCfg *cfg, const OotTrigIn *in) {
++    OotTrigOut out = {0, 0, 0.0f, 0, 0, 0.0f, OOT_RULE_NONE, -1, -1, 0, 0, 0};
++    const int64_t now = in->now_ns;
++
++    /* The item on ZR counts only after it held 80 ms: a quick change of item must not make the trigger click gears. */
++    if (in->sel == st->sel) st->cand = in->sel, st->cand_ns = now;
++    else if (in->sel != st->cand) st->cand = in->sel, st->cand_ns = now;
++    else if (now - st->cand_ns >= OOT_TRIG_SEL_HOLD_NS) st->sel = in->sel;
++    const int sel = st->sel;
++    const int is_sling = sel == OOT_SEL_SLING,
++              is_bow = sel == OOT_SEL_BOW || sel == OOT_SEL_ARROW_FIRE || sel == OOT_SEL_ARROW_ICE || sel == OOT_SEL_ARROW_LIGHT;
++    const int is_hook = sel == OOT_SEL_HOOK || sel == OOT_SEL_LONGSHOT;
++    const int64_t ammo = is_sling ? in->seeds : is_bow ? in->arrows : -1;
++    out.sel = sel;
++    out.ammo = ammo;
++
++    /* What happened since the last call (the memory is kept whatever wins below, so a menu never fakes a shot). */
++    const int shot = (is_sling && st->last_seeds >= 0 && in->seeds >= 0 && in->seeds < st->last_seeds) ||
++                     (is_bow && st->last_arrows >= 0 && in->arrows >= 0 && in->arrows < st->last_arrows) ||
++                     (is_hook && in->verb == OOT_VERB_HOOK_SHOOT && st->last_verb != OOT_VERB_HOOK_SHOOT);
++    st->last_seeds = in->seeds, st->last_arrows = in->arrows, st->last_verb = in->verb;
++    const int pulled = in->depth > OOT_TRIG_PULL_MIN;
++    if (in->depth <= OOT_TRIG_PULL_MIN) st->analog_seen = 0;
++    else if (in->depth >= OOT_TRIG_ANALOG_LO && in->depth <= OOT_TRIG_ANALOG_HI) st->analog_seen = 1;
++
++    const int hammer_swing = sel == OOT_SEL_HAMMER && in->verb == OOT_VERB_HAMMER;
++    if (!hammer_swing) st->hammer_hit = 0, st->hammer_peak = 0.0f;   /* a new swing starts clean */
++    const int is_din = sel == OOT_SEL_DIN && in->verb == OOT_VERB_DIN_CAST;
++    /* The game's rumble, on from RUMBLE_ON, off after 100 ms under RUMBLE_OFF (the real numbers are small and jumpy). */
++    if (in->rumble >= cfg->rumble_on) st->rumble_active = 1, st->rumble_low_ns = -1;
++    else if (st->rumble_active && in->rumble < cfg->rumble_off) {
++        if (st->rumble_low_ns < 0) st->rumble_low_ns = now;
++        if (now - st->rumble_low_ns >= OOT_TRIG_RUMBLE_OFF_NS) st->rumble_active = 0, st->rumble_low_ns = -1;
++    } else st->rumble_low_ns = -1;
++    if (!is_din) st->din_rumbled = 0;
++    else if (st->rumble_active) st->din_rumbled = 1;
++
++    /* The pad's ZR press: when it began, and whether it reached the deep squeeze (cancel needs a press that did not). */
++    if (in->zr_raw && !st->prev_zr) st->zr_since_ns = now, st->pull_deep = 0, st->cancel_phase = 0;   /* (pressed again: chain over) */
++    const int zr_released = !in->zr_raw && st->prev_zr;
++    st->prev_zr = in->zr_raw;
++    if (st->latched) st->pull_deep = 1;
++    const int64_t zr_held_ns = st->zr_since_ns >= 0 ? now - st->zr_since_ns : 0;
++    if (st->cancel_phase && (!is_hook || in->menu_open)) st->cancel_phase = 0;
++
++    /* Pause menu or Ocarina sound: both triggers smooth Off, whatever else. */
++    if (in->menu_open || (in->last_ocarina_ns > 0 && now >= in->last_ocarina_ns &&
++                          (now - in->last_ocarina_ns) <= OOT_TRIG_AUDIO_QUIET_NS)) {
++        out.rule = OOT_RULE_SMOOTH;
++        out.send_r = out.send_l = 1;
++        out.id_r = out.id_l = RENHDRUM_TRIG_OFF;
++        st->latched = 0;   /* (no button change in a menu) */
++        return out;
++    }
++
++    /* Deep fire (Hookshot / Longshot only): R2 squeezed past the notch (after a real analog pull) -> the game sees ZR let
++       go and fires while the finger is still down; kept let go until the pad's ZR bit is off. The slingshot and bow
++       fire when R2 is let go, as in the game. */
++    if (st->latched && !in->zr_raw) st->latched = 0;
++    if (!st->latched && cfg->deep_fire && st->analog_seen && in->depth >= cfg->deep_at && is_hook)
++        st->latched = 1;
++    out.clear_zr = st->latched;
++
++    /* Cancel: ZR held a while on the Hookshot / Longshot, never squeezed deep, then let go -> the game is told ZR is still held
++       and B is pressed for 100 ms (Link lowers the hookshot), B let go for 50 ms, then the real buttons. */
++    if (cfg->hook_cancel && cfg->deep_fire && is_hook && !st->cancel_phase && zr_released && !st->pull_deep && !st->latched &&
++        zr_held_ns >= (int64_t)cfg->cancel_after_ms * 1000000LL)
++        st->cancel_phase = 1, st->cancel_ns = now, st->zr_since_ns = -1;
++    if (st->cancel_phase) {
++        const int64_t dt = now - st->cancel_ns;
++        if (dt >= OOT_TRIG_CANCEL_END_NS) st->cancel_phase = 0;
++        else out.force_zr = 1, out.force_b = dt < OOT_TRIG_CANCEL_B_NS;
++        if (st->cancel_phase) st->cancel_phase = out.force_b ? 1 : 2;
++    }
++
++    /* A shot (ammo down, or the hookshot flying), even if R2 is already let go. Hookshot / Longshot: one release pulse.
++       Slingshot / bow: one OFF, so layer 1 (the game's rumble) takes the trigger for the release. */
++    if (shot) {
++        out.rule = OOT_RULE_PULSE;
++        out.send_r = 1;
++        if (is_hook) {
++            out.id_r = RENHDRUM_TRIG_IMPACT_PULSE;
++            out.level_r = oot_trig_clamp01(cfg->hook_pulse);
++        } else {
++            out.id_r = RENHDRUM_TRIG_OFF;
++        }
++        return out;
++    }
++
++    /* Not pulled (let go): nothing, the core releases after its own 500 ms. Empty ammo or an unknown item: nothing. */
++    if (!pulled || st->latched) return out;   /* (latched = already fired: only the pulse above) */
++    if (is_sling || is_bow) {
++        if (ammo <= 0) return out;
++        /* The force climbs with how deep R2 goes (the core's TENSION zones), not with time. */
++        out.rule = OOT_RULE_AIM;
++        out.send_r = 1;
++        out.id_r = RENHDRUM_TRIG_TENSION;
++        out.level_r = oot_trig_clamp01(is_sling ? cfg->sling : cfg->bow);
++    }
++    if (is_hook) {   /* the notch that says "aiming"; squeezing through it fires (latch above) */
++        out.rule = OOT_RULE_HOOK;
++        out.send_r = 1;
++        out.id_r = RENHDRUM_TRIG_TWO_STAGE;
++        out.level_r = oot_trig_clamp01(cfg->hook);
++    } else if (hammer_swing) {
++        if (!st->hammer_hit && in->rumble >= cfg->hammer_hit) st->hammer_hit = 1, st->hammer_peak = in->rumble, out.rule = OOT_RULE_PULSE,
++            out.send_r = 1, out.id_r = RENHDRUM_TRIG_IMPACT_PULSE, out.level_r = oot_trig_clamp01(cfg->hammer_pulse);   /* the strike */
++        else if (!st->hammer_hit) {   /* heavy like lifting the hammer, until the strike */
++            out.rule = OOT_RULE_HAMMER;
++            out.send_r = 1;
++            out.id_r = RENHDRUM_TRIG_HEAVY_LOAD;
++            out.level_r = oot_trig_clamp01(cfg->hammer);
++        } else if (st->rumble_active) {   /* the quake spreading out follows the game's rumble; it never goes back to HEAVY_LOAD */
++            if (in->rumble > st->hammer_peak) st->hammer_peak = in->rumble;
++            out.rule = OOT_RULE_QUAKE;
++            out.send_r = 1;
++            out.id_r = RENHDRUM_TRIG_ENGINE_ROUGH;
++            const float share = st->hammer_peak > 0.0f ? oot_trig_clamp01(in->rumble / st->hammer_peak) : 1.0f;
++            out.level_r = oot_trig_clamp01(cfg->quake * (share < OOT_TRIG_QUAKE_MIN ? OOT_TRIG_QUAKE_MIN : share));
++        }   /* (game rumble over: nothing -> one OFF) */
++    } else if (is_din && (!st->din_rumbled || st->rumble_active)) {   /* a small rough hum from the start of the cast until the game's rumble has come and gone */
++        out.rule = OOT_RULE_SPELL;
++        out.send_r = 1;
++        out.id_r = RENHDRUM_TRIG_ENGINE_ROUGH;
++        out.level_r = oot_trig_clamp01(cfg->din);
++    }
++    return out;
++}
++
++/* The rules above, plus: a sustained preset that was sent and is not reported this frame gets one OFF at once (not after the
++   core's 500 ms + soft release). Not after a pulse (it would cut it); a menu / Ocarina OFF already counts as released. */
++static inline OotTrigOut oot_trigger_eval(OotTrigState *st, const OotTrigCfg *cfg, const OotTrigIn *in) {
++    OotTrigOut out = oot_trigger_rules(st, cfg, in);
++    if (out.send_r) {
++        const int sustained = out.id_r == RENHDRUM_TRIG_TENSION || out.id_r == RENHDRUM_TRIG_TWO_STAGE ||
++                              out.id_r == RENHDRUM_TRIG_ENGINE_ROUGH || out.id_r == RENHDRUM_TRIG_HEAVY_LOAD;
++        st->last_sent = sustained ? (int)out.id_r : -1;
++    } else if (st->last_sent >= 0) {
++        out.send_r = 1, out.id_r = RENHDRUM_TRIG_OFF, out.level_r = 0.0f;
++        st->last_sent = -1;
++    }
++    return out;
++}
++
++#endif /* LONGSHOT_OOT_TRIGGER_H */
+diff --git a/host/oot_trigprobe.c b/host/oot_trigprobe.c
+new file mode 100644
+index 00000000..7d5df597
+--- /dev/null
++++ b/host/oot_trigprobe.c
+@@ -0,0 +1,199 @@
++/* (longshot) Trigger probe for OoT (plan 143 6b): HOS_TRIG_PROBE=1 logs, only when a value changes, the signals that
++   might tell which item is on ZR and what Link is doing. Every line starts with "trigprobe:". Read-only: no game write,
++   no effect on the triggers. Called from hos_oot_trigger_frame (the controller read), so the reads are range-checked
++   (hos_guest_range) and may be a frame stale; this is a debug aid, not a rule.
++   Signals: Link's verb (the state id of the pointer chain host/oot_sprint.c reads), the camera's field of view, the arrow
++   and Deku seed counts, the u32 words at player +0x7c0..+0x7e0, and every Int / Enum / UInt / String64 flag that changed
++   between the pause menu opening and closing. A signal that cannot be read is said once, never guessed. */
++#include "hos.h"
++#include "oot_trigprobe.h"
++#include <math.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#ifndef LONGSHOT_ENV_H
++#include "../gpu/vk/compat/longshot_env.h"
++#endif
++
++int64_t hos_now_ns(void);
++unsigned hos_oot_menu_ticks(void);
++int hos_oot_gamedata_int(uint32_t hash, int64_t *v);
++uint32_t hos_oot_flag_hash(const char *name);
++int hos_oot_flag_text(uint32_t hash, char buf[64]);
++int hos_oot_flags_snapshot(uint32_t *key, uint32_t *val, char *kind, int cap);
++
++#define TP_ACTOR_MGR 0x84c9e0d0ULL     /* (host/oot_sprint.c's) the pointer to the actor manager pointer */
++#define TP_CAMERAS_SLOT 0x84ca6bc0ULL  /* (host/oot_state_tap.c's) the camera manager's holder */
++#define TP_FOV_AT 0x130                /* camera manager + this: the field of view in radians (a hint, to be confirmed) */
++#define TP_PLAYER_AT 0x7c0             /* player + this: the words that may name the item on ZR */
++#define TP_PLAYER_WORDS 9              /* +0x7c0 .. +0x7e0 */
++#define TP_MENU_QUIET_NS 150000000LL   /* the pause menu is closed this long after its last screen update */
++#define TP_FLAG_CAP 65536
++#define TP_SHOW 48                     /* changed flags logged per menu close */
++
++static uint64_t tp_u64(uint64_t a) {
++    const void *p = a >= 0x100000 ? hos_guest_range(a, 8) : NULL;
++    uint64_t v = 0;
++    if (p) memcpy(&v, p, 8);
++    return v;
++}
++static int tp_u32(uint64_t a, uint32_t *v) {
++    const void *p = a >= 0x100000 ? hos_guest_range(a, 4) : NULL;
++    if (p) memcpy(v, p, 4);
++    return p != NULL;
++}
++
++/* the controlled Link's actor (0 when not readable): actor manager +0x470 is the controlled one, its +0x18 the actor */
++static uint64_t tp_actor(void) {
++    const uint64_t mgr = tp_u64(tp_u64(g_module_base + TP_ACTOR_MGR));
++    const uint64_t ctl = mgr ? tp_u64(mgr + 0x470) : 0;
++    return ctl ? tp_u64(ctl + 0x18) : 0;
++}
++
++/* Link's actor, his player object ([[actor+0x270]+0x358]), the end of the verb's pointer chain and the verb itself (-1 when
++   not readable). Shared with host/oot_trigger.c (hos_oot_link_read), which needs them with the probe off. */
++static int32_t tp_link(uint64_t *actor_out, uint64_t *player_out, uint64_t *chain_out) {
++    int32_t verb = -1;
++    const uint64_t actor = tp_actor();
++    uint64_t p = actor ? tp_u64(actor + 0x270) : 0;
++    const uint64_t player = p ? tp_u64(p + 0x358) : 0;
++    if (p) p = tp_u64(p + 0x188);
++    if (p) p = tp_u64(p + 0x1c0);
++    uint32_t w;
++    if (p && tp_u32(p + 0x28, &w)) {
++        if (w == 0x11a && !tp_u32(p + 0x4c, &w)) w = (uint32_t)-1;
++        verb = (int32_t)w;
++    }
++    *actor_out = actor, *player_out = player, *chain_out = p;
++    return verb;
++}
++
++/* The trigger rules' read (plan 143 6c): Link's verb and the item on ZR (player +0x7d0), both -1 when not readable. */
++void hos_oot_link_read(int32_t *verb, int32_t *sel) {
++    uint64_t actor, player, chain;
++    uint32_t w;
++    *verb = tp_link(&actor, &player, &chain);
++    *sel = player && tp_u32(player + TP_PLAYER_AT + 0x10, &w) ? (int32_t)w : -1;
++}
++
++static void say_once(int *flag, const char *what) {
++    if (*flag) return;
++    *flag = 1;
++    hos_log("trigprobe: cannot read %s", what);
++}
++
++static int tp_enabled(void) {
++    static int v = -1;
++    if (v < 0) v = env_on("HOS_TRIG_PROBE");
++    return v;
++}
++
++static void tp_menu_edge(int open) {
++    static TpFlag *a, *b;
++    static TpChange *ch;
++    static uint32_t *key, *val;
++    static char *kind;
++    static int na, bad;
++    if (!a && !bad) {
++        a = malloc(sizeof *a * TP_FLAG_CAP), b = malloc(sizeof *b * TP_FLAG_CAP), ch = malloc(sizeof *ch * TP_FLAG_CAP);
++        key = malloc(sizeof *key * TP_FLAG_CAP), val = malloc(sizeof *val * TP_FLAG_CAP), kind = malloc(TP_FLAG_CAP);
++        if (!a || !b || !ch || !key || !val || !kind) bad = 1, a = NULL, hos_log("trigprobe: no memory for the flag snapshots");
++    }
++    if (bad) return;
++    const int n = hos_oot_flags_snapshot(key, val, kind, TP_FLAG_CAP);
++    TpFlag *to = open ? a : b;
++    for (int i = 0; i < n; i++) to[i] = (TpFlag){key[i], val[i], kind[i]};
++    if (open) {
++        na = n;
++        hos_log("trigprobe: pause menu opened (%d flags kept)", n);
++        return;
++    }
++    if (!na || !n) {
++        hos_log("trigprobe: pause menu closed; flags %s", n ? "had no snapshot at its opening" : "cannot be read");
++        return;
++    }
++    const int c = tp_diff(a, na, b, n, ch, TP_FLAG_CAP);
++    hos_log("trigprobe: pause menu closed: %d flags changed (%d / %d)", c, na, n);
++    for (int i = 0; i < c && i < TP_SHOW; i++) {
++        char t[64] = "";
++        if (ch[i].kind == 'T') hos_oot_flag_text(ch[i].key, t);
++        hos_log("trigprobe: flag 0x%08x %c %s%u -> %u%s%s%s", ch[i].key, ch[i].kind, ch[i].added ? "new " : "",
++                ch[i].old_val, ch[i].new_val, t[0] ? " \"" : "", t, t[0] ? "\"" : "");
++    }
++    if (c > TP_SHOW) hos_log("trigprobe: ... %d more changed flags not shown", c - TP_SHOW);
++}
++
++void hos_oot_trigprobe_frame(void) {
++    if (!tp_enabled()) return;
++    const int64_t now = hos_now_ns();
++    static int say_actor, say_verb, say_fov, say_ammo, say_player, started;
++    if (!started) {
++        started = 1;
++        hos_log("trigprobe: on (verb, fov, arrows, seeds, player+0x7c0.., pause-menu flag changes)");
++    }
++
++    /* the pause menu: open while its screens keep updating */
++    static unsigned last_ticks;
++    static int64_t last_tick_ns;
++    static int menu;
++    const unsigned ticks = hos_oot_menu_ticks();
++    if (ticks != last_ticks) last_ticks = ticks, last_tick_ns = now;
++    const int open = last_tick_ns && now - last_tick_ns < TP_MENU_QUIET_NS;
++    if (open != menu) menu = open, tp_menu_edge(open);
++
++    /* Link's verb: the state id at [[[actor +0x270] +0x188] +0x1c0] +0x28 (+0x4c when that reads 0x11a) */
++    static int32_t last_verb = -2;
++    uint64_t actor, player, p;
++    const int32_t verb = tp_link(&actor, &player, &p);
++    if (!actor) say_once(&say_actor, "Link's actor (no controlled Link yet)");
++    else if (verb < 0 && !p) say_once(&say_verb, "Link's verb (the pointer chain ends at 0)");
++    if (verb != last_verb) last_verb = verb, hos_log("trigprobe: verb=%d", verb);
++
++    /* the camera's field of view, degrees to one decimal */
++    static int last_fov = -2;
++    int fov = -1;
++    const uint64_t cams = tp_u64(tp_u64(g_module_base + TP_CAMERAS_SLOT));
++    uint32_t raw;
++    float f;
++    if (cams && tp_u32(cams + TP_FOV_AT, &raw)) {
++        memcpy(&f, &raw, 4);
++        if (isfinite(f) && f > 0.01f && f < 3.1f) fov = (int)lroundf(f * 57.29578f * 10.0f);
++        else if (actor && !say_fov) {   /* (before Link exists the manager is still empty: not worth saying) */
++            say_fov = 1;
++            hos_log("trigprobe: cannot read the field of view: camera manager +0x130 holds 0x%08x, not a radian angle", raw);
++        }
++    } else if (actor) say_once(&say_fov, "the field of view (no camera manager)");
++    if (fov != last_fov) {
++        last_fov = fov;
++        if (fov < 0) hos_log("trigprobe: fov=?");
++        else hos_log("trigprobe: fov=%d.%d", fov / 10, fov % 10);
++    }
++
++    /* arrows and Deku seeds */
++    static int64_t last_arrow = -2, last_seed = -2;
++    static uint32_t h_arrow, h_seed;
++    if (!h_arrow) h_arrow = hos_oot_flag_hash("PouchData.Item_Arrow_Normal.StockNum"),
++                  h_seed = hos_oot_flag_hash("PouchData.Item_DekuSeed.StockNum");
++    int64_t arrow = -1, seed = -1;
++    if (!hos_oot_gamedata_int(h_arrow, &arrow)) arrow = -1, say_once(&say_ammo, "an ammo count (flag not found in the game data)");
++    if (!hos_oot_gamedata_int(h_seed, &seed)) seed = -1;
++    if (arrow != last_arrow || seed != last_seed) {
++        last_arrow = arrow, last_seed = seed;
++        hos_log("trigprobe: arrows=%lld seeds=%lld", (long long)arrow, (long long)seed);
++    }
++
++    /* the player's words that may name the item on ZR */
++    static uint32_t last_words[TP_PLAYER_WORDS];
++    static int have_words;
++    uint32_t words[TP_PLAYER_WORDS];
++    int ok = player != 0;
++    for (int i = 0; ok && i < TP_PLAYER_WORDS; i++) ok = tp_u32(player + TP_PLAYER_AT + 4 * (uint64_t)i, &words[i]);
++    if (!ok) {
++        if (actor) say_once(&say_player, "player +0x7c0 (the pointer [[actor+0x270]+0x358] is not readable)");
++    } else if (!have_words || memcmp(words, last_words, sizeof words)) {
++        have_words = 1;
++        memcpy(last_words, words, sizeof words);
++        hos_log("trigprobe: player+0x7c0 %08x %08x %08x %08x %08x %08x %08x %08x %08x", words[0], words[1], words[2],
++                words[3], words[4], words[5], words[6], words[7], words[8]);
++    }
++}
+diff --git a/host/oot_trigprobe.h b/host/oot_trigprobe.h
+new file mode 100644
+index 00000000..ea928f76
+--- /dev/null
++++ b/host/oot_trigprobe.h
+@@ -0,0 +1,32 @@
++/* (longshot) The pure part of the trigger probe (plan 143 6b): which game-data flags differ between two snapshots.
++   Header-only so host/oot_trigprobe.c and tests/test_oot_trigprobe.py share it without the game. */
++#ifndef LONGSHOT_OOT_TRIGPROBE_H
++#define LONGSHOT_OOT_TRIGPROBE_H
++
++#include <stdint.h>
++#include <stdlib.h>
++
++typedef struct TpFlag { uint32_t key, val; char kind; } TpFlag;
++typedef struct TpChange { uint32_t key, old_val, new_val; char kind; int added; } TpChange;
++
++static inline int tp_cmp(const void *a, const void *b) {
++    const uint32_t x = ((const TpFlag *)a)->key, y = ((const TpFlag *)b)->key;
++    return x < y ? -1 : x > y;
++}
++
++/* a and b are sorted in place; the flags of b that are new or hold another value than in a go to out (at most cap).
++   Returns how many went to out. */
++static inline int tp_diff(TpFlag *a, int na, TpFlag *b, int nb, TpChange *out, int cap) {
++    qsort(a, (size_t)na, sizeof *a, tp_cmp);
++    qsort(b, (size_t)nb, sizeof *b, tp_cmp);
++    int n = 0, i = 0;
++    for (int j = 0; j < nb && n < cap; j++) {
++        while (i < na && a[i].key < b[j].key) i++;
++        const int have = i < na && a[i].key == b[j].key;
++        if (have && a[i].val == b[j].val) continue;
++        out[n++] = (TpChange){b[j].key, have ? a[i].val : 0, b[j].val, b[j].kind, !have};
++    }
++    return n;
++}
++
++#endif /* LONGSHOT_OOT_TRIGPROBE_H */
 diff --git a/host/pad_sdl.c b/host/pad_sdl.c
-index 36d1d602..3b47c264 100644
+index 36d1d602..c76f3a38 100644
 --- a/host/pad_sdl.c
 +++ b/host/pad_sdl.c
-@@ -22,7 +22,7 @@
+@@ -22,10 +22,11 @@
  #include "hos_sdl.h"
  #include "hd_rumble.h"
  #include "vibration.h"
@@ -724,7 +1796,11 @@ index 36d1d602..3b47c264 100644
  #include "pad_speaker.h"
  #include "hos_motion.h"
  #include "steam_pads.h"
-@@ -75,6 +75,8 @@ static struct {
++#include "oot_pad_light.h"   /* (plan 147: the touchpad's halves) */
+ #include "../gpu/vk/vk_api.h"   /* (HOS_PAD_*) */
+ #ifndef LONGSHOT_ENV_H   /* (env_on: the switches' one rule) */
+ #include "../gpu/vk/compat/longshot_env.h"
+@@ -75,9 +76,22 @@ static struct {
      uint16_t product;     /* (longshot) its USB product id (host/vibration.h: a Steam Controller (2026); the Deck's built-in controls, host/steam_pads.h) */
      uint64_t steam;
      int motion_only;      /* (host/steam_pads.h) a real Valve pad while a Steam stand-in pad is open: motion, no input */
@@ -733,7 +1809,21 @@ index 36d1d602..3b47c264 100644
  } pads[MAX_PADS];
  static uint32_t pads_opened;
  static SRWLOCK state_lock = SRWLOCK_INIT;
-@@ -347,109 +349,61 @@ static void motion_only_used(int i, int64_t now) {
++/* (longshot, plan 147) The touchpad's click: where the finger is gives a half (OOT_ZONE_MAP / OOT_ZONE_BAG), which nn_hid.c's read_input
++   holds Minus / Plus for. With the zones on (the default; HOS_TOUCH_ZONES=0 turns them off) the click no longer
++   reaches the Insert menu (hos_sdl_pads leaves its bit out). A click with no finger position gives nothing. */
++static int touch_zones_on(void) {
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("HOS_TOUCH_ZONES");
++        on = !e || !env_value_off(e);
++    }
++    return on;
++}
+ static uint64_t state_buttons;
+ static int32_t state_stick[4];
+ static int state_count;
+@@ -347,109 +361,60 @@ static void motion_only_used(int i, int64_t now) {
      if (sig != pads[i].input_sig) pads[i].input_sig = sig, pads[i].used_ns = now;
  }
  
@@ -777,11 +1867,11 @@ index 36d1d602..3b47c264 100644
 -        vib_leave(i, now);
 -        pads[i].usb_token = -1, pads[i].usb_next_look = now + 2000000000LL;
 -    } else if (pads[i].vib == VIB_RH_DS_BT && !rh_bt_alive()) {
-+    if (pads[i].vib == VIB_RH_BRIDGE && (!hdr || mode != VIB_MODE_AUTO || pads[i].motion_only || !rh_is_active(gc))) {
-         vib_leave(i, now);
+-        vib_leave(i, now);
 -        pads[i].vib_failed = VIB_RH_DS_BT, pads[i].vib_retry_ns = now + 30000000000LL;
 -    } else if (pads[i].vib == VIB_RH_STEAM && !rh_steam_alive()) {
--        vib_leave(i, now);
++    if (pads[i].vib == VIB_RH_BRIDGE && (!hdr || mode != VIB_MODE_AUTO || pads[i].motion_only || !rh_is_active(gc))) {
+         vib_leave(i, now);
 -        pads[i].vib_failed = VIB_RH_STEAM, pads[i].vib_retry_ns = now + 30000000000LL;
      }
 -    const int rh = vib_rh_for(kind);
@@ -794,7 +1884,6 @@ index 36d1d602..3b47c264 100644
 -                pads[i].usb_token = rh_usb_find(gc), pads[i].usb_next_look = now + 2000000000LL;
 +    const int allow_rh = hdr && mode == VIB_MODE_AUTO && vib_force != VIB_FORCE_MOTORS &&
 +                         vib_force != VIB_FORCE_HD && !pads[i].virt &&
-+                         !(pads[i].vendor == 0x057E && pads[i].product == 0x2069) &&
 +                         !pads[i].steam && !pads[i].motion_only;
 +    if (allow_rh) {
 +        rh_set_switch_gen(2);
@@ -874,7 +1963,18 @@ index 36d1d602..3b47c264 100644
  
  /* (longshot) Pad i's trigger t (0 left, 1 right) at its reading a (SDL's 0 to 32767): what it gives the game, a, or 0
     until it counts. It counts once it has read let go (8000 or below) for a second without a break since the pad was
-@@ -561,6 +515,10 @@ static void pads_poll(void) {
+@@ -464,6 +429,10 @@ static void four_poll(int i, int64_t now) {
+    device's trigger reads. */
+ #define TRIGGER_REST_NS 1000000000LL
+ enum { TRIG_SAID_HELD = 1, TRIG_SAID_COUNTS = 4, TRIG_SAID_LONG = 16 };   /* (<< t: the left's bit, then the right's) */
++/* (longshot, plan 143 6c) R2's depth x1000 (0..1000) of the pad that pulls it; read by host/oot_trigger.c */
++static volatile LONG r2_depth;
++static int r2_owner = -1;
++float hos_pad_r2_depth(void) { return (float)InterlockedCompareExchange(&r2_depth, 0, 0) / 1000.0f; }
+ static int trigger_pull(int i, int t, int a, int64_t now) {
+     const char *side = t ? "right" : "left";
+     const int held = a > 8000;
+@@ -561,6 +530,10 @@ static void pads_poll(void) {
                  pads[slot].vendor = hos_sdl_pad_vendor(gc);
                  pads[slot].product = hos_sdl_pad_product(gc);
                  pads[slot].steam = hos_sdl_pad_steam_handle(gc);
@@ -885,7 +1985,7 @@ index 36d1d602..3b47c264 100644
                  pads[slot].motion_only = 0;   /* (the poll below decides, and says so) */
                  hos_sdl_pad_log_connection(gc, pads[slot].motion, pads[slot].steam != 0);
              }
-@@ -591,9 +549,16 @@ static void pads_poll(void) {
+@@ -591,9 +564,16 @@ static void pads_poll(void) {
          uint16_t motors[2];
          /* (Test vibration, or a strength just changed: three quarters of the motors, as the game's is scaled) */
          const int testing = now < __atomic_load_n(&rumble_test_until, __ATOMIC_RELAXED);
@@ -905,7 +2005,7 @@ index 36d1d602..3b47c264 100644
          rumble_strength(testing ? 0xC000 : (uint16_t)rumble_low, testing ? 0xC000 : (uint16_t)rumble_high, strength, motors);
          uint8_t side[3][4];   /* (the HD rumble pads': each side's bytes, then both merged for a single Joy-Con) */
          {
-@@ -625,6 +590,7 @@ static void pads_poll(void) {
+@@ -625,6 +605,7 @@ static void pads_poll(void) {
                  pads[i].motion_only = motion_only;
                  /* (its rumble goes through Steam's stand-in now: what played it here lets go, or it would play twice) */
                  if (motion_only && pads[i].vib >= 0) vib_leave(i, now);
@@ -913,7 +2013,20 @@ index 36d1d602..3b47c264 100644
                  /* (a real Valve pad this SDL opens with no gyroscope: an SDL with no driver for it, so the loosened
                     list gives no motion, said once so the player sees why) */
                  if (motion_only && !pads[i].motion)
-@@ -696,27 +662,11 @@ static void pads_poll(void) {
+@@ -658,6 +639,12 @@ static void pads_poll(void) {
+                 pull[t] = trigger_pull(i, t, hos_sdl_pad_axis(gc, AX_LT + t), now);
+                 if (pull[t] > 8000) b |= 1ULL << (t ? HOS_PAD_RTRIGGER : HOS_PAD_LTRIGGER);
+             }
++            /* (longshot, plan 143 6c) how deep R2 is pulled, for the trigger rules (host/oot_trigger.c): the pad that pulls it, or
++               the one that held it last when none does */
++            if (pull[1] > 0 || r2_owner == i) {
++                InterlockedExchange(&r2_depth, pull[1] > 32767 ? 1000 : pull[1] * 1000 / 32767);
++                r2_owner = pull[1] > 0 ? i : -1;
++            }
+             const int inv_x = rx_option(16, 0);
+             const int inv_y = rx_option(17, 0);
+             const int z = rx_option(11, 0);   /* (the menu's Stick dead zone) */
+@@ -696,27 +683,11 @@ static void pads_poll(void) {
                  if (sig != pads[i].input_sig) pads[i].input_sig = sig, pads[i].used_ns = now;
              }
              /* (longshot) what plays its vibration: chosen again each poll (host/vibration.h), then played */
@@ -943,7 +2056,7 @@ index 36d1d602..3b47c264 100644
              uint16_t pad_motors[2] = {motors[0], motors[1]};
              const int pad_percent = hos_pad_speaker_pad_rumble_percent(gc);
              if (pad_percent != 100)
-@@ -730,13 +680,33 @@ static void pads_poll(void) {
+@@ -730,13 +701,33 @@ static void pads_poll(void) {
                  pads[i].rumble_ns = now;
              }
          }
@@ -979,7 +2092,7 @@ index 36d1d602..3b47c264 100644
              }
              rx_option_set(HOS_OPT_VIBRATION_STATUS, st);
          }
-@@ -765,14 +735,25 @@ static void pads_poll(void) {
+@@ -765,14 +756,25 @@ static void pads_poll(void) {
          ReleaseSRWLockExclusive(&state_lock);
  }
  
@@ -1007,7 +2120,7 @@ index 36d1d602..3b47c264 100644
  }
  #ifndef _WIN32
  int hos_display_owns_sdl(void);   /* host/posix/display_sdl.c */
-@@ -801,7 +782,7 @@ int hos_sdl_pads(uint64_t *buttons, int32_t stick[4], int *deck_builtin_input) {
+@@ -801,7 +803,7 @@ int hos_sdl_pads(uint64_t *buttons, int32_t stick[4], int *deck_builtin_input) {
              return 0;
          }
  #ifdef _WIN32
@@ -1016,7 +2129,47 @@ index 36d1d602..3b47c264 100644
          {   /* (longshot) the Switch 2 Pro Controller over USB, which Windows and this SDL have no driver for: host/pad_switch2.c */
              void hos_switch2_start(void);
              hos_switch2_start();
-@@ -863,6 +844,36 @@ void hos_sdl_rumble_hd(int side, const float value[4]) {
+@@ -815,7 +817,7 @@ int hos_sdl_pads(uint64_t *buttons, int32_t stick[4], int *deck_builtin_input) {
+     }
+     AcquireSRWLockShared(&state_lock);
+     const int n = state_count;
+-    *buttons |= state_buttons;
++    *buttons |= state_buttons & ~(touch_zones_on() ? 1ULL << HOS_PAD_TOUCHPAD : 0ULL);   /* (plan 147: the touchpad has its halves) */
+     for (int k = 0; k < 4; k++)
+         if ((state_stick[k] < 0 ? -state_stick[k] : state_stick[k]) > (stick[k] < 0 ? -stick[k] : stick[k]))
+             stick[k] = state_stick[k];
+@@ -824,6 +826,30 @@ int hos_sdl_pads(uint64_t *buttons, int32_t stick[4], int *deck_builtin_input) {
+     return n;
+ }
+ 
++/* (plan 147) The touchpad click's half, as OOT_ZONE_MAP / OOT_ZONE_BAG, held from the click until the pad lets go (nn_hid.c's read_input
++   holds Minus / Plus meanwhile, as a real button); -1 for none, for a pad that gives no finger position, or with HOS_TOUCH_ZONES=0.
++   The half is taken when the click begins (the finger's place then). */
++int hos_pad_touch_zone_held(void) {
++    static int was, zone = -1;
++    if (!touch_zones_on()) return -1;
++    AcquireSRWLockShared(&state_lock);
++    const int down = (int)(state_buttons >> HOS_PAD_TOUCHPAD & 1);
++    if (!down) zone = -1;
++    else if (!was) {
++        zone = -1;
++        for (int i = 0; i < MAX_PADS && zone < 0; i++) {
++            float x;
++            if (pads[i].gc && hos_sdl_pad_button(pads[i].gc, BTN_TOUCHPAD) && hos_sdl_pad_finger_x(pads[i].gc, &x))
++                zone = oot_touch_zone(x);
++        }
++        hos_log("hid: touchpad %s -> %s", zone < 0 ? "none" : zone ? "right" : "left", zone < 0 ? "-" : zone ? "PLUS" : "MINUS");
++    }
++    was = down;
++    const int z = zone;
++    ReleaseSRWLockShared(&state_lock);
++    return z;
++}
++
+ /* (motion) the latest readings for nn_hid.c's GetSixAxisSensorStates, newest first: up to max, how many there are; 0
+    when there are none (Motion controls off, or no pad with a gyroscope) */
+ int hos_sdl_motion_history(HosMotionSample *out, int max) {
+@@ -863,6 +889,36 @@ void hos_sdl_rumble_hd(int side, const float value[4]) {
      ReleaseSRWLockExclusive(&hd_lock);
  }
  
@@ -1069,6 +2222,162 @@ index 0380d3ac..213daabc 100644
  #include "../gpu/vk/vk_api.h"   /* (HOS_OPT_PAD_SPEAKER_*) */
  #include <math.h>
  #include <stdio.h>
+diff --git a/host/pad_switch2.c b/host/pad_switch2.c
+index 1b2422ff..dc57b73a 100644
+--- a/host/pad_switch2.c
++++ b/host/pad_switch2.c
+@@ -77,9 +77,12 @@ static struct {
+     USHORT in_len, out_len;
+     Axis lx, ly, rx, ry;
+     float gyro_bias[3];
+-    volatile LONG rumble_lo, rumble_hi, rumble_new, sensors;
+-    SRWLOCK usb_lk;
+-} pad = {.usb_lk = SRWLOCK_INIT};
++    volatile LONG rumble_lo, rumble_hi, rumble_new, rumble_stuck, sensors;
++    SRWLOCK usb_lk, raw_lk;
++    uint8_t raw[64];
++    int raw_pending, raw_stops;
++    int64_t raw_until;
++} pad = {.usb_lk = SRWLOCK_INIT, .raw_lk = SRWLOCK_INIT};
+ 
+ /* ---- finding the controller's two interfaces --------------------------------------------------------------------------- */
+ /* The device path of interface `mi` of the controller, by the interface class `guid`: 1 when found */
+@@ -273,6 +276,12 @@ static int pad_open(void) {
+         if (HidP_GetCaps(pp, &caps) == HIDP_STATUS_SUCCESS) pad.in_len = caps.InputReportByteLength, pad.out_len = caps.OutputReportByteLength;
+         HidD_FreePreparsedData(pp);
+     }
++    InterlockedExchange(&pad.rumble_stuck, 0);
++    AcquireSRWLockExclusive(&pad.raw_lk);
++    pad.raw_pending = 0;
++    pad.raw_stops = 0;
++    pad.raw_until = 0;
++    ReleaseSRWLockExclusive(&pad.raw_lk);
+     InterlockedIncrement(&pad_generation);
+     hos_log("switch2: Switch 2 Pro Controller over USB: started (sticks calibrated at %.0f %.0f / %.0f %.0f)", pad.lx.neutral,
+             pad.ly.neutral, pad.rx.neutral, pad.ry.neutral);
+@@ -285,6 +294,31 @@ static bool v_rumble(void *u, uint16_t low, uint16_t high) {
+     InterlockedExchange(&pad.rumble_lo, low), InterlockedExchange(&pad.rumble_hi, high), InterlockedExchange(&pad.rumble_new, 1);
+     return true;
+ }
++static int raw_pro2_silent(const uint8_t *data) {
++    static const size_t blocks[2] = {1, 17};
++    for (int bi = 0; bi < 2; bi++) {
++        for (size_t s = 0; s < 3; s++) {
++            const uint8_t *b = data + blocks[bi] + 1 + s * 5;
++            if ((b[1] & 0xFC) != 0 || (b[2] & 0x0F) != 0 || (b[3] & 0xC0) != 0 || b[4] != 0) return 0;
++        }
++    }
++    return 1;
++}
++static bool v_send_effect(void *u, const void *data, int size) {
++    (void)u;
++    const uint8_t *bytes = (const uint8_t *)data;
++    if (!bytes || size != 64 || bytes[0] != 0x02 || InterlockedCompareExchange(&pad.rumble_stuck, 0, 0) != 0) return false;
++    const int64_t until = hos_now_ns() + 100000000LL;
++    const int silent = raw_pro2_silent(bytes);
++    AcquireSRWLockExclusive(&pad.raw_lk);
++    memcpy(pad.raw, bytes, 64);
++    pad.raw_pending = 1;
++    pad.raw_until = until;
++    pad.raw_stops = silent ? 3 : 0;
++    ReleaseSRWLockExclusive(&pad.raw_lk);
++    InterlockedExchange(&pad.rumble_lo, 0), InterlockedExchange(&pad.rumble_hi, 0);
++    return true;
++}
+ static bool v_sensors(void *u, bool on) {
+     (void)u;
+     InterlockedExchange(&pad.sensors, on ? 1 : 0);
+@@ -316,7 +350,7 @@ static int sdl_attach(void) {
+     d.button_mask = (1u << B_COUNT) - 1, d.axis_mask = (1u << AX_COUNT) - 1;
+     d.name = "Nintendo Switch 2 Pro Controller";
+     d.sensors = sensors;
+-    d.Rumble = v_rumble, d.SetSensorsEnabled = v_sensors;
++    d.Rumble = v_rumble, d.SendEffect = v_send_effect, d.SetSensorsEnabled = v_sensors;
+     sdl.id = sdl.Attach(&d);
+     if (!sdl.id) return 0;
+     sdl.joy = sdl.Open(sdl.id);
+@@ -431,7 +465,15 @@ static DWORD WINAPI rumble_main(LPVOID unused) {
+             playing = 0;
+             continue;
+         }
+-        if (generation != pad_generation) generation = pad_generation, stuck = refused = 0, playing = 0;
++        if (generation != pad_generation) {
++            generation = pad_generation, stuck = refused = 0, playing = 0;
++            InterlockedExchange(&pad.rumble_stuck, 0);
++            AcquireSRWLockExclusive(&pad.raw_lk);
++            pad.raw_pending = 0;
++            pad.raw_stops = 0;
++            pad.raw_until = 0;
++            ReleaseSRWLockExclusive(&pad.raw_lk);
++        }
+         const uint16_t lo = (uint16_t)pad.rumble_lo, hi = (uint16_t)pad.rumble_hi;
+         if (InterlockedExchange(&pad.rumble_new, 0)) stops = 3;   /* (a change, and a stop, said a few times over) */
+         if (stuck) {   /* (the controller's own samples) */
+@@ -447,19 +489,40 @@ static DWORD WINAPI rumble_main(LPVOID unused) {
+             }
+             continue;
+         }
+-        if (!lo && !hi) {
+-            if (stops <= 0) continue;
+-            stops--;
+-        }
+         uint8_t out[64] = {0};
+-        const unsigned lf = (unsigned)lo * 380 / 0xffff, hf = (unsigned)hi * 130 / 0xffff;   /* (511 together at the most) */
+-        out[0] = 0x02;
+-        for (int motor = 0; motor < 2; motor++) {
+-            uint8_t *m = out + 1 + motor * 16;
+-            m[0] = (uint8_t)(0x50 | (count & 0x0f));
+-            for (int f = 0; f < 3; f++) rumble_frame(m + 1 + f * 5, lf, hf);
++        int use_raw = 0, send_raw = 0;
++        const int64_t now_raw = hos_now_ns();
++        AcquireSRWLockExclusive(&pad.raw_lk);
++        if (now_raw < pad.raw_until || pad.raw_pending || pad.raw_stops > 0) {
++            use_raw = 1;
++            if (pad.raw_pending) {
++                memcpy(out, pad.raw, sizeof out);
++                pad.raw_pending = 0;
++                if (pad.raw_stops > 0) pad.raw_stops--;
++                send_raw = 1;
++            } else if (pad.raw_stops > 0) {
++                memcpy(out, pad.raw, sizeof out);
++                pad.raw_stops--;
++                send_raw = 1;
++            }
++        }
++        ReleaseSRWLockExclusive(&pad.raw_lk);
++        if (use_raw) {
++            if (!send_raw) continue;
++        } else {
++            if (!lo && !hi) {
++                if (stops <= 0) continue;
++                stops--;
++            }
++            const unsigned lf = (unsigned)lo * 380 / 0xffff, hf = (unsigned)hi * 130 / 0xffff;   /* (511 together at the most) */
++            out[0] = 0x02;
++            for (int motor = 0; motor < 2; motor++) {
++                uint8_t *m = out + 1 + motor * 16;
++                m[0] = (uint8_t)(0x50 | (count & 0x0f));
++                for (int f = 0; f < 3; f++) rumble_frame(m + 1 + f * 5, lf, hf);
++            }
++            count++;
+         }
+-        count++;
+         OVERLAPPED ov = {.hEvent = ev};
+         DWORD done = 0;
+         ResetEvent(ev);
+@@ -473,6 +536,12 @@ static DWORD WINAPI rumble_main(LPVOID unused) {
+             refused = 0;
+         } else if (++refused >= 3) {
+             stuck = 1;
++            InterlockedExchange(&pad.rumble_stuck, 1);
++            AcquireSRWLockExclusive(&pad.raw_lk);
++            pad.raw_pending = 0;
++            pad.raw_stops = 0;
++            pad.raw_until = 0;
++            ReleaseSRWLockExclusive(&pad.raw_lk);
+             hos_log("switch2: the controller stopped taking rumble reports: its own buzz and click samples from here on (unplug it and "
+                     "plug it in again for the full rumble)");
+         }
 diff --git a/host/posix/linux_stubs.c b/host/posix/linux_stubs.c
 index 392b33f4..1cbc5691 100644
 --- a/host/posix/linux_stubs.c
@@ -1086,21 +2395,22 @@ index 392b33f4..1cbc5691 100644
 +int rh_usb_speaker(int want, int gain) { (void)want, (void)gain; return 0; }
 diff --git a/host/renhdrum.h b/host/renhdrum.h
 new file mode 100644
-index 00000000..b9724b5e
+index 00000000..fc9e59ce
 --- /dev/null
 +++ b/host/renhdrum.h
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,541 @@
 +#ifndef RENHDRUM_H
 +#define RENHDRUM_H
 +
 +#include <stdint.h>
 +#include <stdbool.h>
++#include <stddef.h>
 +
 +#ifdef __cplusplus
 +extern "C" {
 +#endif
 +
-+#define RENHDRUM_VERSION 0x000500
++#define RENHDRUM_VERSION 0x000600
 +
 +#define RENHDRUM_OK 0
 +#define RENHDRUM_ERR_NULL_PTR -1
@@ -1489,6 +2799,30 @@ index 00000000..b9724b5e
 +   a streak started with or after trigger hold (gap > 30 ms starts a new streak) mutes new pulses
 +   while held and for 500 ms after the last call. */
 +void renhdrum_tri_trigger_note_action(RenHdcTriTrigger *h, uint32_t now_ms);
++/* Shared adaptive trigger presets (Tier 2, one handle per trigger).
++   Priority rule (the core does not blend Tier 1 and Tier 2): while a preset is active and non-Off
++   (out11[0] != 0x05), the host sends the preset's 11 bytes; when the preset is Off, the host falls
++   back to renhdrum_tri_trigger_update as before.
++   tick returns 1 = send out11, 0 = nothing to send, < 0 = error (null pointer). */
++#define RENHDRUM_TRIG_OFF          0  /* Forced release: smooth free trigger */
++#define RENHDRUM_TRIG_TENSION      1  /* Progressive pull: bow, slingshot, charge (caps after 10 s) */
++#define RENHDRUM_TRIG_TWO_STAGE    2  /* Two-stage: half-pull aim/mode, break through to fire */
++#define RENHDRUM_TRIG_CRISP_SHOT   3  /* Crisp break: semi-auto firearm trigger */
++#define RENHDRUM_TRIG_AUTO_FIRE    4  /* Automatic fire: pulsing kick (caps at 5 s) */
++#define RENHDRUM_TRIG_EMPTY_SOFT   5  /* Empty soft: dry trigger with light bottom tap */
++#define RENHDRUM_TRIG_JAMMED       6  /* Jammed wall: blocked early (caps after 3 s, soft release) */
++#define RENHDRUM_TRIG_BRAKE        7  /* Progressive brake: heavier near full pull (caps after 8 s) */
++#define RENHDRUM_TRIG_ABS_BRAKE    8  /* ABS brake: pulsed release (falls back to Brake after 4 s) */
++#define RENHDRUM_TRIG_WHEELSPIN    9  /* Wheelspin / drift vibration (stops after 5 s) */
++#define RENHDRUM_TRIG_THROTTLE     10 /* Throttle pedal: light continuous curve (capped at strength 4) */
++#define RENHDRUM_TRIG_HEAVY_LOAD   11 /* Heavy load: carrying weight / raised shield (caps after 12 s) */
++#define RENHDRUM_TRIG_IMPACT_PULSE 12 /* One-shot 100 ms impact pulse overlay (>= 80 ms gap) */
++#define RENHDRUM_TRIG_ENGINE_ROUGH 13 /* Engine / rough surface vibration (caps after 10 s) */
++typedef struct RenHdcTriggerPreset RenHdcTriggerPreset;
++RenHdcTriggerPreset *renhdrum_trigger_preset_create(void);
++void renhdrum_trigger_preset_destroy(RenHdcTriggerPreset *h);
++void renhdrum_trigger_preset_set(RenHdcTriggerPreset *h, uint8_t preset_id, float level, uint32_t now_ms);
++int32_t renhdrum_trigger_preset_tick(RenHdcTriggerPreset *h, uint32_t now_ms, uint8_t *out11);
 +/* 47-byte DS5EffectsState_t USB blocks for HD Haptics (speaker open/release, single-trigger update/off).
 +   Returns 0 on success, -1 (RENHDRUM_ERR_NULL_PTR) if out47 is NULL. */
 +#define RENHDRUM_DS5_EFFECTS_SIZE 47
@@ -1523,8 +2857,83 @@ index 00000000..b9724b5e
 +int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
 +int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
 +
++/* Experimental: Switch 2 Pro Controller (USB only, 057E:2069) HD Rumble 2 report 0x02 builder.
++   build_report returns 1 when out_report64 must be sent, 0 when nothing to send, < 0 on error. */
++typedef struct RenHdcPro2 RenHdcPro2;
++#define RENHDRUM_PRO2_REPORT_SIZE 64
++#define RENHDRUM_PRO2_PERIOD_US 15000
++#define RENHDRUM_PRO2_VID 0x057E
++#define RENHDRUM_PRO2_PID 0x2069
++#define RENHDRUM_PRO2_AMP_CEILING_DEFAULT 450
++RenHdcPro2 *renhdrum_pro2_create(uint16_t amp_ceiling);
++void renhdrum_pro2_destroy(RenHdcPro2 *h);
++int32_t renhdrum_pro2_push_half_sample(
++    RenHdcPro2 *h,
++    int64_t now_us,
++    bool is_right,
++    float al,
++    float fl,
++    float ah,
++    float fh
++);
++int32_t renhdrum_pro2_build_report(RenHdcPro2 *h, int64_t now_us, uint8_t *out_report64);
++int32_t renhdrum_pro2_silent_report(RenHdcPro2 *h, uint8_t *out_report64);
++
 +/* Switch 2 rumble mode: 0 = Switch 1 default / untouched, 2 = Switch 2 Mode 2 translation */
 +void renhdrum_set_nx2_mode(int32_t mode);
++
++/* Host compiled against this header can use DLL version v (renhdrum_version()). */
++#define RENHDRUM_ABI_COMPATIBLE(v) ((((uint32_t)(v)) >> 16) == ((uint32_t)RENHDRUM_VERSION >> 16) && ((uint32_t)(v)) >= (uint32_t)RENHDRUM_VERSION)
++
++#define RENHDRUM_FAMILY_NONE 0
++#define RENHDRUM_FAMILY_SWITCH1 1
++#define RENHDRUM_FAMILY_SWITCH2 2
++#define RENHDRUM_FAMILY_DUALSENSE 3
++#define RENHDRUM_FAMILY_DUALSENSE_EDGE 4
++#define RENHDRUM_FAMILY_XBOX 5
++#define RENHDRUM_FAMILY_STEAM 6
++#define RENHDRUM_DEVICE_EXPERIMENTAL 1u
++#define RENHDRUM_DEVICE_NO_HD_WRITE 2u      /* never send HD Rumble packets: the pad powers off (057E:2073) */
++#define RENHDRUM_DEVICE_COMBINED_JOYCON 4u  /* SDL's virtual Joy-Con pair */
++typedef struct RenHdcDeviceInfo {
++    uint32_t struct_size;       /* host sets sizeof(RenHdcDeviceInfo) */
++    int32_t family;
++    uint32_t flags;
++    int32_t steam_grip_format;  /* RENHDRUM_VALVE_GRIP_FORMAT_* or 0 */
++} RenHdcDeviceInfo;
++/* RENHDRUM_OK = known family, RENHDRUM_CLAIM_UNSUPPORTED_DEVICE = family NONE (out still filled). */
++int32_t renhdrum_device_classify(uint16_t vid, uint16_t pid, RenHdcDeviceInfo *out);
++
++#define RENHDRUM_CLAIM_OK 0
++#define RENHDRUM_CLAIM_UNSUPPORTED_DEVICE 1
++#define RENHDRUM_CLAIM_BLOCKED_BY_HOST_DRIVER 2
++#define RENHDRUM_CLAIM_RAW_PACKET_REFUSED 3
++#define RENHDRUM_CLAIM_AUDIO_ENDPOINT_MISSING 4
++#define RENHDRUM_CLAIM_AUDIO_FORMAT_MISMATCH 5
++#define RENHDRUM_CLAIM_WINUSB_MI01_REQUIRED 6
++#define RENHDRUM_CLAIM_ABI_MISMATCH 7
++#define RENHDRUM_CLAIM_NO_HD_WRITE 8
++/* Static English text with the fix, never NULL ("Unknown status." for other codes). */
++const char *renhdrum_claim_status_text(int32_t code);
++
++#define RENHDRUM_DEMO_QUICK_PING 0  /* 150 ms tap left, then right: which pad is this slot */
++#define RENHDRUM_DEMO_TECH_SHOW 1   /* ~2.4 s: tap, low-band sweep, high-band notes */
++#define RENHDRUM_DEMO_CHECKUP 2     /* ~4 s: tap, sweep, 4 notes, 4 strength steps, stop */
++/* Sample at t_ms since start. Returns 1 while running (feed both sides into the pad's usual sink:
++   engine push_sample, DualSense / Steam set_target, Xbox, Pro 2), 0 once finished (outputs zero),
++   <0 on error. */
++int32_t renhdrum_demo_sample(int32_t preset, uint32_t t_ms, RenHdSideSample *out_left, RenHdSideSample *out_right);
++
++/* Thread-safe send-rate meter used during checkup tests to record real packet writes. */
++typedef struct RenHdTestMeter RenHdTestMeter;
++/* Allocates a new meter; free with renhdrum_test_meter_destroy. */
++RenHdTestMeter *renhdrum_test_meter_create(void);
++/* Frees a meter (NULL is a no-op). */
++void renhdrum_test_meter_destroy(RenHdTestMeter *meter);
++/* Records one real packet write at monotonic timestamp t_us (NULL is a no-op). */
++void renhdrum_test_meter_record(RenHdTestMeter *meter, uint64_t t_us, bool ok);
++/* Formats "sent <ok>/<total>, <avg> ms avg, stuck <yes|no>" into out; returns bytes written (<0 on error). */
++int32_t renhdrum_test_meter_format(const RenHdTestMeter *meter, char *out, size_t cap);
 +
 +#ifdef __cplusplus
 +}
@@ -1533,10 +2942,10 @@ index 00000000..b9724b5e
 +#endif /* RENHDRUM_H */
 diff --git a/host/renhdrum_recomp_bridge.c b/host/renhdrum_recomp_bridge.c
 new file mode 100644
-index 00000000..6972d7f6
+index 00000000..79eb9a98
 --- /dev/null
 +++ b/host/renhdrum_recomp_bridge.c
-@@ -0,0 +1,3055 @@
+@@ -0,0 +1,3608 @@
 +/* renhdrum_recomp_bridge.c - Generic RenHDrum 0.5.0 bridge for static recompilations
 +   Authentic HD Rumble for Nintendo Switch Pro Controller (USB & Bluetooth), DualSense / Edge
 +   (USB 4-ch 48 kHz + speaker + reactive triggers, Bluetooth 0x36 Opus + triggers / 0x32),
@@ -1561,6 +2970,7 @@ index 00000000..6972d7f6
 +#include "audio_output_devices.h"
 +#include "hos_sdl.h"
 +#include "pad_speaker.h"
++#include "oot_pad_light.h"   /* (plan 149: the battery light rule, the light bar's own colour) */
 +
 +#ifdef _WIN32
 +#include <ctype.h>
@@ -1576,6 +2986,12 @@ index 00000000..6972d7f6
 +#define RH_DS_AUDIO_MAX_ATTEMPTS 10
 +#define RH_STEAM_FAILS_MAX 100
 +#define RH_STEAM_TAIL_NS 100000000LL
++#define RH_PRO2_FAILS_MAX 100
++
++#ifndef RENHDRUM_PRO2_REPORT_SIZE
++typedef struct RenHdcPro2 RenHdcPro2;
++#define RENHDRUM_PRO2_REPORT_SIZE 64
++#endif
 +
 +#ifndef SDLCALL
 +#if defined(_WIN32) && !defined(_WIN64)
@@ -1653,6 +3069,10 @@ index 00000000..6972d7f6
 +    void (*tri_destroy)(RenHdcTriTrigger *);
 +    int32_t (*tri_update)(RenHdcTriTrigger *, uint32_t, uint8_t, float, float, float, float, bool, uint8_t *);
 +    void (*tri_note_action)(RenHdcTriTrigger *, uint32_t);
++    RenHdcTriggerPreset *(*preset_create)(void);
++    void (*preset_destroy)(RenHdcTriggerPreset *);
++    void (*preset_set)(RenHdcTriggerPreset *, uint8_t, float, uint32_t);
++    int32_t (*preset_tick)(RenHdcTriggerPreset *, uint32_t, uint8_t *);
 +    int32_t (*hd_speaker_block)(int32_t, uint8_t *);
 +    int32_t (*hd_trigger_block)(int32_t, const uint8_t *, uint8_t *);
 +
@@ -1673,6 +3093,13 @@ index 00000000..6972d7f6
 +    int32_t (*sv_build)(RenHdcDualSenseDsp *, uint8_t, uint8_t *);
 +    int32_t (*sv_mode_tick)(RenHdcDualSenseDsp *, uint8_t, uint64_t, bool, uint8_t *);
 +    int32_t (*sv_mode_off)(uint8_t, uint8_t *);
++
++    /* Switch 2 Pro Controller (experimental) */
++    RenHdcPro2 *(*pro2_create)(uint16_t);
++    void (*pro2_destroy)(RenHdcPro2 *);
++    int32_t (*pro2_push)(RenHdcPro2 *, int64_t, bool, float, float, float, float);
++    int32_t (*pro2_build)(RenHdcPro2 *, int64_t, uint8_t *);
++    int32_t (*pro2_silent)(RenHdcPro2 *, uint8_t *);
 +} rh;
 +
 +/* ---- SDL3 / SDL2 dynamic dispatch ---- */
@@ -1683,8 +3110,11 @@ index 00000000..6972d7f6
 +    uint16_t (*get_pid)(void *);
 +    int (*get_conn)(void *);
 +    void *(*get_joy)(void *);
-+    bool (*is_joy_virtual)(void *);
++    uint32_t (*get_joy_id)(void *);
++    bool (*is_joy_virtual)(uint32_t);
 +    int (*send_effect)(void *, const void *, int);
++    int (*set_led)(void *, uint8_t, uint8_t, uint8_t);   /* SDL3 SDL_SetGamepadLED (plan 149) */
++    int (*get_power_info)(void *, int *);                 /* SDL3 SDL_GetGamepadPowerInfo (plan 149) */
 +    void (*close_pad)(void *);
 +    int (*rumble_pad)(void *, uint16_t, uint16_t, uint32_t);
 +    void (*free_mem)(void *);
@@ -1746,8 +3176,11 @@ index 00000000..6972d7f6
 +        rh_load_proc(&sdl.get_pid, m, "SDL_GetGamepadProduct");
 +        rh_load_proc(&sdl.get_conn, m, "SDL_GetGamepadConnectionState");
 +        rh_load_proc(&sdl.get_joy, m, "SDL_GetGamepadJoystick");
++        rh_load_proc(&sdl.get_joy_id, m, "SDL_GetJoystickID");
 +        rh_load_proc(&sdl.is_joy_virtual, m, "SDL_IsJoystickVirtual");
 +        rh_load_proc(&sdl.send_effect, m, "SDL_SendJoystickEffect");
++        rh_load_proc(&sdl.set_led, m, "SDL_SetGamepadLED");
++        rh_load_proc(&sdl.get_power_info, m, "SDL_GetGamepadPowerInfo");
 +        rh_load_proc(&sdl.close_pad, m, "SDL_CloseGamepad");
 +        rh_load_proc(&sdl.rumble_pad, m, "SDL_RumbleGamepad");
 +        rh_load_proc(&sdl.free_mem, m, "SDL_free");
@@ -1836,6 +3269,8 @@ index 00000000..6972d7f6
 +static int32_t rh_opt_count = 0;
 +static int32_t rh_opt_stride = 0;
 +static RenHdcStore *rh_store = NULL;
++static volatile LONG rh_hd_triggers = 1;
++static volatile LONG rh_ds_hd_haptics_on = 1;
 +
 +typedef struct RhUserOpts {
 +    int enable_hd_rumble;
@@ -1921,7 +3356,11 @@ index 00000000..6972d7f6
 +        char *end = NULL;
 +        long val = strtol(val_str, &end, 10);
 +        if (end != val_str && *end == '\0') {
-+            rh.store_set(rh_store, key, (int32_t)val);
++            if (strcmp(key, "hd_triggers") == 0) {
++                InterlockedExchange(&rh_hd_triggers, val != 0 ? 1 : 0);
++            } else {
++                rh.store_set(rh_store, key, (int32_t)val);
++            }
 +        }
 +    }
 +    fclose(fp);
@@ -1967,6 +3406,7 @@ index 00000000..6972d7f6
 +        for (int32_t i = 0; i < count; i++) {
 +            if (keys[i]) fprintf(fp, "%s=%d\n", keys[i], vals[i]);
 +        }
++        fprintf(fp, "hd_triggers=%d\n", InterlockedCompareExchange(&rh_hd_triggers, 0, 0) != 0 ? 1 : 0);
 +        fclose(fp);
 +    }
 +    free(vals);
@@ -2153,7 +3593,49 @@ index 00000000..6972d7f6
 +    return memcmp(p + 2, neutral, 4) == 0 && memcmp(p + 6, neutral, 4) == 0;
 +}
 +
++/* ---- Switch 2 Pro Controller state (experimental) ---- */
++static SRWLOCK rh_pro2_lock = SRWLOCK_INIT;
++static RenHdcPro2 *rh_pro2;
++static void *rh_pro2_pad;
++static void *rh_pro2_joy;
++static int64_t rh_pro2_at[2];
++static int rh_pro2_muted[2];
++static int rh_pro2_fails;
++
++static void rh_pro2_send_silent(RenHdcPro2 *h, void *target, int count) {
++    if (!h || !target || !rh.pro2_silent || !sdl.send_effect) return;
++    uint8_t pkt[RENHDRUM_PRO2_REPORT_SIZE];
++    for (int i = 0; i < count; i++) {
++        if (rh.pro2_silent(h, pkt) == RENHDRUM_OK) {
++            sdl.send_effect(target, pkt, RENHDRUM_PRO2_REPORT_SIZE);
++        }
++    }
++}
++
++static int rh_pro2_detach(void *pad) {
++    AcquireSRWLockExclusive(&rh_pro2_lock);
++    if (!rh_pro2 || (pad && rh_pro2_pad != pad)) {
++        ReleaseSRWLockExclusive(&rh_pro2_lock);
++        return 0;
++    }
++    RenHdcPro2 *h = rh_pro2;
++    void *target = rh_pro2_joy ? rh_pro2_joy : rh_pro2_pad;
++    rh_pro2 = NULL;
++    rh_pro2_pad = NULL;
++    rh_pro2_joy = NULL;
++    rh_pro2_at[0] = rh_pro2_at[1] = 0;
++    rh_pro2_muted[0] = rh_pro2_muted[1] = 0;
++    rh_pro2_fails = 0;
++    ReleaseSRWLockExclusive(&rh_pro2_lock);
++
++    rh_pro2_send_silent(h, target, 3);
++    if (rh.pro2_destroy) rh.pro2_destroy(h);
++    return 1;
++}
++
 +/* ---- DualSense state (per-pad slots; lock order: restart_lock -> tri_lock -> lock -> dsp_lock -> audio_claim_lock) ---- */
++/* An IMPACT_PULSE beats layer 1 this long: the core pulse length (IMPACT_DURATION_MS 150 in RenHDrum). */
++#define RH_PULSE_BEATS_TRI_MS 150
 +typedef struct RhDsSlot {
 +    SRWLOCK restart_lock;
 +    SRWLOCK tri_lock;
@@ -2180,6 +3662,10 @@ index 00000000..6972d7f6
 +    int audio_attempts;
 +    int64_t next_audio_retry_us;
 +    int64_t next_audio_check_us;
++    int vol_saved;          /* (plan 150) Windows volume of the USB sound card pinned at 100 %; the old level/mute kept for release */
++    float vol_level;
++    int vol_mute;
++    int64_t vol_check_us, vol_log_us;
 +    void *bt_hid;
 +    HANDLE bt_thread;
 +    volatile LONG bt_run;
@@ -2194,15 +3680,33 @@ index 00000000..6972d7f6
 +    RenHdcTriTrigger *tri[2];
 +    float tri_sample[2][4];
 +    int tri_fresh[2];
++    RenHdcTriggerPreset *preset[2];
++    LONG preset_gen[2];
++    int preset_active[2];
++    uint32_t pulse_until_ms[2];   /* 6c round 1: until then an IMPACT_PULSE beats layer 1 (0 = none pending) */
++    uint8_t preset_last[2][11];   /* the last bytes a running preset sent (6a: back after a layer-1 effect) */
++    uint8_t tri_last[2][11];
++    int tri_last_valid[2];
 +    uint8_t bt_effect[2][11];
 +    int bt_effect_set[2];
 +    int64_t at[2];
 +    int muted[2];
++    int led_valid;     /* plan 149: led_sent is the light bar colour the pad has */
++    LONG led_sent;     /* r | g << 8 | b << 16 */
++    int64_t led_us;    /* when it was sent */
++    int mic_mode;      /* the microphone LED mode the pad has (0 off, 2 breathing) */
++    int64_t mic_us;    /* when the battery was last read, 0 never */
 +} RhDsSlot;
 +
 +static RhDsSlot rh_ds_slots[RH_MAX_PADS];
 +static SRWLOCK rh_ds_audio_claim_lock = SRWLOCK_INIT;
 +static int32_t rh_claimed_audio_devs[RH_MAX_PADS];
++static volatile LONG rh_presets_ready = 0;
++static volatile LONG rh_preset_packed[2];
++static volatile LONG rh_preset_gen[2];
++static volatile LONG rh_led_want = -1;   /* plan 149: the light bar colour asked for (rh_leds): r | g << 8 | b << 16, -1 none yet */
++#define RH_LED_GAP_US 80000LL            /* at most about 12 light bar sends a second per pad */
++#define RH_MIC_POLL_US 30000000LL        /* the battery is read every 30 s */
 +
 +/* ---- Xbox One S state ---- */
 +static SRWLOCK rh_xb_lock = SRWLOCK_INIT;
@@ -2383,6 +3887,10 @@ index 00000000..6972d7f6
 +           rh.tri_create && rh.tri_destroy && rh.tri_update;
 +}
 +
++static int rh_has_trigger_preset_api(void) {
++    return rh.preset_create && rh.preset_destroy && rh.preset_set && rh.preset_tick;
++}
++
 +/* Shared DualSense USB speaker-routing sync (single call site of rh.hd_speaker_block). */
 +static int rh_ds_usb_speaker_sync(int slot_idx, int force_off) {
 +    if (slot_idx < 0 || slot_idx >= RH_MAX_PADS) return 0;
@@ -2482,12 +3990,28 @@ index 00000000..6972d7f6
 +                    log_trigger = 1;
 +                }
 +            }
++            if (rh_has_trigger_preset_api() && !slot->preset[s]) {
++                slot->preset[s] = rh.preset_create();
++                slot->preset_gen[s] = InterlockedCompareExchange(&rh_preset_gen[s], 0, 0);
++                slot->preset_active[s] = 0;
++                slot->pulse_until_ms[s] = 0;
++                slot->tri_last_valid[s] = 0;
++                memset(slot->tri_last[s], 0, sizeof(slot->tri_last[s]));
++                slot->tri_last[s][0] = 0x05;
++            }
 +        }
 +    } else {
 +        for (int s = 0; s < 2; s++) {
 +            if (slot->tri[s]) {
 +                rh.tri_destroy(slot->tri[s]);
 +                slot->tri[s] = NULL;
++                off_triggers = 1;
++            }
++            if (slot->preset[s]) {
++                if (rh.preset_destroy) rh.preset_destroy(slot->preset[s]);
++                slot->preset[s] = NULL;
++                slot->preset_active[s] = 0;
++                slot->pulse_until_ms[s] = 0;
 +                off_triggers = 1;
 +            }
 +        }
@@ -2526,6 +4050,49 @@ index 00000000..6972d7f6
 +    if (!is_bt) {
 +        rh_ds_usb_speaker_sync(slot_idx, 0);
 +    }
++}
++
++/* (plan 150) USB rumble rides the pad's Windows sound card, so the Windows volume / mute of that card scales the rumble. While
++   the USB stream is ours, pin it at 100 % and unmuted, and give the old level back on release. All of this runs with the slot's
++   restart_lock held, never inside the audio callback. HOS_PAD_VOLUME_PIN=0 turns it off. */
++static int rh_vol_pin_enabled(void) {
++    static int on = -1;
++    if (on < 0) { const char *e = getenv("HOS_PAD_VOLUME_PIN"); on = !(e && e[0] == '0'); }
++    return on;
++}
++
++static void rh_ds_vol_pin(RhDsSlot *slot, void *pad, int64_t now_us) {
++    if (!rh_vol_pin_enabled() || !pad) return;
++    float level = 0; int mute = 0;
++    if (!hos_sdl_pad_volume(pad, &level, &mute, 0)) {
++        if (!slot->vol_saved && now_us - slot->vol_log_us >= 10000000LL) {
++            slot->vol_log_us = now_us;
++            hos_log("renhdrum: dualsense windows volume not pinned (sound card not found)");
++        }
++        return;
++    }
++    if (!slot->vol_saved) {
++        slot->vol_saved = 1, slot->vol_level = level, slot->vol_mute = mute;
++        if (level >= 0.99f && !mute) { hos_log("renhdrum: dualsense windows volume pinned at 100%% (already 100%%)"); return; }
++        float one = 1.0f; int off = 0;
++        if (hos_sdl_pad_volume(pad, &one, &off, 1))
++            hos_log("renhdrum: dualsense windows volume pinned at 100%% (was %d%%, muted %d)", (int)(level * 100 + 0.5f), mute);
++        return;
++    }
++    if (level >= 0.99f && !mute) return;
++    float one = 1.0f; int off = 0;
++    if (hos_sdl_pad_volume(pad, &one, &off, 1) && now_us - slot->vol_log_us >= 10000000LL) {
++        slot->vol_log_us = now_us;
++        hos_log("renhdrum: dualsense windows volume put back to 100%% (was %d%%, muted %d)", (int)(level * 100 + 0.5f), mute);
++    }
++}
++
++static void rh_ds_vol_release(RhDsSlot *slot, void *pad) {
++    if (!slot->vol_saved) return;
++    slot->vol_saved = 0;
++    float level = slot->vol_level; int mute = slot->vol_mute;
++    if (pad && hos_sdl_pad_volume(pad, &level, &mute, 1))
++        hos_log("renhdrum: dualsense windows volume given back (%d%%, muted %d)", (int)(level * 100 + 0.5f), mute);
 +}
 +
 +static void rh_ds_try_open_audio(int slot_idx) {
@@ -2610,6 +4177,8 @@ index 00000000..6972d7f6
 +        sdl.rumble_pad(pad, 0, 0, 0);
 +    }
 +    rh_pads_set_claimed(pad, 1);
++    rh_ds_vol_pin(slot, pad, hos_now_ns() / 1000);
++    slot->vol_check_us = hos_now_ns() / 1000 + 2000000LL;
 +    hos_log("renhdrum: dualsense audio opened on \"%s\" (4 ch, 48000 Hz, attempt %d)",
 +            matched_name[0] ? matched_name : "DualSense", attempts);
 +    ReleaseSRWLockExclusive(&slot->restart_lock);
@@ -2708,6 +4277,7 @@ index 00000000..6972d7f6
 +            }
 +            ReleaseSRWLockExclusive(&slot->lock);
 +            if (!ok) hos_sdl_audio_close(new_ha);
++            else rh_ds_vol_pin(slot, pad, hos_now_ns() / 1000);
 +        }
 +    } else {
 +        hos_sdl_audio_close(old_ha);
@@ -2726,6 +4296,7 @@ index 00000000..6972d7f6
 +        rh_ds_usb_speaker_sync(i, 1);
 +        rh_ds_release_audio_tok(tok);
 +        rh_pads_set_claimed(pad, 0);
++        rh_ds_vol_release(slot, pad);
 +    }
 +
 +    ReleaseSRWLockExclusive(&slot->restart_lock);
@@ -2928,6 +4499,8 @@ index 00000000..6972d7f6
 +    hos_log("renhdrum: dualsense bt haptics restarted");
 +}
 +
++static const uint8_t OFF_EFFECT11[11] = {0x05};
++
 +static void rh_ds_trigger_step(int slot_idx, int64_t now_us, int is_right) {
 +    if (slot_idx < 0 || slot_idx >= RH_MAX_PADS) return;
 +    RhDsSlot *slot = &rh_ds_slots[slot_idx];
@@ -2964,22 +4537,97 @@ index 00000000..6972d7f6
 +    uint8_t effect11[11];
 +    int changed = 0;
 +    int bt36 = 0;
++    int log_pulse = 0, log_pulse_tri = 0;   /* logged after slot->lock is released */
++    const char *src = "";   /* (plan 147 2b) which layer's bytes go out, for HOS_TRIG_PROBE=1's log */
++    uint32_t sent_ms = 0;
++    static uint32_t pulse_log_ms[2];
 +    AcquireSRWLockExclusive(&slot->lock);
 +    if (slot->active && slot->tri[is_right]) {
 +        uint32_t now_ms = (uint32_t)(now_us / 1000);
++        sent_ms = now_ms;
 +        if (other_action && rh.tri_note_action) {
 +            rh.tri_note_action(slot->tri[is_right], now_ms);
 +        }
 +        int fresh = slot->tri_fresh[is_right];
 +        slot->tri_fresh[is_right] = 0;
 +        const float *s = slot->tri_sample[is_right];
-+        changed = rh.tri_update(slot->tri[is_right], now_ms, depth,
-+                                s[0], s[1], s[2], s[3], fresh != 0, effect11);
++        uint8_t tri_eff[11];
++        int tri_changed = rh.tri_update(slot->tri[is_right], now_ms, depth,
++                                        s[0], s[1], s[2], s[3], fresh != 0, tri_eff);
++        if (tri_changed == 1) {
++            memcpy(slot->tri_last[is_right], tri_eff, 11);
++            slot->tri_last_valid[is_right] = (tri_eff[0] != 0x05);
++        }
++        if (slot->preset[is_right] && rh.preset_set && rh.preset_tick) {
++            LONG g = InterlockedCompareExchange(&rh_preset_gen[is_right], 0, 0);
++            if (g != slot->preset_gen[is_right]) {
++                slot->preset_gen[is_right] = g;
++                LONG packed = InterlockedCompareExchange(&rh_preset_packed[is_right], 0, 0);
++                uint8_t pid = (uint8_t)((packed >> 16) & 0xFF);
++                float plvl = (float)(packed & 0xFFFF) / 1000.0f;
++                rh.preset_set(slot->preset[is_right], pid, plvl, now_ms);
++                if (pid == 12) {   /* IMPACT_PULSE: for RH_PULSE_BEATS_TRI_MS it beats layer 1 (plan 143 6c round 1) */
++                    slot->pulse_until_ms[is_right] = now_ms + RH_PULSE_BEATS_TRI_MS;
++                    if (now_ms - pulse_log_ms[is_right] >= 200) {
++                        pulse_log_ms[is_right] = now_ms;
++                        log_pulse = 1;
++                        log_pulse_tri = slot->tri_last_valid[is_right];
++                    }
++                }
++            }
++            const int in_pulse = slot->pulse_until_ms[is_right] && now_ms < slot->pulse_until_ms[is_right];
++            uint8_t p11[11];
++            int pt = rh.preset_tick(slot->preset[is_right], now_ms, p11);
++            /* Which bytes go out (plan 143 6c round 7), in this order: (a) a pulse is on: the preset's bytes; (b) layer 1 (the game's
++               rumble-following trigger) has an effect: its new bytes whenever they change, whatever the preset does; (c) layer 1 has
++               none: the preset's bytes (Off too); (d) layer 1 just went Off: the running preset's last bytes, else Off. */
++            if (pt == 1) {
++                slot->preset_active[is_right] = p11[0] != 0x05;
++                if (slot->preset_active[is_right]) memcpy(slot->preset_last[is_right], p11, 11);
++            }
++            if (in_pulse && pt == 1) {
++                memcpy(effect11, p11, 11);
++                changed = 1, src = "pulse";
++            } else if (in_pulse) {
++                /* pulse holds the trigger */
++            } else if (slot->tri_last_valid[is_right]) {
++                if (tri_changed == 1) memcpy(effect11, tri_eff, 11), changed = 1, src = "layer1";
++            } else if (pt == 1) {
++                memcpy(effect11, p11, 11);
++                changed = 1, src = "preset";
++            } else if (tri_changed == 1) {
++                memcpy(effect11, slot->preset_active[is_right] ? slot->preset_last[is_right] : OFF_EFFECT11, 11);
++                changed = 1, src = "layer1_off";
++            }
++            /* The pulse is over: give the trigger back to layer 1 if it has an effect, else the running preset, else Off. */
++            if (slot->pulse_until_ms[is_right] && !in_pulse) {
++                slot->pulse_until_ms[is_right] = 0;
++                if (!changed) {
++                    memcpy(effect11, slot->tri_last_valid[is_right] ? slot->tri_last[is_right]
++                                     : slot->preset_active[is_right] ? slot->preset_last[is_right] : OFF_EFFECT11, 11);
++                    changed = 1, src = "pulse_end";
++                }
++            }
++        } else if (tri_changed == 1) {
++            memcpy(effect11, tri_eff, 11);
++            changed = 1, src = "layer1";
++        }
 +        bt36 = slot->bt_report36;
 +        joy = slot->joy;
 +    }
 +    ReleaseSRWLockExclusive(&slot->lock);
 +
++    if (log_pulse) hos_log("trigger: pulse side=%d tri=%d", is_right, log_pulse_tri);
++    if (changed == 1 && is_right) {   /* (plan 147 2b) HOS_TRIG_PROBE=1: which layer's bytes went to R2, at most 400 lines per 10 s */
++        static int probe = -1;
++        static uint32_t win_ms;
++        static int win_n;
++        if (probe < 0) { const char *e = getenv("HOS_TRIG_PROBE"); probe = e && e[0] == '1'; }
++        if (probe) {
++            if (sent_ms - win_ms >= 10000) win_ms = sent_ms, win_n = 0;
++            if (win_n++ < 400) hos_log("trigger: send side=1 src=%s b0=%02x t=%u", src, effect11[0], (unsigned)sent_ms);
++        }
++    }
 +    if (changed == 1) {
 +        if (bt36) {
 +            AcquireSRWLockExclusive(&slot->dsp_lock);
@@ -2992,6 +4640,57 @@ index 00000000..6972d7f6
 +                sdl.send_effect(joy, blk, RENHDRUM_DS5_EFFECTS_SIZE);
 +            }
 +        }
++    }
++    ReleaseSRWLockExclusive(&slot->tri_lock);
++}
++
++/* (plan 149) The DualSense's light bar (rh_leds) goes through SDL_SetGamepadLED (USB and Bluetooth: SDL builds the report, and
++   remembers the colour so a return to the old one is still sent). Sent only when it changed, at most every RH_LED_GAP_US, under
++   tri_lock (a trigger block is never sent at the same time). The microphone LED is a 47-byte effects block with only its enable
++   bit set (ucEnableBits2 0x01; ucMicLightMode at 8), so the triggers and rumble in the same pad's packets are untouched: mode 2
++   (the pad's own breathing) while the pad runs on a battery of 20 % or less, read every 30 s, sent when it changes. Both start
++   only once the game has asked for a colour (rh_leds), so HOS_PAD_LEDS=0 leaves them alone. */
++static void rh_led_block(uint8_t blk[RENHDRUM_DS5_EFFECTS_SIZE], int mic_mode) {
++    memset(blk, 0, RENHDRUM_DS5_EFFECTS_SIZE);
++    blk[1] = 0x01;
++    blk[8] = (uint8_t)mic_mode;
++}
++
++static void rh_ds_led_step(int slot_idx, int64_t now_us) {
++    const LONG want = InterlockedCompareExchange(&rh_led_want, 0, 0);
++    if (want < 0) return;
++    RhDsSlot *slot = &rh_ds_slots[slot_idx];
++    const int bar_due = !(slot->led_valid && slot->led_sent == want) && now_us - slot->led_us >= RH_LED_GAP_US;
++    const int mic_due = slot->mic_us == 0 || now_us - slot->mic_us >= RH_MIC_POLL_US;
++    if (!bar_due && !mic_due) return;
++    AcquireSRWLockExclusive(&slot->tri_lock);
++    void *pad = NULL, *joy = NULL;
++    AcquireSRWLockShared(&slot->lock);
++    if (slot->active && slot->joy) pad = slot->pad, joy = slot->joy;
++    ReleaseSRWLockShared(&slot->lock);
++    if (pad && bar_due && sdl.set_led) {
++        sdl.set_led(pad, (uint8_t)want, (uint8_t)(want >> 8), (uint8_t)(want >> 16));
++        slot->led_sent = want;
++        slot->led_valid = 1;
++        slot->led_us = now_us;
++    } else if (pad && bar_due) {
++        static int warned;
++        if (!warned) warned = 1, hos_log("renhdrum: dualsense light bar off (SDL has no SDL_SetGamepadLED)");
++    }
++    if (joy && mic_due && sdl.get_power_info && sdl.send_effect) {
++        int pct = -1;
++        const int state = sdl.get_power_info(pad, &pct);
++        const int mode = oot_mic_mode(state, pct, slot->mic_mode);
++        slot->mic_us = now_us;
++        if (mode != slot->mic_mode) {
++            uint8_t blk[RENHDRUM_DS5_EFFECTS_SIZE];
++            rh_led_block(blk, mode);
++            sdl.send_effect(joy, blk, RENHDRUM_DS5_EFFECTS_SIZE);
++            slot->mic_mode = mode;
++            hos_log("renhdrum: dualsense microphone LED %s (battery %d %%, state %d)", mode ? "breathing" : "off", pct, state);
++        }
++    } else if (mic_due) {
++        slot->mic_us = now_us;   /* (no SDL power info: no battery light) */
 +    }
 +    ReleaseSRWLockExclusive(&slot->tri_lock);
 +}
@@ -3020,7 +4719,10 @@ index 00000000..6972d7f6
 +    HANDLE bt_th = slot->bt_thread;
 +    RenHdcTriTrigger *tri0 = slot->tri[0];
 +    RenHdcTriTrigger *tri1 = slot->tri[1];
-+    int had_tri = (tri0 != NULL || tri1 != NULL);
++    RenHdcTriggerPreset *preset0 = slot->preset[0];
++    RenHdcTriggerPreset *preset1 = slot->preset[1];
++    int had_tri = (tri0 != NULL || tri1 != NULL || preset0 != NULL || preset1 != NULL);
++    const int led_was = slot->led_valid, mic_was = slot->mic_mode;
 +
 +    AcquireSRWLockExclusive(&slot->dsp_lock);
 +    RenHdcDualSenseDsp *dsp = slot->dsp;
@@ -3046,14 +4748,24 @@ index 00000000..6972d7f6
 +    slot->bt_thread = NULL;
 +    slot->speaker_on = 0;
 +    slot->bt_report36 = 0;
++    slot->led_valid = 0;
 +    slot->tri[0] = NULL;
 +    slot->tri[1] = NULL;
 +    slot->tri_fresh[0] = slot->tri_fresh[1] = 0;
++    slot->preset[0] = NULL;
++    slot->preset[1] = NULL;
++    slot->preset_gen[0] = slot->preset_gen[1] = 0;
++    slot->preset_active[0] = slot->preset_active[1] = 0;
++    slot->pulse_until_ms[0] = slot->pulse_until_ms[1] = 0;
++    slot->tri_last_valid[0] = slot->tri_last_valid[1] = 0;
++    memset(slot->tri_last, 0, sizeof(slot->tri_last));
 +    InterlockedExchange(&slot->bt_run, 0);
 +    ReleaseSRWLockExclusive(&slot->lock);
 +
 +    if (tri0 && rh.tri_destroy) rh.tri_destroy(tri0);
 +    if (tri1 && rh.tri_destroy) rh.tri_destroy(tri1);
++    if (preset0 && rh.preset_destroy) rh.preset_destroy(preset0);
++    if (preset1 && rh.preset_destroy) rh.preset_destroy(preset1);
 +    if (had_tri && joy && rh.hd_trigger_block && sdl.send_effect) {
 +        for (int is_right = 0; is_right <= 1; is_right++) {
 +            uint8_t blk[RENHDRUM_DS5_EFFECTS_SIZE];
@@ -3062,10 +4774,19 @@ index 00000000..6972d7f6
 +            }
 +        }
 +    }
++    if (led_was && pad && sdl.set_led)   /* (plan 149: the light bar back to the pad's own colour, the microphone LED off) */
++        sdl.set_led(pad, OOT_BAR_BASE_R, OOT_BAR_BASE_G, OOT_BAR_BASE_B);
++    if (mic_was && joy && sdl.send_effect) {
++        uint8_t blk[RENHDRUM_DS5_EFFECTS_SIZE];
++        rh_led_block(blk, 0);
++        sdl.send_effect(joy, blk, RENHDRUM_DS5_EFFECTS_SIZE);
++    }
++    slot->led_valid = 0, slot->mic_mode = 0, slot->mic_us = 0;
 +    ReleaseSRWLockExclusive(&slot->tri_lock);
 +
 +    if (ha) hos_sdl_audio_close(ha);
 +    rh_ds_release_audio_tok(tok);
++    rh_ds_vol_release(slot, pad);
 +
 +    if (bt_th) {
 +        DWORD w = WaitForSingleObject(bt_th, 2000);
@@ -3325,6 +5046,55 @@ index 00000000..6972d7f6
 +            sdl.send_effect(target, pkt, 10);
 +        }
 +
++        /* 1b. Switch 2 Pro Controller (experimental) */
++        int send_pro2 = 0;
++        uint8_t pro2_pkt[RENHDRUM_PRO2_REPORT_SIZE];
++        void *pro2_target = NULL;
++        void *pro2_pad_cur = NULL;
++        AcquireSRWLockExclusive(&rh_pro2_lock);
++        if (rh_pro2 && rh.pro2_push && rh.pro2_build) {
++            for (int s = 0; s < 2; s++) {
++                if (rh_pro2_at[s] && !rh_pro2_muted[s] && (now_us - rh_pro2_at[s] > RH_STALE_US)) {
++                    rh.pro2_push(rh_pro2, now_us, s == 1, 0.0f, 80.0f, 0.0f, 160.0f);
++                    rh_pro2_muted[s] = 1;
++                }
++            }
++            if (rh.pro2_build(rh_pro2, now_us, pro2_pkt) == 1) {
++                pro2_target = rh_pro2_joy ? rh_pro2_joy : rh_pro2_pad;
++                pro2_pad_cur = rh_pro2_pad;
++                send_pro2 = 1;
++            }
++        }
++        ReleaseSRWLockExclusive(&rh_pro2_lock);
++
++        if (send_pro2 && pro2_target && sdl.send_effect) {
++            int ok = sdl_ok(sdl.send_effect(pro2_target, pro2_pkt, RENHDRUM_PRO2_REPORT_SIZE));
++            RenHdcPro2 *drop = NULL;
++            void *drop_pad = NULL;
++            AcquireSRWLockExclusive(&rh_pro2_lock);
++            if (rh_pro2 && rh_pro2_pad == pro2_pad_cur) {
++                if (ok) {
++                    rh_pro2_fails = 0;
++                } else if (++rh_pro2_fails >= RH_PRO2_FAILS_MAX) {
++                    drop = rh_pro2;
++                    drop_pad = rh_pro2_pad;
++                    rh_pro2 = NULL;
++                    rh_pro2_pad = NULL;
++                    rh_pro2_joy = NULL;
++                    rh_pro2_at[0] = rh_pro2_at[1] = 0;
++                    rh_pro2_muted[0] = rh_pro2_muted[1] = 0;
++                    rh_pro2_fails = 0;
++                }
++            }
++            ReleaseSRWLockExclusive(&rh_pro2_lock);
++            if (drop) {
++                if (drop_pad) rh_pads_set_claimed(drop_pad, 0);
++                if (rh.pro2_destroy) rh.pro2_destroy(drop);
++                hos_log("renhdrum: Switch 2 Pro Controller refused %d packets, falling back to normal rumble",
++                        RH_PRO2_FAILS_MAX);
++            }
++        }
++
 +        /* 2. Xbox One S: stale watchdog & tick (RenHDrum and Direct modes) */
 +        uint16_t motors[4] = {0, 0, 0, 0};
 +        int send_xb = 0;
@@ -3486,8 +5256,12 @@ index 00000000..6972d7f6
 +                        hos_sdl_audio_close(cur_ha);
 +                        rh_ds_release_audio_tok(cur_tok);
 +                        if (cur_pad) rh_pads_set_claimed(cur_pad, 0);
++                        rh_ds_vol_release(slot, cur_pad);
 +                        hos_log("renhdrum: dualsense speaker went away, standard rumble until it returns");
 +                    }
++                } else if (cur_ha && cur_pad && now_us >= slot->vol_check_us) {
++                    slot->vol_check_us = now_us + 2000000LL;
++                    rh_ds_vol_pin(slot, cur_pad, now_us);
 +                }
 +                ReleaseSRWLockExclusive(&slot->restart_lock);
 +            }
@@ -3498,6 +5272,7 @@ index 00000000..6972d7f6
 +                rh_ds_trigger_step(i, now_us, 0);
 +                rh_ds_trigger_step(i, now_us, 1);
 +            }
++            rh_ds_led_step(i, now_us);
 +        }
 +
 +        Sleep(1);
@@ -3557,6 +5332,9 @@ index 00000000..6972d7f6
 +        }
 +    }
 +
++    /* Switch 2 Pro Controller detach */
++    rh_pro2_detach(pad);
++
 +    /* Xbox detach */
 +    rh_xb_detach(pad);
 +
@@ -3567,6 +5345,10 @@ index 00000000..6972d7f6
 +    AcquireSRWLockShared(&rh_lock);
 +    int pro_active = (rh_engine != NULL);
 +    ReleaseSRWLockShared(&rh_lock);
++
++    AcquireSRWLockShared(&rh_pro2_lock);
++    int pro2_active = (rh_pro2 != NULL);
++    ReleaseSRWLockShared(&rh_pro2_lock);
 +
 +    int ds_active = 0;
 +    for (int i = 0; i < RH_MAX_PADS; i++) {
@@ -3583,7 +5365,7 @@ index 00000000..6972d7f6
 +    int sv_active = (rh_sv_dsp != NULL);
 +    ReleaseSRWLockShared(&rh_sv_lock);
 +
-+    if (!pro_active && !ds_active && !xb_active && !sv_active) {
++    if (!pro_active && !pro2_active && !ds_active && !xb_active && !sv_active) {
 +        HANDLE t = rh_thread;
 +        rh_thread = NULL;
 +        InterlockedExchange(&rh_run, 0);
@@ -3597,6 +5379,7 @@ index 00000000..6972d7f6
 +
 +static void rh_apply_settings_live(void) {
 +    RhUserOpts u = rh_read_opts();
++    InterlockedExchange(&rh_ds_hd_haptics_on, (u.dualsense_haptics && u.dualsense_hd_haptics) ? 1 : 0);
 +
 +    /* 1. Pro Controller live reconfigure */
 +    void *pro_joy = NULL;
@@ -3826,12 +5609,12 @@ index 00000000..6972d7f6
 +    }
 +
 +    uint32_t ver = rh.version();
-+    if ((ver >> 8) != ((uint32_t)RENHDRUM_VERSION >> 8)) {
-+        hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected branch 0x%04xxx)",
-+                (unsigned)ver, (unsigned)((uint32_t)RENHDRUM_VERSION >> 8));
++    if (!RENHDRUM_ABI_COMPATIBLE(ver)) {
++        hos_log("renhdrum: off (incompatible renhdrum.dll version 0x%06x, expected >= 0x%06x)",
++                (unsigned)ver, (unsigned)RENHDRUM_VERSION);
 +        snprintf(rh_load_err, sizeof(rh_load_err),
-+                 "Incompatible renhdrum.dll (0x%06x, need 0x%04xxx): normal rumble",
-+                 (unsigned)ver, (unsigned)((uint32_t)RENHDRUM_VERSION >> 8));
++                 "Incompatible renhdrum.dll (0x%06x, need >= 0x%06x): normal rumble",
++                 (unsigned)ver, (unsigned)RENHDRUM_VERSION);
 +        FreeLibrary(rh.dll);
 +        memset(&rh, 0, sizeof(rh));
 +        rh.tried = 1;
@@ -3866,6 +5649,14 @@ index 00000000..6972d7f6
 +    rh_load_proc(&rh.tri_destroy, rh.dll, "renhdrum_tri_trigger_destroy");
 +    rh_load_proc(&rh.tri_update, rh.dll, "renhdrum_tri_trigger_update");
 +    rh_load_proc(&rh.tri_note_action, rh.dll, "renhdrum_tri_trigger_note_action");
++    rh_load_proc(&rh.preset_create, rh.dll, "renhdrum_trigger_preset_create");
++    rh_load_proc(&rh.preset_destroy, rh.dll, "renhdrum_trigger_preset_destroy");
++    rh_load_proc(&rh.preset_set, rh.dll, "renhdrum_trigger_preset_set");
++    rh_load_proc(&rh.preset_tick, rh.dll, "renhdrum_trigger_preset_tick");
++    if (rh_has_trigger_preset_api()) {
++        InterlockedExchange(&rh_presets_ready, 1);
++        hos_log("renhdrum: trigger presets on");
++    }
 +    rh_load_proc(&rh.hd_speaker_block, rh.dll, "renhdrum_hd_haptics_speaker_block");
 +    rh_load_proc(&rh.hd_trigger_block, rh.dll, "renhdrum_hd_haptics_trigger_block");
 +
@@ -3887,6 +5678,13 @@ index 00000000..6972d7f6
 +    rh_load_proc(&rh.sv_mode_tick, rh.dll, "renhdrum_valve_grip_mode_tick");
 +    rh_load_proc(&rh.sv_mode_off, rh.dll, "renhdrum_valve_grip_mode_off");
 +
++    /* Optional Switch 2 Pro Controller exports */
++    rh_load_proc(&rh.pro2_create, rh.dll, "renhdrum_pro2_create");
++    rh_load_proc(&rh.pro2_destroy, rh.dll, "renhdrum_pro2_destroy");
++    rh_load_proc(&rh.pro2_push, rh.dll, "renhdrum_pro2_push_half_sample");
++    rh_load_proc(&rh.pro2_build, rh.dll, "renhdrum_pro2_build_report");
++    rh_load_proc(&rh.pro2_silent, rh.dll, "renhdrum_pro2_silent_report");
++
 +    int ini_enable = 1;
 +    AcquireSRWLockExclusive(&rh_store_lock);
 +    if (rh.options) {
@@ -3896,6 +5694,9 @@ index 00000000..6972d7f6
 +        rh_store = rh.store_create();
 +        rh_ini_load_locked();
 +        ini_enable = rh_store_get_locked("enable_hd_rumble", 1);
++        int ds_hd = rh_store_get_locked("dualsense_haptics", 1) != 0 &&
++                    rh_store_get_locked("dualsense_hd_haptics", 1) != 0;
++        InterlockedExchange(&rh_ds_hd_haptics_on, ds_hd ? 1 : 0);
 +    }
 +    ReleaseSRWLockExclusive(&rh_store_lock);
 +
@@ -3913,9 +5714,13 @@ index 00000000..6972d7f6
 +    uint16_t vid = sdl.get_vid ? sdl.get_vid(pad) : 0;
 +    uint16_t pid = sdl.get_pid ? sdl.get_pid(pad) : 0;
 +    void *early_joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
-+    /* Ignore virtual Switch 2 Pro pad (host/pad_switch2.c 057E:2069) & SDL virtual joysticks. */
-+    if ((vid == 0x057E && pid == 0x2069) ||
-+        (sdl.is_joy_virtual && early_joy && sdl.is_joy_virtual(early_joy))) {
++    int is_virtual = 0;
++    if (sdl.is_sdl3 && sdl.is_joy_virtual && sdl.get_joy_id && early_joy) {
++        uint32_t jid = sdl.get_joy_id(early_joy);
++        if (jid != 0) is_virtual = sdl.is_joy_virtual(jid) ? 1 : 0;
++    }
++    /* Ignore SDL virtual joysticks except Longshot's Switch 2 Pro pad (057E:2069). */
++    if (is_virtual && !(vid == 0x057E && pid == 0x2069)) {
 +        return;
 +    }
 +    rh_pads_track(pad);
@@ -4004,6 +5809,57 @@ index 00000000..6972d7f6
 +        return;
 +    }
 +
++    /* 1b. Nintendo Switch 2 Pro Controller (VID 0x057E, PID 0x2069, experimental) */
++    if (vid == 0x057E && pid == 0x2069) {
++        if (!rh_load()) return;
++        if (!rh.pro2_create || !rh.pro2_destroy || !rh.pro2_push || !rh.pro2_build || !rh.pro2_silent) {
++            hos_log("renhdrum: Switch 2 Pro Controller functions missing in renhdrum.dll, using normal rumble");
++            return;
++        }
++        if (!sdl.send_effect) {
++            hos_log("renhdrum: Switch 2 Pro Controller: SDL_SendJoystickEffect missing, using normal rumble");
++            return;
++        }
++
++        AcquireSRWLockShared(&rh_pro2_lock);
++        int pro2_busy = (rh_pro2 != NULL);
++        ReleaseSRWLockShared(&rh_pro2_lock);
++        if (pro2_busy) return;
++
++        RenHdcPro2 *h = rh.pro2_create(0);
++        if (!h) {
++            hos_log("renhdrum: off (switch2 pro2 create failed)");
++            return;
++        }
++        void *joy = sdl.get_joy ? sdl.get_joy(pad) : pad;
++        uint8_t probe[RENHDRUM_PRO2_REPORT_SIZE];
++        if (!joy || rh.pro2_silent(h, probe) != RENHDRUM_OK ||
++            !sdl_ok(sdl.send_effect(joy, probe, RENHDRUM_PRO2_REPORT_SIZE))) {
++            rh.pro2_destroy(h);
++            hos_log("renhdrum: Switch 2 Pro Controller refused raw HD Rumble 2 report, using normal rumble");
++            return;
++        }
++
++        AcquireSRWLockExclusive(&rh_pro2_lock);
++        if (rh_pro2) {
++            ReleaseSRWLockExclusive(&rh_pro2_lock);
++            rh.pro2_destroy(h);
++            return;
++        }
++        rh_pro2 = h;
++        rh_pro2_pad = pad;
++        rh_pro2_joy = joy;
++        rh_pro2_at[0] = rh_pro2_at[1] = 0;
++        rh_pro2_muted[0] = rh_pro2_muted[1] = 0;
++        rh_pro2_fails = 0;
++        ReleaseSRWLockExclusive(&rh_pro2_lock);
++
++        rh_pads_set_claimed(pad, 1);
++        rh_ensure_worker();
++        hos_log("renhdrum: Switch 2 Pro Controller (USB, experimental)");
++        return;
++    }
++
 +    /* 2. Sony DualSense / DualSense Edge (VID 0x054C, PID 0x0CE6 or 0x0DF2) */
 +    if (vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)) {
 +        if (!rh_load()) return;
@@ -4079,6 +5935,14 @@ index 00000000..6972d7f6
 +            slot->speaker_logged = 0;
 +            slot->trigger_logged = 0;
 +            slot->bt_report36 = 0;
++            slot->preset[0] = slot->preset[1] = NULL;
++            slot->preset_gen[0] = slot->preset_gen[1] = 0;
++            slot->preset_active[0] = slot->preset_active[1] = 0;
++            slot->pulse_until_ms[0] = slot->pulse_until_ms[1] = 0;
++            slot->tri_last_valid[0] = slot->tri_last_valid[1] = 0;
++            memset(slot->tri_last, 0, sizeof(slot->tri_last));
++            slot->tri_last[0][0] = 0x05;
++            slot->tri_last[1][0] = 0x05;
 +            slot->at[0] = slot->at[1] = 0;
 +            slot->muted[0] = slot->muted[1] = 0;
 +            memset(slot->bt_effect_set, 0, sizeof(slot->bt_effect_set));
@@ -4144,6 +6008,14 @@ index 00000000..6972d7f6
 +        slot->speaker_logged = 0;
 +        slot->trigger_logged = 0;
 +        slot->bt_report36 = 0;
++        slot->preset[0] = slot->preset[1] = NULL;
++        slot->preset_gen[0] = slot->preset_gen[1] = 0;
++        slot->preset_active[0] = slot->preset_active[1] = 0;
++        slot->pulse_until_ms[0] = slot->pulse_until_ms[1] = 0;
++        slot->tri_last_valid[0] = slot->tri_last_valid[1] = 0;
++        memset(slot->tri_last, 0, sizeof(slot->tri_last));
++        slot->tri_last[0][0] = 0x05;
++        slot->tri_last[1][0] = 0x05;
 +        slot->at[0] = slot->at[1] = 0;
 +        slot->muted[0] = slot->muted[1] = 0;
 +        ReleaseSRWLockExclusive(&slot->lock);
@@ -4337,6 +6209,13 @@ index 00000000..6972d7f6
 +    }
 +    ReleaseSRWLockShared(&rh_lock);
 +
++    AcquireSRWLockShared(&rh_pro2_lock);
++    if (rh_pro2) {
++        ReleaseSRWLockShared(&rh_pro2_lock);
++        return "Connected: Switch 2 Pro Controller (USB, experimental), HD Rumble";
++    }
++    ReleaseSRWLockShared(&rh_pro2_lock);
++
 +    for (int i = 0; i < RH_MAX_PADS; i++) {
 +        RhDsSlot *slot = &rh_ds_slots[i];
 +        AcquireSRWLockShared(&slot->lock);
@@ -4371,6 +6250,22 @@ index 00000000..6972d7f6
 +    return "No controller HD Rumble supports: normal rumble";
 +}
 +
++/* The game's last rumble amplitude per side (x1000) and when (hos_now_ns() / 1000), for rh_game_rumble_amp (no lock). */
++static volatile LONG rh_game_amp_milli[2];
++static volatile LONG64 rh_game_amp_us[2];
++
++float rh_game_rumble_amp(void) {
++    const int64_t now_us = hos_now_ns() / 1000;
++    LONG best = 0;
++    for (int s = 0; s < 2; s++) {
++        const LONG64 at = InterlockedCompareExchange64(&rh_game_amp_us[s], 0, 0);
++        if (at <= 0 || now_us - at > 60000) continue;
++        const LONG a = InterlockedCompareExchange(&rh_game_amp_milli[s], 0, 0);
++        if (a > best) best = a;
++    }
++    return (float)best / 1000.0f;
++}
++
 +int rh_vibration(int side, float al, float fl, float ah, float fh) {
 +    if (side < 0 || side > 1) return 0;
 +    if (InterlockedCompareExchange(&rh_enabled, 1, 1) == 0) return 0;
@@ -4388,6 +6283,16 @@ index 00000000..6972d7f6
 +        handled = 1;
 +    }
 +    ReleaseSRWLockExclusive(&rh_lock);
++
++    /* Switch 2 Pro Controller (experimental) */
++    AcquireSRWLockExclusive(&rh_pro2_lock);
++    if (rh_pro2 && rh.pro2_push) {
++        rh.pro2_push(rh_pro2, now_us, side == 1, s_al, fl, s_ah, fh);
++        rh_pro2_at[side] = now_us;
++        rh_pro2_muted[side] = 0;
++        handled = 1;
++    }
++    ReleaseSRWLockExclusive(&rh_pro2_lock);
 +
 +    /* DualSense slots (DSP + reactive trigger sample; trigger packets go out from rh_worker only) */
 +    for (int i = 0; i < RH_MAX_PADS; i++) {
@@ -4411,6 +6316,12 @@ index 00000000..6972d7f6
 +                    slot->tri_sample[side][2] = ah;
 +                    slot->tri_sample[side][3] = fh;
 +                    slot->tri_fresh[side] = 1;
++                    {
++                        float m = al > ah ? al : ah;
++                        m = m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m);
++                        InterlockedExchange(&rh_game_amp_milli[side], (LONG)(m * 1000.0f + 0.5f));
++                        InterlockedExchange64(&rh_game_amp_us[side], now_us);
++                    }
 +                }
 +                slot->at[side] = now_us;
 +                slot->muted[side] = 0;
@@ -4486,6 +6397,13 @@ index 00000000..6972d7f6
 +    }
 +    ReleaseSRWLockShared(&rh_lock);
 +
++    AcquireSRWLockShared(&rh_pro2_lock);
++    if (rh_pro2 && rh_pro2_pad == pad) {
++        ReleaseSRWLockShared(&rh_pro2_lock);
++        return 1;
++    }
++    ReleaseSRWLockShared(&rh_pro2_lock);
++
 +    for (int i = 0; i < RH_MAX_PADS; i++) {
 +        RhDsSlot *slot = &rh_ds_slots[i];
 +        AcquireSRWLockShared(&slot->lock);
@@ -4541,6 +6459,10 @@ index 00000000..6972d7f6
 +int rh_option_get(const char *key, int *out) {
 +    if (!key || !out) return RENHDRUM_ERR_NULL_PTR;
 +    rh_load();
++    if (strcmp(key, "hd_triggers") == 0) {
++        *out = InterlockedCompareExchange(&rh_hd_triggers, 0, 0) != 0 ? 1 : 0;
++        return RENHDRUM_OK;
++    }
 +    int32_t v = 0;
 +    int32_t res = RENHDRUM_ERR_INVALID_ARG;
 +    AcquireSRWLockShared(&rh_store_lock);
@@ -4555,6 +6477,19 @@ index 00000000..6972d7f6
 +int rh_option_set(const char *key, int value) {
 +    if (!key) return RENHDRUM_ERR_NULL_PTR;
 +    rh_load();
++    if (strcmp(key, "hd_triggers") == 0) {
++        int on = value != 0 ? 1 : 0;
++        LONG prev = InterlockedExchange(&rh_hd_triggers, (LONG)on);
++        if (prev != (LONG)on) {
++            hos_log("renhdrum: hd triggers %s", on ? "on" : "off");
++            if (!on) {
++                rh_trigger_preset(0, RENHDRUM_TRIG_OFF, 0.0f);
++                rh_trigger_preset(1, RENHDRUM_TRIG_OFF, 0.0f);
++            }
++        }
++        rh_ini_save();
++        return RENHDRUM_OK;
++    }
 +    int32_t res = RENHDRUM_ERR_INVALID_ARG;
 +    AcquireSRWLockExclusive(&rh_store_lock);
 +    if (rh_store && rh.store_set) {
@@ -4571,6 +6506,26 @@ index 00000000..6972d7f6
 +    return RENHDRUM_OK;
 +}
 +
++void rh_trigger_preset(int side, uint8_t id, float level) {
++    if ((side != 0 && side != 1) || InterlockedCompareExchange(&rh_presets_ready, 0, 0) == 0) return;
++    int lvl_milli = 0;
++    if (level > 0.0f) {
++        lvl_milli = (level >= 1.0f) ? 1000 : (int)(level * 1000.0f + 0.5f);
++    }
++    InterlockedExchange(&rh_preset_packed[side], ((LONG)id << 16) | (LONG)lvl_milli);
++    InterlockedIncrement(&rh_preset_gen[side]);
++}
++
++int rh_hd_triggers_on(void) {
++    return InterlockedCompareExchange(&rh_hd_triggers, 0, 0) != 0 &&
++           InterlockedCompareExchange(&rh_ds_hd_haptics_on, 0, 0) != 0;
++}
++
++/* (plan 149) the light bar colour asked for; the worker sends it to each DualSense when it differs from what it has (rh_ds_led_step) */
++void rh_leds(int r, int g, int b) {
++    InterlockedExchange(&rh_led_want, (LONG)((r & 0xFF) | (g & 0xFF) << 8 | (b & 0xFF) << 16));
++}
++
 +void rh_option_reset(void) {
 +    rh_load();
 +    int32_t res = RENHDRUM_ERR_INVALID_ARG;
@@ -4582,6 +6537,9 @@ index 00000000..6972d7f6
 +    if (res != RENHDRUM_OK) return;
 +
 +    rh_set_enabled(1);
++    if (InterlockedExchange(&rh_hd_triggers, 1) == 0) {
++        hos_log("renhdrum: hd triggers on");
++    }
 +    rh_apply_settings_live();
 +    rh_ini_save();
 +}
@@ -4591,13 +6549,17 @@ index 00000000..6972d7f6
 +int rh_usb_token(void) { return -1; }
 +int rh_usb_restart_audio(void) { return 0; }
 +int rh_usb_speaker(int want, int gain) { (void)want, (void)gain; return 0; }
++void rh_trigger_preset(int side, uint8_t id, float level) { (void)side, (void)id, (void)level; }
++int rh_hd_triggers_on(void) { return 1; }
++void rh_leds(int r, int g, int b) { (void)r, (void)g, (void)b; }
++float rh_game_rumble_amp(void) { return 0.0f; }
 +#endif /* _WIN32 */
 diff --git a/host/renhdrum_recomp_bridge.h b/host/renhdrum_recomp_bridge.h
 new file mode 100644
-index 00000000..a4c027f8
+index 00000000..491bd472
 --- /dev/null
 +++ b/host/renhdrum_recomp_bridge.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,63 @@
 +/* renhdrum_recomp_bridge.h - Generic RenHDrum 0.5.0 bridge for static recompilations
 +   Supports Pro Controller (USB & BT), DualSense / Edge (USB HD Haptics + BT 0x36 Opus),
 +   Xbox One S (4 motors + Direct mode), and Steam Controller 2026 grips (experimental).
@@ -4625,6 +6587,33 @@ index 00000000..a4c027f8
 +const char *rh_status_line(void);
 +int rh_ds_render_frames(float *out, int frames);
 +
++/* Fallback trigger preset IDs when compiling against an older host/renhdrum.h (v0.5.0). */
++#ifndef RENHDRUM_TRIG_OFF
++#define RENHDRUM_TRIG_OFF          0  /* Forced release: smooth free trigger */
++#define RENHDRUM_TRIG_TENSION      1  /* Progressive pull: bow, slingshot, charge (caps after 10 s) */
++#define RENHDRUM_TRIG_TWO_STAGE    2  /* Two-stage: half-pull aim/mode, break through to fire */
++#define RENHDRUM_TRIG_CRISP_SHOT   3  /* Crisp break: semi-auto firearm trigger */
++#define RENHDRUM_TRIG_AUTO_FIRE    4  /* Automatic fire: pulsing kick (caps at 5 s) */
++#define RENHDRUM_TRIG_EMPTY_SOFT   5  /* Empty soft: dry trigger with light bottom tap */
++#define RENHDRUM_TRIG_JAMMED       6  /* Jammed wall: blocked early (caps after 3 s, soft release) */
++#define RENHDRUM_TRIG_BRAKE        7  /* Progressive brake: heavier near full pull (caps after 8 s) */
++#define RENHDRUM_TRIG_ABS_BRAKE    8  /* ABS brake: pulsed release (falls back to Brake after 4 s) */
++#define RENHDRUM_TRIG_WHEELSPIN    9  /* Wheelspin / drift vibration (stops after 5 s) */
++#define RENHDRUM_TRIG_THROTTLE     10 /* Throttle pedal: light continuous curve (capped at strength 4) */
++#define RENHDRUM_TRIG_HEAVY_LOAD   11 /* Heavy load: carrying weight / raised shield (caps after 12 s) */
++#define RENHDRUM_TRIG_IMPACT_PULSE 12 /* One-shot 100 ms impact pulse overlay (>= 80 ms gap) */
++#define RENHDRUM_TRIG_ENGINE_ROUGH 13 /* Engine / rough surface vibration (caps after 10 s) */
++typedef struct RenHdcTriggerPreset RenHdcTriggerPreset;
++#endif
++
++void rh_trigger_preset(int side, uint8_t id, float level);
++int rh_hd_triggers_on(void);
++/* (plans 147, 149) The DualSense's light bar colour, sent to every DualSense the bridge holds with SDL_SetGamepadLED, only when it
++   changed (host/oot_leds.c). Once called, the bridge also breathes the microphone LED on a battery of 20 % or less. */
++void rh_leds(int r, int g, int b);
++/* The game's last rumble amplitude 0..1 (the larger of both sides' al / ah), 0 when the last sample is older than 60 ms. */
++float rh_game_rumble_amp(void);
++
 +int rh_option_count(void);
 +const RenHdcOption *rh_option_at(int i);
 +int rh_option_get(const char *key, int *out);
@@ -4636,10 +6625,10 @@ index 00000000..a4c027f8
 +#endif
 diff --git a/host/rh_host.h b/host/rh_host.h
 new file mode 100644
-index 00000000..4d7bfea9
+index 00000000..d6ef9abf
 --- /dev/null
 +++ b/host/rh_host.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,61 @@
 +/* (longshot) RenHDrum host bridge declaration wrapper: Windows uses renhdrum_recomp_bridge.{c,h};
 +   POSIX builds keep clean no-op stubs (Linux builds fall back to Motors / built-in HD rumble).
 +   Always declares the DualSense USB speaker-sharing interface used by host/pad_speaker.c. */
@@ -4685,6 +6674,10 @@ index 00000000..4d7bfea9
 +static inline int rh_pad_claimed(int i) { (void)i; return 0; }
 +static inline void rh_set_enabled(int on) { (void)on; }
 +static inline void rh_set_switch_gen(int gen) { (void)gen; }
++static inline void rh_trigger_preset(int side, uint8_t id, float level) { (void)side, (void)id, (void)level; }
++static inline int rh_hd_triggers_on(void) { return 1; }
++static inline void rh_leds(int r, int g, int b) { (void)r, (void)g, (void)b; }
++static inline float rh_game_rumble_amp(void) { return 0.0f; }
 +static inline const char *rh_status_line(void) { return "HD Rumble is not available on this platform"; }
 +static inline int rh_ds_render_frames(float *out, int frames) { (void)out, (void)frames; return -1; }
 +static inline int rh_option_count(void) { return 0; }
@@ -5698,6 +7691,26 @@ index 948278f8..b9d717e5 100644
      out += ["needs %s, which is not part of the system: a player would need it installed" % i
              for i in deps if not own.match(i)]
      return out
+diff --git a/tests/audio_wave_buffer_release_test.c b/tests/audio_wave_buffer_release_test.c
+index ff76b245..312081fd 100644
+--- a/tests/audio_wave_buffer_release_test.c
++++ b/tests/audio_wave_buffer_release_test.c
+@@ -20,8 +20,14 @@ static void *hos_guest_range(uint64_t a, uint64_t n) { return a < sizeof guest &
+ static void hos_log(const char *format, ...) { (void)format; }
+ /* The sound a wave buffer starts (host/audio_source.c stands behind this in the game): the class the test names, for
+    the samples' address it expects; -1 for a buffer that starts no asset. */
+-enum { AUDIO_SOURCE_NONE };
++enum { AUDIO_SOURCE_NONE = 0, AUDIO_SOURCE_OCARINA = 4, AUDIO_SOURCE_UI = 8 };
+ static int hos_pad_speaker_active(void) { return 1; }
++static int hos_oot_trigger_enabled(void) { return 0; }
++static volatile long long last_ocarina_ns;
++static int64_t hos_now_ns(void) { return 0; }
++#ifndef InterlockedExchange64
++#define InterlockedExchange64(p, v) (*(p) = (v))
++#endif
+ static void hos_audio_source_load_async(void) {}
+ static int hos_audio_source_ready(void) { return 1; }
+ static int source_answer = -1, source_asked;
 diff --git a/tests/menu_model_fixture.py b/tests/menu_model_fixture.py
 index dd99d91c..4219cb35 100644
 --- a/tests/menu_model_fixture.py
@@ -5731,19 +7744,19 @@ index dd99d91c..4219cb35 100644
                     it.setting && it.setting->shown ? 1 : 0);
 diff --git a/tests/test_hd_rumble_menu.py b/tests/test_hd_rumble_menu.py
 new file mode 100644
-index 00000000..badfcc59
+index 00000000..51885956
 --- /dev/null
 +++ b/tests/test_hd_rumble_menu.py
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,199 @@
 +"""The Insert menu's HD Rumble settings page (gpu/vk/menu/hd_rumble.cpp), compiled with the menu model and run with no game.
 +
 +Checks:
 +- menu::build() produces no diagnostics;
 +- the Controls tab places @HD Rumble settings (Kind::Page -> "hd_rumble") immediately after hd_rumble;
-+- the hd_rumble page exposes Status (@hd_rumble_status), Basic (5 rows), Advanced toggle (rh_advanced_toggle, collapsed by
++- the hd_rumble page exposes Status (@hd_rumble_status), Basic (6 rows), Advanced toggle (rh_advanced_toggle, collapsed by
 +  default and expanding all 17 Advanced rows on Input::Activate), Reset (rh_reset), and Credit (rh_credit);
-+- all 22 core renhdrum_options keys (every key except enable_hd_rumble, which stays on Controls as hd_rumble) are present
-+  as rh_<key>, preset_exempt and !restart;
++- all 22 core renhdrum_options keys (every key except enable_hd_rumble, which stays on Controls as hd_rumble) plus the host
++  setting hd_triggers are present as rh_<key>, preset_exempt and !restart;
 +- gpu/vk/vk_api.h bumps MKWVK_API_VERSION >= 46 with HOS_OPT_HD_RUMBLE and (*rh_option), host/rx_backend.c wires
 +  host_rh_option, host/rh_host.h provides the Linux stub, and gpu/vk/menu/hd_rumble.cpp checks host->version >= 46.
 +
@@ -5768,6 +7781,7 @@ index 00000000..badfcc59
 +    "rh_switch_bt_mode",
 +    "rh_dualsense_haptics",
 +    "rh_dualsense_hd_haptics",
++    "rh_hd_triggers",
 +    "rh_dualsense_volume",
 +    "rh_xbox_enabled",
 +)
@@ -5838,11 +7852,11 @@ index 00000000..badfcc59
 +    CHECK(strength && strength->locked() == nullptr);
 +    opts.vibration = 0;
 +
-+    // Page layout & 22 keys (no enable_hd_rumble)
++    // Page layout & 23 keys (22 core + host hd_triggers; no enable_hd_rumble)
 +    CHECK(menu::find("rh_enable_hd_rumble") == nullptr);
 +    static const char* const kBasic[] = {
 +        "rh_switch_bt_mode", "rh_dualsense_haptics", "rh_dualsense_hd_haptics",
-+        "rh_dualsense_volume", "rh_xbox_enabled",
++        "rh_hd_triggers", "rh_dualsense_volume", "rh_xbox_enabled",
 +    };
 +    static const char* const kAdv[] = {
 +        "rh_gain", "rh_low_boost", "rh_usb_no_queue", "rh_envelope_5ms",
@@ -5856,6 +7870,13 @@ index 00000000..badfcc59
 +        CHECK(s && s->preset_exempt && !s->restart);
 +        CHECK(shown_has("hd_rumble", k));
 +    }
++    const auto hd_layout = menu::layout("hd_rumble");
++    const int i_hd_hap = index_in(hd_layout, "rh_dualsense_hd_haptics");
++    const int i_hd_trig = index_in(hd_layout, "rh_hd_triggers");
++    CHECK(i_hd_hap >= 0 && i_hd_trig == i_hd_hap + 1);
++    const menu::Setting* trig = menu::find("rh_hd_triggers");
++    CHECK(trig && trig->kind == menu::Kind::Toggle && trig->value && *trig->value == 1);
++    CHECK(trig && trig->label && !strcmp(trig->label, "DualSense: HD Triggers"));
 +    for (const char* k : kAdv) {
 +        const menu::Setting* s = menu::find(k);
 +        CHECK(s && s->preset_exempt && !s->restart);
@@ -5885,7 +7906,7 @@ index 00000000..badfcc59
 +    for (const char* k : kAdv) CHECK(!shown_has("hd_rumble", k));
 +
 +    if (failures) return 1;
-+    printf("PASS: hd_rumble menu page (22 keys, collapsed/expanded Advanced, Reset, Status, Credit)\n");
++    printf("PASS: hd_rumble menu page (23 keys, collapsed/expanded Advanced, Reset, Status, Credit)\n");
 +    return 0;
 +}
 +'''
@@ -5902,7 +7923,7 @@ index 00000000..badfcc59
 +    args = parser.parse_args()
 +
 +    all_keys = set(BASIC_KEYS) | set(ADVANCED_KEYS) | {"rh_advanced_toggle", "rh_reset", "rh_credit"}
-+    check(len(BASIC_KEYS) + len(ADVANCED_KEYS) == 22, "expected 22 core keys")
++    check(len(BASIC_KEYS) + len(ADVANCED_KEYS) == 23, "expected 23 keys")
 +    check(not (all_keys & set(FROZEN)), "hd_rumble key collides with FROZEN ini keys: %s" % sorted(all_keys & set(FROZEN)))
 +
 +    api = (ROOT / "gpu" / "vk" / "vk_api.h").read_text(encoding="utf-8")
@@ -5926,6 +7947,19 @@ index 00000000..badfcc59
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/tests/test_input_background.py b/tests/test_input_background.py
+index 91addcab..8146521e 100644
+--- a/tests/test_input_background.py
++++ b/tests/test_input_background.py
+@@ -112,6 +112,8 @@ volatile int hos_oot_live_action;
+ int hos_oot_flight_shortcut_ready(void) { CHECK(!"unexpected cheat readiness query"); return 0; }
+ void rx_option_set(int id, int value) { (void)id; (void)value; CHECK(!"unexpected cheat option change"); }
+ void hos_oot_autoload_input(void) {}
++int hos_pad_touch_zone_held(void) { return -1; }   /* (plan 147: the touchpad halves, not under test here) */
++uint64_t hos_oot_trigger_frame(uint64_t buttons, int menu_open) { (void)menu_open; return buttons; }
+ void hos_gameplay_hud_toggle(void) { CHECK(!"unexpected HUD toggle with the shortcut unbound"); }
+ """
+     # (the host's own stick, for the game's menus' mouse (host/oot_menu.c): none here; the player's input time it hides
 diff --git a/tests/test_menu_ini_keys.py b/tests/test_menu_ini_keys.py
 index 5844f06b..e0b38a3b 100644
 --- a/tests/test_menu_ini_keys.py
@@ -5964,6 +7998,772 @@ index 61c560c0..d6baf86c 100644
  
  GRAPHICS = [
      ("Resolution and upscaling", ["Aspect ratio", "Output resolution", "Profile", "Upscaler", "DLSS model", "Render resolution", "Sharpness"]),
+diff --git a/tests/test_oot_pad_light.py b/tests/test_oot_pad_light.py
+new file mode 100644
+index 00000000..f84be3e9
+--- /dev/null
++++ b/tests/test_oot_pad_light.py
+@@ -0,0 +1,135 @@
++"""DualSense lights and touchpad halves in OoT (host/oot_pad_light.h, plans 147 and 149): the light bar (a red flash on a
++hit, an orange breath at one heart or less), the microphone LED on a low battery, and a touchpad click's half -> the map or the bag.
++
++Compiles host/oot_pad_light.h as a small standalone C test without the game.
++
++python -I -B tests/test_oot_pad_light.py [--cc gcc]
++"""
++import argparse
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from compiler_command import compiler_command, parse_compiler  # noqa: E402
++
++RUN_ALL_ARGS = ["--cc", "{cc}"]
++ROOT = Path(__file__).resolve().parents[1]
++
++FIXTURE = r"""
++#include <assert.h>
++#include <stdio.h>
++#include "oot_pad_light.h"
++
++static const int64_t S = 1000000000LL, MS = 1000000LL;
++
++static int is(OotBar b, int r, int g, int bl) { return b.valid && b.r == r && b.g == g && b.b == bl; }
++
++int main(void) {
++    OotBarState st = OOT_BAR_STATE_INIT;
++    /* life not known: leave the bar alone */
++    assert(!oot_bar_color(&st, -1, 12, 0).valid && !oot_bar_color(&st, 12, 0, 0).valid);
++
++    /* full life, no event: the pad's own colour (SDL's player 1: 0, 0, 64) */
++    assert(is(oot_bar_color(&st, 12, 12, 1 * S), OOT_BAR_BASE_R, OOT_BAR_BASE_G, OOT_BAR_BASE_B));
++    assert(is(oot_bar_color(&st, 12, 12, 2 * S), 0, 0, 64));
++
++    /* a hit (12 -> 10): red for 150 ms, then back */
++    assert(is(oot_bar_color(&st, 10, 12, 3 * S), 255, 0, 0));
++    assert(is(oot_bar_color(&st, 10, 12, 3 * S + 149 * MS), 255, 0, 0));
++    assert(is(oot_bar_color(&st, 10, 12, 3 * S + 150 * MS), 0, 0, 64));
++
++    /* a second hit 300 ms after the first began (flash ended 150 ms ago, under the 350 ms gap): no flash */
++    assert(is(oot_bar_color(&st, 8, 12, 3 * S + 300 * MS), 0, 0, 64));
++    /* a hit 500 ms after the first began: flash */
++    assert(is(oot_bar_color(&st, 6, 12, 3 * S + 500 * MS), 255, 0, 0));
++
++    /* at most 2 flashes a second, whatever the hits: count the flash starts over 10 s of a hit every 100 ms */
++    {
++        OotBarState s2 = OOT_BAR_STATE_INIT;
++        int flashes = 0, was = 0;
++        int64_t life = 400;
++        (void)oot_bar_color(&s2, life, 400, 0);
++        for (int64_t t = 0; t < 10 * S; t += 10 * MS) {
++            if (t % (100 * MS) == 0 && life > 5) life--;
++            const int red = oot_bar_color(&s2, life, 400, t + MS).r == 255;
++            flashes += red && !was;
++            was = red;
++        }
++        assert(flashes <= 20 && flashes >= 15);
++    }
++
++    /* healing is no hit; a refill then a hit is */
++    st = (OotBarState)OOT_BAR_STATE_INIT;
++    (void)oot_bar_color(&st, 8, 12, 0);
++    assert(is(oot_bar_color(&st, 10, 12, 10 * S), 0, 0, 64));
++    assert(is(oot_bar_color(&st, 9, 12, 11 * S), 255, 0, 0));
++
++    /* a hit that kills (life 0): no flash, the bar goes back to the base */
++    st = (OotBarState)OOT_BAR_STATE_INIT;
++    (void)oot_bar_color(&st, 2, 12, 0);
++    assert(is(oot_bar_color(&st, 0, 12, 1 * S), 0, 0, 64));
++
++    /* one heart or less (1..4): the orange breath, 1 s a cycle: dim 15 % at the start, full at half a cycle */
++    st = (OotBarState)OOT_BAR_STATE_INIT;
++    (void)oot_bar_color(&st, 4, 12, 0);
++    OotBar b = oot_bar_color(&st, 4, 12, 20 * S);              /* t = 0: 0.15 */
++    assert(b.valid && b.r == 38 && b.g == 10 && b.b == 0);     /* 255 * 0.15 = 38.25, 64 * 0.15 = 9.6 */
++    b = oot_bar_color(&st, 4, 12, 20 * S + S / 2);             /* t = 0.5: 1.0 */
++    assert(is(b, 255, 64, 0));
++    b = oot_bar_color(&st, 4, 12, 21 * S);                     /* a whole cycle on: the same as t = 0 */
++    assert(b.r == 38 && b.g == 10);
++    b = oot_bar_color(&st, 4, 12, 21 * S + S / 4);             /* t = 0.25: 0.15 + 0.85 * 0.5 = 0.575 */
++    assert(b.r == 147 && b.g == 37 && b.b == 0);
++    assert(oot_bar_color(&st, 1, 80, 22 * S + S / 2).r == 255);   /* a quarter of 20 hearts: low too */
++    b = oot_bar_color(&st, 5, 12, 24 * S);                     /* a heart and a quarter: not low */
++    assert(is(b, 0, 0, 64));
++
++    /* a hit over the breath: red wins, then the breath again */
++    st = (OotBarState)OOT_BAR_STATE_INIT;
++    (void)oot_bar_color(&st, 4, 12, 0);
++    assert(is(oot_bar_color(&st, 3, 12, 30 * S + S / 2), 255, 0, 0));
++    b = oot_bar_color(&st, 3, 12, 30 * S + S / 2 + 200 * MS);
++    assert(b.r != 255 || b.g != 0);                            /* the breath (orange), not the flash */
++
++    /* the microphone LED: breathing at 20 % or less on a battery, off above 25 %, charging / wired / unknown: off, a band between */
++    assert(oot_mic_mode(1, 20, 0) == 2 && oot_mic_mode(1, 5, 0) == 2 && oot_mic_mode(1, 0, 0) == 2);
++    assert(oot_mic_mode(1, 21, 0) == 0 && oot_mic_mode(1, 25, 0) == 0);   /* (rising: the band keeps what it was) */
++    assert(oot_mic_mode(1, 22, 2) == 2 && oot_mic_mode(1, 25, 2) == 2);
++    assert(oot_mic_mode(1, 26, 2) == 0 && oot_mic_mode(1, 90, 2) == 0);
++    assert(oot_mic_mode(3, 10, 2) == 0 && oot_mic_mode(4, 100, 2) == 0 && oot_mic_mode(2, -1, 2) == 0);   /* charging, charged, no battery */
++    assert(oot_mic_mode(0, 10, 2) == 0 && oot_mic_mode(-1, 10, 2) == 0 && oot_mic_mode(1, -1, 2) == 0);   /* unknown, error */
++
++    /* the touchpad: left half = the map, right half = the bag, the middle goes right */
++    assert(oot_touch_zone(0.0f) == OOT_ZONE_MAP && oot_touch_zone(0.49f) == OOT_ZONE_MAP);
++    assert(oot_touch_zone(0.5f) == OOT_ZONE_BAG && oot_touch_zone(0.51f) == OOT_ZONE_BAG && oot_touch_zone(1.0f) == OOT_ZONE_BAG);
++
++    puts("PASS: oot_pad_light rules");
++    return 0;
++}
++"""
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--cc", default=None)
++    args = parser.parse_args()
++    cc = parse_compiler(args.cc) if args.cc else compiler_command("CC", "gcc", "clang")
++    flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
++    with tempfile.TemporaryDirectory(prefix="oot-pad-light-") as tmp:
++        src = Path(tmp) / "t.c"
++        exe = Path(tmp) / "t.exe"
++        src.write_text(FIXTURE, encoding="utf-8")
++        subprocess.run(
++            cc + ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "host"), str(src), "-o", str(exe)],
++            check=True,
++            creationflags=flags,
++            timeout=60,
++        )
++        subprocess.run([str(exe)], check=True, creationflags=flags, timeout=30)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_oot_trigger.py b/tests/test_oot_trigger.py
+new file mode 100644
+index 00000000..2f49356d
+--- /dev/null
++++ b/tests/test_oot_trigger.py
+@@ -0,0 +1,542 @@
++"""OoT adaptive trigger preset rules (host/oot_trigger.h, plan 143 6c): item on ZR, ammo ramp, shot pulse, hookshot, menu/audio Off.
++
++Compiles host/oot_trigger.h as a small standalone C test without the game.
++
++python -I -B tests/test_oot_trigger.py [--cc gcc]
++"""
++import argparse
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from compiler_command import compiler_command, parse_compiler  # noqa: E402
++
++RUN_ALL_ARGS = ["--cc", "{cc}"]
++ROOT = Path(__file__).resolve().parents[1]
++
++FIXTURE = r"""
++#include <assert.h>
++#include <math.h>
++#include <stdio.h>
++#include "oot_trigger.h"
++
++static int nearf(float a, float b) { return fabsf(a - b) < 1e-4f; }
++static const int64_t MS = 1000000LL;
++static const OotTrigCfg cfg = {
++    OOT_TRIG_SLING_DEFAULT, OOT_TRIG_BOW_DEFAULT, OOT_TRIG_HOOK_DEFAULT, OOT_TRIG_DIN_DEFAULT, OOT_TRIG_HOOK_PULSE_DEFAULT,
++    1, OOT_TRIG_DEEP_AT_DEFAULT, OOT_TRIG_HAMMER_DEFAULT,
++    OOT_TRIG_RUMBLE_ON_DEFAULT, OOT_TRIG_HAMMER_HIT_DEFAULT, OOT_TRIG_HAMMER_PULSE_DEFAULT, OOT_TRIG_QUAKE_DEFAULT,
++    1, OOT_TRIG_CANCEL_AFTER_MS_DEFAULT, OOT_TRIG_RUMBLE_OFF_DEFAULT,
++};
++static const OotTrigCfg cfg_nodeep = {
++    OOT_TRIG_SLING_DEFAULT, OOT_TRIG_BOW_DEFAULT, OOT_TRIG_HOOK_DEFAULT, OOT_TRIG_DIN_DEFAULT, OOT_TRIG_HOOK_PULSE_DEFAULT,
++    0, OOT_TRIG_DEEP_AT_DEFAULT, OOT_TRIG_HAMMER_DEFAULT,
++    OOT_TRIG_RUMBLE_ON_DEFAULT, OOT_TRIG_HAMMER_HIT_DEFAULT, OOT_TRIG_HAMMER_PULSE_DEFAULT, OOT_TRIG_QUAKE_DEFAULT,
++    1, OOT_TRIG_CANCEL_AFTER_MS_DEFAULT, OOT_TRIG_RUMBLE_OFF_DEFAULT,
++};
++
++static OotTrigIn mk(int64_t t_ms, int sel, int64_t arrows, int64_t seeds, int verb, float depth) {
++    OotTrigIn in = {t_ms * MS, sel, arrows, seeds, verb, depth, 0, 0, depth >= 0.25f, 0.0f};   /* the pad's ZR bit: on from R2 0.25 */
++    return in;
++}
++static OotTrigIn mkr(int64_t t_ms, int sel, int verb, float depth, float rumble) {
++    OotTrigIn in = mk(t_ms, sel, 0, 0, verb, depth);
++    in.rumble = rumble;
++    return in;
++}
++static OotTrigOut ev(OotTrigState *st, OotTrigIn in) { return oot_trigger_eval(st, &cfg, &in); }
++/* three calls 50 ms apart with R2 let go: the item has held >= 80 ms, so it counts */
++static void settle(OotTrigState *st, int64_t *t, int sel, int64_t arrows, int64_t seeds) {
++    for (int i = 0; i < 3; i++) { ev(st, mk(*t, sel, arrows, seeds, 40, 0.0f)); *t += 50; }
++}
++
++int main(void) {
++    OotTrigState st = OOT_TRIG_STATE_INIT;
++    int64_t t = 1000;
++    OotTrigOut o;
++
++    /* Unknown / unreadable item (-1), Boomerang, a strange item: R2 pulled -> nothing (layer 1) */
++    settle(&st, &t, -1, 5, 5);
++    o = ev(&st, mk(t, -1, 5, 5, 40, 0.9f));
++    assert(!o.send_l && !o.send_r && o.rule == OOT_RULE_NONE);
++    settle(&st, &t, OOT_SEL_BOOMERANG, 5, 5);
++    o = ev(&st, mk(t, OOT_SEL_BOOMERANG, 5, 5, 40, 0.9f));
++    assert(!o.send_r && o.rule == OOT_RULE_NONE && o.sel == OOT_SEL_BOOMERANG);
++    settle(&st, &t, 0x77, 5, 5);
++    o = ev(&st, mk(t, 0x77, 5, 5, 40, 0.9f));
++    assert(!o.send_r);
++
++    /* Slingshot, seeds 28: R2 under 3 % -> nothing; pulled -> TENSION 0.5 at once, whatever the time or depth */
++    settle(&st, &t, OOT_SEL_SLING, 7, 28);
++    o = ev(&st, mk(t, OOT_SEL_SLING, 7, 28, 40, 0.02f));
++    assert(!o.send_r && !o.send_l);
++    t += 100;
++    o = ev(&st, mk(t, OOT_SEL_SLING, 7, 28, 40, 0.1f));
++    assert(o.send_r && o.id_r == RENHDRUM_TRIG_TENSION && nearf(o.level_r, 0.5f) && o.rule == OOT_RULE_AIM && !o.send_l);
++    assert(o.ammo == 28);
++    o = ev(&st, mk(t + 500, OOT_SEL_SLING, 7, 28, 40, 0.5f));
++    assert(o.id_r == RENHDRUM_TRIG_TENSION && nearf(o.level_r, 0.5f));
++    o = ev(&st, mk(t + 3000, OOT_SEL_SLING, 7, 28, 40, 0.9f));
++    assert(nearf(o.level_r, 0.5f));
++
++    /* Seeds 28 -> 27: one OFF (no pulse) even though R2 is already let go; the next frame nothing */
++    o = ev(&st, mk(t + 3016, OOT_SEL_SLING, 7, 27, 40, 0.0f));
++    assert(o.send_r && o.id_r == RENHDRUM_TRIG_OFF && o.rule == OOT_RULE_PULSE && !o.send_l && !o.clear_zr);
++    o = ev(&st, mk(t + 3032, OOT_SEL_SLING, 7, 27, 40, 0.0f));
++    assert(!o.send_r && o.rule == OOT_RULE_NONE);
++    /* arrows moving is no shot for the slingshot; seeds going up (a pickup) is none either */
++    o = ev(&st, mk(t + 3048, OOT_SEL_SLING, 3, 27, 40, 0.0f));
++    assert(!o.send_r);
++    o = ev(&st, mk(t + 3064, OOT_SEL_SLING, 3, 30, 40, 0.0f));
++    assert(!o.send_r);
++    t += 4000;
++
++    t += 4000;
++
++    /* Bow, arrows 7: TENSION 0.75; arrows 0: no TENSION (smooth), but the shot that emptied it still sends OFF */
++    settle(&st, &t, OOT_SEL_BOW, 7, 30);
++    o = ev(&st, mk(t, OOT_SEL_BOW, 7, 30, 40, 0.5f));
++    assert(o.id_r == RENHDRUM_TRIG_TENSION && nearf(o.level_r, 0.75f) && o.ammo == 7);
++    o = ev(&st, mk(t + 1000, OOT_SEL_BOW, 7, 30, 40, 0.5f));
++    assert(nearf(o.level_r, 0.75f));
++    o = ev(&st, mk(t + 1016, OOT_SEL_BOW, 0, 30, 40, 0.0f));
++    assert(o.rule == OOT_RULE_PULSE && o.id_r == RENHDRUM_TRIG_OFF);
++    o = ev(&st, mk(t + 1032, OOT_SEL_BOW, 0, 30, 40, 0.8f));
++    assert(!o.send_r && o.rule == OOT_RULE_NONE && o.ammo == 0);
++    t += 2000;
++
++    /* Hookshot / Longshot: TWO_STAGE 0.6 while held; verb turning to 5 -> pulse once; verb staying 5 -> nothing more */
++    settle(&st, &t, OOT_SEL_HOOK, 0, 0);
++    o = ev(&st, mk(t, OOT_SEL_HOOK, 0, 0, 40, 0.01f));
++    assert(!o.send_r);
++    o = ev(&st, mk(t + 16, OOT_SEL_HOOK, 0, 0, 40, 0.6f));
++    assert(o.id_r == RENHDRUM_TRIG_TWO_STAGE && nearf(o.level_r, 0.6f) && !o.send_l && o.rule == OOT_RULE_HOOK);
++    o = ev(&st, mk(t + 32, OOT_SEL_HOOK, 0, 0, OOT_VERB_HOOK_SHOOT, 1.0f));
++    assert(o.id_r == RENHDRUM_TRIG_IMPACT_PULSE && o.rule == OOT_RULE_PULSE && nearf(o.level_r, 1.0f));
++    o = ev(&st, mk(t + 48, OOT_SEL_HOOK, 0, 0, OOT_VERB_HOOK_SHOOT, 1.0f));
++    assert(!o.send_r);
++    t += 500;
++    settle(&st, &t, OOT_SEL_LONGSHOT, 0, 0);
++    o = ev(&st, mk(t, OOT_SEL_LONGSHOT, 0, 0, 40, 0.6f));
++    assert(o.id_r == RENHDRUM_TRIG_TWO_STAGE);
++    o = ev(&st, mk(t + 16, OOT_SEL_LONGSHOT, 0, 0, OOT_VERB_HOOK_SHOOT, 0.6f));
++    assert(o.id_r == RENHDRUM_TRIG_IMPACT_PULSE);
++    /* verb 5 with a bow on ZR is not a shot */
++    settle(&st, &t, OOT_SEL_BOW, 7, 30);
++    o = ev(&st, mk(t, OOT_SEL_BOW, 7, 30, OOT_VERB_HOOK_SHOOT, 0.0f));
++    assert(!o.send_r);
++
++    /* Debounce: a new item counts only after 80 ms; a flick of 60 ms changes nothing */
++    settle(&st, &t, OOT_SEL_BOW, 7, 30);
++    o = ev(&st, mk(t, OOT_SEL_SLING, 7, 30, 40, 0.5f));
++    assert(o.sel == OOT_SEL_BOW && o.id_r == RENHDRUM_TRIG_TENSION);
++    o = ev(&st, mk(t + 60, OOT_SEL_BOW, 7, 30, 40, 0.5f));
++    assert(o.sel == OOT_SEL_BOW);
++    o = ev(&st, mk(t + 70, OOT_SEL_SLING, 7, 30, 40, 0.5f));
++    o = ev(&st, mk(t + 140, OOT_SEL_SLING, 7, 30, 40, 0.5f));
++    assert(o.sel == OOT_SEL_BOW);
++    o = ev(&st, mk(t + 150, OOT_SEL_SLING, 7, 30, 40, 0.5f));
++    assert(o.sel == OOT_SEL_SLING);
++    t += 5000;
++
++    /* Pause menu and Ocarina sound (<= 300 ms): both OFF, beat everything; an arrow used inside the menu is no shot */
++    settle(&st, &t, OOT_SEL_BOW, 7, 30);
++    OotTrigIn in = mk(t, OOT_SEL_BOW, 7, 30, 40, 0.9f);
++    in.menu_open = 1;
++    o = oot_trigger_eval(&st, &cfg, &in);
++    assert(o.send_l && o.id_l == RENHDRUM_TRIG_OFF && o.send_r && o.id_r == RENHDRUM_TRIG_OFF && o.rule == OOT_RULE_SMOOTH);
++    in = mk(t + 16, OOT_SEL_BOW, 6, 30, 40, 0.9f);
++    in.menu_open = 1;
++    o = oot_trigger_eval(&st, &cfg, &in);
++    assert(o.id_r == RENHDRUM_TRIG_OFF);
++    in = mk(t + 32, OOT_SEL_BOW, 6, 30, 40, 0.9f);
++    o = oot_trigger_eval(&st, &cfg, &in);
++    assert(o.id_r == RENHDRUM_TRIG_TENSION);
++    in = mk(t + 1000, OOT_SEL_BOW, 6, 30, 40, 0.9f);
++    in.last_ocarina_ns = (t + 900) * MS;
++    o = oot_trigger_eval(&st, &cfg, &in);
++    assert(o.id_l == RENHDRUM_TRIG_OFF && o.id_r == RENHDRUM_TRIG_OFF && o.send_l && o.send_r);
++    in.last_ocarina_ns = (t + 1000) * MS - 300 * MS;   /* exactly 300 ms: still quiet */
++    o = oot_trigger_eval(&st, &cfg, &in);
++    assert(o.id_r == RENHDRUM_TRIG_OFF);
++    in.last_ocarina_ns = (t + 1000) * MS - 301 * MS;
++    o = oot_trigger_eval(&st, &cfg, &in);
++    assert(o.id_r == RENHDRUM_TRIG_TENSION);
++
++    /* L2 never gets a preset outside the Off of the menu / Ocarina */
++    assert(!o.send_l);
++
++    /* Fire / ice / light arrows (0x2E, 0x2F, 0x30) are bows: ammo = arrows; 0x09 is nothing */
++    int arrows_sel[3] = {OOT_SEL_ARROW_FIRE, OOT_SEL_ARROW_ICE, OOT_SEL_ARROW_LIGHT};
++    for (int i = 0; i < 3; i++) {
++        settle(&st, &t, arrows_sel[i], 7, 30);
++        o = ev(&st, mk(t, arrows_sel[i], 7, 30, 40, 0.5f));
++        assert(o.id_r == RENHDRUM_TRIG_TENSION && nearf(o.level_r, 0.75f));
++        o = ev(&st, mk(t + 16, arrows_sel[i], 7, 30, 40, 0.0f));
++        t += 1000;
++    }
++    settle(&st, &t, 0x09, 7, 30);
++    o = ev(&st, mk(t, 0x09, 7, 30, 40, 0.5f));
++    assert(!o.send_r);
++    t += 1000;
++
++    /* Din (0x0A): ENGINE_ROUGH 0.6 only with verb 243 and R2 pulled; Farore / Nayru (0x0B, 0x0C): nothing */
++    settle(&st, &t, OOT_SEL_DIN, 0, 0);
++    o = ev(&st, mk(t, OOT_SEL_DIN, 0, 0, 40, 0.5f));
++    assert(!o.send_r);   /* not casting */
++    o = ev(&st, mk(t + 16, OOT_SEL_DIN, 0, 0, OOT_VERB_DIN_CAST, 0.02f));
++    assert(!o.send_r);   /* R2 under 3 % */
++    /* the hum runs from the start of the cast (verb 243), the game's rumble or not */
++    o = ev(&st, mkr(t + 24, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 0.5f, 0.0f));
++    assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH && nearf(o.level_r, 0.6f) && o.rule == OOT_RULE_SPELL && !o.send_l && !o.clear_zr);
++    o = ev(&st, mkr(t + 100, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 1.0f, 0.0f));
++    assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH && !o.clear_zr);
++    /* the game's rumble (small real numbers) comes: still the hum; it jitters between OFF and ON levels: still on */
++    o = ev(&st, mkr(t + 200, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 1.0f, 0.05f));
++    assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH);
++    o = ev(&st, mkr(t + 216, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 1.0f, 0.02f));
++    assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH);
++    /* under RUMBLE_OFF: still on for 100 ms, then one OFF; the cast going on does not bring the hum back */
++    o = ev(&st, mkr(t + 232, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 1.0f, 0.0f));
++    assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH);
++    o = ev(&st, mkr(t + 300, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 1.0f, 0.01f));
++    assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH);
++    o = ev(&st, mkr(t + 340, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 1.0f, 0.0f));
++    assert(o.send_r && o.id_r == RENHDRUM_TRIG_OFF);
++    o = ev(&st, mkr(t + 356, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 1.0f, 0.0f));
++    assert(!o.send_r);
++    o = ev(&st, mk(t + 380, OOT_SEL_DIN, 0, 0, 40, 0.0f));
++    /* the next cast starts clean: the hum again at once; the cast ending (verb leaves 243) = one OFF */
++    o = ev(&st, mkr(t + 400, OOT_SEL_DIN, OOT_VERB_DIN_CAST, 0.5f, 0.0f));
++    assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH);
++    o = ev(&st, mkr(t + 416, OOT_SEL_DIN, 40, 0.5f, 0.0f));
++    assert(o.send_r && o.id_r == RENHDRUM_TRIG_OFF);
++    o = ev(&st, mk(t + 192, OOT_SEL_DIN, 0, 0, 40, 0.0f));
++    t += 1000;
++    for (int s2 = 0x0B; s2 <= 0x0C; s2++) {
++        settle(&st, &t, s2, 0, 0);
++        o = ev(&st, mk(t, s2, 0, 0, OOT_VERB_DIN_CAST, 0.5f));
++        assert(!o.send_r);
++        t += 1000;
++    }
++    /* a quick flick to Din (< 80 ms) does not count */
++    settle(&st, &t, OOT_SEL_BOW, 7, 30);
++    o = ev(&st, mk(t, OOT_SEL_DIN, 7, 30, OOT_VERB_DIN_CAST, 0.5f));
++    assert(o.sel == OOT_SEL_BOW && o.id_r != RENHDRUM_TRIG_ENGINE_ROUGH);
++    t += 1000;
++
++    /* Sling / bow never deep fire: R2 squeezed to the end only keeps the TENSION; ZR is untouched */
++    settle(&st, &t, OOT_SEL_BOW, 7, 30);
++    o = ev(&st, mk(t, OOT_SEL_BOW, 7, 30, 40, 0.5f));
++    o = ev(&st, mk(t + 16, OOT_SEL_BOW, 7, 30, 40, 0.97f));
++    assert(!o.clear_zr && o.id_r == RENHDRUM_TRIG_TENSION);
++    o = ev(&st, mk(t + 32, OOT_SEL_BOW, 7, 30, 40, 1.0f));
++    assert(!o.clear_zr && o.id_r == RENHDRUM_TRIG_TENSION);
++    o = ev(&st, mk(t + 48, OOT_SEL_BOW, 6, 30, 40, 0.0f));
++    assert(!o.clear_zr && o.id_r == RENHDRUM_TRIG_OFF);
++    t += 1000;
++    settle(&st, &t, OOT_SEL_SLING, 7, 30);
++    o = ev(&st, mk(t, OOT_SEL_SLING, 7, 30, 40, 0.5f));
++    o = ev(&st, mk(t + 16, OOT_SEL_SLING, 7, 30, 40, 1.0f));
++    assert(!o.clear_zr);
++    o = ev(&st, mk(t + 32, OOT_SEL_SLING, 7, 30, 40, 0.0f));
++    t += 1000;
++
++    /* Hookshot deep fire: analog pull through the notch to 0.95 -> ZR let go + latch (no TWO_STAGE while latched) */
++    settle(&st, &t, OOT_SEL_HOOK, 0, 0);
++    o = ev(&st, mk(t, OOT_SEL_HOOK, 0, 0, 40, 0.4f));
++    assert(o.id_r == RENHDRUM_TRIG_TWO_STAGE && !o.clear_zr);
++    o = ev(&st, mk(t + 16, OOT_SEL_HOOK, 0, 0, 40, 0.9f));
++    assert(!o.clear_zr);   /* under DEEP_AT */
++    o = ev(&st, mk(t + 32, OOT_SEL_HOOK, 0, 0, 40, 0.97f));
++    assert(o.clear_zr && o.send_r && o.id_r == RENHDRUM_TRIG_OFF);   /* the notch stops: one OFF */
++    o = ev(&st, mk(t + 48, OOT_SEL_HOOK, 0, 0, OOT_VERB_HOOK_SHOOT, 1.0f));   /* flies: pulse, still latched */
++    assert(o.clear_zr && o.id_r == RENHDRUM_TRIG_IMPACT_PULSE && o.rule == OOT_RULE_PULSE && nearf(o.level_r, 1.0f));
++    o = ev(&st, mk(t + 64, OOT_SEL_HOOK, 0, 0, 40, 0.5f));   /* back over 0.3: still latched, no TWO_STAGE */
++    assert(o.clear_zr && !o.send_r);
++    o = ev(&st, mk(t + 80, OOT_SEL_HOOK, 0, 0, 40, 0.2f));   /* under 0.3: open */
++    assert(!o.clear_zr);
++    o = ev(&st, mk(t + 96, OOT_SEL_HOOK, 0, 0, 40, 0.5f));   /* aims again */
++    assert(!o.clear_zr && o.id_r == RENHDRUM_TRIG_TWO_STAGE);
++    o = ev(&st, mk(t + 112, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++    t += 1000;
++
++    /* Digital ZR (jumps 0 -> 1.0, never through 0.1..0.8): the Hookshot does not deep fire */
++    settle(&st, &t, OOT_SEL_HOOK, 0, 0);
++    o = ev(&st, mk(t, OOT_SEL_HOOK, 0, 0, 40, 1.0f));
++    assert(!o.clear_zr && o.id_r == RENHDRUM_TRIG_TWO_STAGE);
++    o = ev(&st, mk(t + 16, OOT_SEL_HOOK, 0, 0, 40, 1.0f));
++    assert(!o.clear_zr);
++    o = ev(&st, mk(t + 32, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++    t += 1000;
++
++    /* Other items (boomerang), empty bow, unreadable item, menu: ZR untouched */
++    settle(&st, &t, OOT_SEL_BOOMERANG, 5, 5);
++    o = ev(&st, mk(t, OOT_SEL_BOOMERANG, 5, 5, 40, 0.4f));
++    o = ev(&st, mk(t + 16, OOT_SEL_BOOMERANG, 5, 5, 40, 1.0f));
++    assert(!o.clear_zr);
++    o = ev(&st, mk(t + 32, OOT_SEL_BOOMERANG, 5, 5, 40, 0.0f));
++    t += 1000;
++    settle(&st, &t, OOT_SEL_BOW, 0, 30);
++    o = ev(&st, mk(t, OOT_SEL_BOW, 0, 30, 40, 0.4f));
++    o = ev(&st, mk(t + 16, OOT_SEL_BOW, 0, 30, 40, 1.0f));
++    assert(!o.clear_zr);
++    o = ev(&st, mk(t + 32, OOT_SEL_BOW, 0, 30, 40, 0.0f));
++    t += 1000;
++    settle(&st, &t, -1, 5, 5);
++    o = ev(&st, mk(t, -1, 5, 5, 40, 0.4f));
++    o = ev(&st, mk(t + 16, -1, 5, 5, 40, 1.0f));
++    assert(!o.clear_zr);
++    o = ev(&st, mk(t + 32, -1, 5, 5, 40, 0.0f));
++    t += 1000;
++    settle(&st, &t, OOT_SEL_HOOK, 0, 0);
++    o = ev(&st, mk(t, OOT_SEL_HOOK, 0, 0, 40, 0.4f));
++    in = mk(t + 16, OOT_SEL_HOOK, 0, 0, 40, 1.0f);
++    in.menu_open = 1;
++    o = oot_trigger_eval(&st, &cfg, &in);
++    assert(!o.clear_zr && o.rule == OOT_RULE_SMOOTH);
++    o = ev(&st, mk(t + 32, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++    t += 1000;
++
++    /* HOS_TRIG_DEEP_FIRE=0: no change to the buttons */
++    settle(&st, &t, OOT_SEL_HOOK, 0, 0);
++    {
++        OotTrigIn a = mk(t, OOT_SEL_HOOK, 0, 0, 40, 0.4f);
++        o = oot_trigger_eval(&st, &cfg_nodeep, &a);
++        a = mk(t + 16, OOT_SEL_HOOK, 0, 0, 40, 1.0f);
++        o = oot_trigger_eval(&st, &cfg_nodeep, &a);
++        assert(!o.clear_zr && o.id_r == RENHDRUM_TRIG_TWO_STAGE);
++    }
++
++    /* Megaton Hammer (0x07): HEAVY_LOAD 0.7 only with verb 112 and R2 pulled; other verb / R2 under 3 %: nothing */
++    {
++        OotTrigState hs = OOT_TRIG_STATE_INIT;
++        int64_t ht = 1000;
++        settle(&hs, &ht, OOT_SEL_HAMMER, 0, 0);
++        o = ev(&hs, mk(ht, OOT_SEL_HAMMER, 0, 0, 40, 0.5f));
++        assert(!o.send_r);
++        o = ev(&hs, mk(ht + 16, OOT_SEL_HAMMER, 0, 0, OOT_VERB_HAMMER, 0.02f));
++        assert(!o.send_r);
++        o = ev(&hs, mk(ht + 32, OOT_SEL_HAMMER, 0, 0, OOT_VERB_HAMMER, 0.5f));
++        assert(o.id_r == RENHDRUM_TRIG_HEAVY_LOAD && nearf(o.level_r, 0.7f) && o.rule == OOT_RULE_HAMMER && !o.send_l && !o.clear_zr);
++        o = ev(&hs, mk(ht + 48, OOT_SEL_HAMMER, 0, 0, OOT_VERB_HAMMER, 1.0f));
++        assert(o.id_r == RENHDRUM_TRIG_HEAVY_LOAD);
++        /* verb 112 over: one OFF at once, then nothing */
++        o = ev(&hs, mk(ht + 64, OOT_SEL_HAMMER, 0, 0, 40, 1.0f));
++        assert(o.send_r && o.id_r == RENHDRUM_TRIG_OFF && !o.send_l);
++        o = ev(&hs, mk(ht + 80, OOT_SEL_HAMMER, 0, 0, 40, 1.0f));
++        assert(!o.send_r);
++    }
++
++    /* A sustained preset that stops being reported: one OFF at once (R2 let go, Din over, Hookshot latch), never repeated */
++    {
++        OotTrigState hs = OOT_TRIG_STATE_INIT;
++        int64_t ht = 1000;
++        settle(&hs, &ht, OOT_SEL_BOW, 7, 30);
++        o = ev(&hs, mk(ht, OOT_SEL_BOW, 7, 30, 40, 0.5f));
++        assert(o.id_r == RENHDRUM_TRIG_TENSION);
++        o = ev(&hs, mk(ht + 16, OOT_SEL_BOW, 7, 30, 40, 0.0f));
++        assert(o.send_r && o.id_r == RENHDRUM_TRIG_OFF && o.rule == OOT_RULE_NONE && !o.send_l);
++        o = ev(&hs, mk(ht + 32, OOT_SEL_BOW, 7, 30, 40, 0.0f));
++        assert(!o.send_r);
++        ht += 1000;
++        /* Hookshot: the frame that latches stops TWO_STAGE -> one OFF; the pulse after it still goes; no OFF after the pulse */
++        settle(&hs, &ht, OOT_SEL_HOOK, 0, 0);
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.4f));
++        assert(o.id_r == RENHDRUM_TRIG_TWO_STAGE);
++        o = ev(&hs, mk(ht + 16, OOT_SEL_HOOK, 0, 0, 40, 0.97f));
++        assert(o.clear_zr && o.send_r && o.id_r == RENHDRUM_TRIG_OFF);
++        o = ev(&hs, mk(ht + 32, OOT_SEL_HOOK, 0, 0, 40, 1.0f));
++        assert(o.clear_zr && !o.send_r);
++        o = ev(&hs, mk(ht + 48, OOT_SEL_HOOK, 0, 0, OOT_VERB_HOOK_SHOOT, 1.0f));
++        assert(o.id_r == RENHDRUM_TRIG_IMPACT_PULSE);
++        o = ev(&hs, mk(ht + 64, OOT_SEL_HOOK, 0, 0, 40, 1.0f));
++        assert(!o.send_r);
++        /* no OFF after a pulse that cut a sustained preset (R2 aimed, shot before the latch) */
++        ht += 1000;
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        o = ev(&hs, mk(ht + 16, OOT_SEL_HOOK, 0, 0, 40, 0.4f));
++        assert(o.id_r == RENHDRUM_TRIG_TWO_STAGE);
++        o = ev(&hs, mk(ht + 32, OOT_SEL_HOOK, 0, 0, OOT_VERB_HOOK_SHOOT, 0.4f));
++        assert(o.id_r == RENHDRUM_TRIG_IMPACT_PULSE);
++        o = ev(&hs, mk(ht + 48, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(!o.send_r);
++        /* menu OFF counts as released: nothing more after it */
++        ht += 1000;
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.4f));
++        assert(o.id_r == RENHDRUM_TRIG_TWO_STAGE);
++        OotTrigIn mi = mk(ht + 16, OOT_SEL_HOOK, 0, 0, 40, 0.4f);
++        mi.menu_open = 1;
++        o = oot_trigger_eval(&hs, &cfg, &mi);
++        assert(o.id_r == RENHDRUM_TRIG_OFF && o.rule == OOT_RULE_SMOOTH);
++        o = ev(&hs, mk(ht + 32, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(!o.send_r);
++    }
++
++    /* Hookshot latch: let go of R2 from 1.0 through 0.27 with the pad's ZR bit still on -> stays latched (no second shot);
++       the bit off -> opens */
++    {
++        OotTrigState hs = OOT_TRIG_STATE_INIT;
++        int64_t ht = 1000;
++        settle(&hs, &ht, OOT_SEL_HOOK, 0, 0);
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.4f));
++        o = ev(&hs, mk(ht + 16, OOT_SEL_HOOK, 0, 0, 40, 1.0f));
++        assert(o.clear_zr);
++        OotTrigIn a = mk(ht + 32, OOT_SEL_HOOK, 0, 0, 40, 0.27f);
++        a.zr_raw = 1;
++        o = oot_trigger_eval(&hs, &cfg, &a);
++        assert(o.clear_zr && !o.send_r);
++        a = mk(ht + 48, OOT_SEL_HOOK, 0, 0, 40, 0.2f);
++        a.zr_raw = 1;
++        o = oot_trigger_eval(&hs, &cfg, &a);
++        assert(o.clear_zr);
++        a = mk(ht + 64, OOT_SEL_HOOK, 0, 0, 40, 0.2f);
++        a.zr_raw = 0;
++        o = oot_trigger_eval(&hs, &cfg, &a);
++        assert(!o.clear_zr);
++    }
++
++    /* Megaton Hammer swing, with the real rumble numbers: 0 -> 0.10 (strike) -> 0.03..0.09 -> 0: HEAVY_LOAD before the strike, one
++       pulse at the strike, then a quake that follows the game's rumble (never under 30 % of its level) until the rumble is off
++       (100 ms under RUMBLE_OFF), then one OFF; never back to HEAVY_LOAD; a new swing starts clean */
++    {
++        OotTrigState hs = OOT_TRIG_STATE_INIT;
++        int64_t ht = 1000;
++        settle(&hs, &ht, OOT_SEL_HAMMER, 0, 0);
++        o = ev(&hs, mkr(ht, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.0f));
++        assert(o.id_r == RENHDRUM_TRIG_HEAVY_LOAD && o.rule == OOT_RULE_HAMMER);
++        o = ev(&hs, mkr(ht + 16, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.02f));   /* under HAMMER_HIT: still lifting */
++        assert(o.id_r == RENHDRUM_TRIG_HEAVY_LOAD);
++        o = ev(&hs, mkr(ht + 32, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.10f));   /* the strike */
++        assert(o.id_r == RENHDRUM_TRIG_IMPACT_PULSE && o.rule == OOT_RULE_PULSE && nearf(o.level_r, 1.0f));
++        o = ev(&hs, mkr(ht + 48, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.10f));   /* at the peak: full quake */
++        assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH && o.rule == OOT_RULE_QUAKE && nearf(o.level_r, 0.7f));
++        o = ev(&hs, mkr(ht + 64, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.05f));   /* half of the peak */
++        assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH && nearf(o.level_r, 0.35f));
++        o = ev(&hs, mkr(ht + 80, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.03f));   /* 30 % of the peak: the floor */
++        assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH && nearf(o.level_r, 0.21f));
++        o = ev(&hs, mkr(ht + 96, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.02f));   /* below the floor share: held at 0.3 x QUAKE */
++        assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH && nearf(o.level_r, 0.21f));
++        o = ev(&hs, mkr(ht + 112, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.0f));   /* under RUMBLE_OFF: 100 ms of grace */
++        assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH);
++        o = ev(&hs, mkr(ht + 200, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.0f));
++        assert(o.id_r == RENHDRUM_TRIG_ENGINE_ROUGH);
++        o = ev(&hs, mkr(ht + 216, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.0f));   /* rumble over: one OFF */
++        assert(o.send_r && o.id_r == RENHDRUM_TRIG_OFF);
++        o = ev(&hs, mkr(ht + 232, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.0f));   /* no HEAVY_LOAD again in this swing */
++        assert(!o.send_r);
++        o = ev(&hs, mkr(ht + 248, OOT_SEL_HAMMER, 40, 0.5f, 0.0f));   /* verb leaves 112: reset */
++        o = ev(&hs, mkr(ht + 264, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.0f));
++        assert(o.id_r == RENHDRUM_TRIG_HEAVY_LOAD);
++        /* the item changes mid-swing (held 80 ms): reset too */
++        o = ev(&hs, mkr(ht + 280, OOT_SEL_HAMMER, OOT_VERB_HAMMER, 0.5f, 0.10f));
++        assert(o.id_r == RENHDRUM_TRIG_IMPACT_PULSE);
++        assert(hs.hammer_hit);
++        for (int i = 0; i < 4; i++) o = ev(&hs, mkr(ht + 300 + i * 50, OOT_SEL_BOW, OOT_VERB_HAMMER, 0.5f, 0.10f));
++        assert(!hs.hammer_hit && hs.hammer_peak == 0.0f);
++    }
++
++    /* Hookshot cancel: ZR held >= 250 ms (never deep), then let go -> 100 ms ZR + B held, 50 ms ZR held, then the real buttons */
++    {
++        OotTrigState hs = OOT_TRIG_STATE_INIT;
++        int64_t ht = 1000;
++        settle(&hs, &ht, OOT_SEL_HOOK, 0, 0);
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.5f));
++        o = ev(&hs, mk(ht + 300, OOT_SEL_HOOK, 0, 0, 40, 0.5f));
++        assert(!o.force_zr && !o.force_b);
++        o = ev(&hs, mk(ht + 316, OOT_SEL_HOOK, 0, 0, 40, 0.0f));   /* let go */
++        assert(o.force_zr && o.force_b && !o.clear_zr);
++        o = ev(&hs, mk(ht + 380, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(o.force_zr && o.force_b);
++        o = ev(&hs, mk(ht + 416, OOT_SEL_HOOK, 0, 0, 40, 0.0f));   /* 100 ms in */
++        assert(o.force_zr && !o.force_b);
++        o = ev(&hs, mk(ht + 450, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(o.force_zr && !o.force_b);
++        o = ev(&hs, mk(ht + 466, OOT_SEL_HOOK, 0, 0, 40, 0.0f));   /* 150 ms in: over */
++        assert(!o.force_zr && !o.force_b);
++        o = ev(&hs, mk(ht + 482, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(!o.force_zr && !o.force_b);
++        ht += 2000;
++        /* held under 250 ms: a tap, no cancel */
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.5f));
++        o = ev(&hs, mk(ht + 200, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(!o.force_zr && !o.force_b);
++        ht += 2000;
++        /* squeezed deep: that press never cancels */
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.5f));
++        o = ev(&hs, mk(ht + 300, OOT_SEL_HOOK, 0, 0, 40, 0.97f));
++        assert(o.clear_zr);
++        o = ev(&hs, mk(ht + 500, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(!o.force_zr && !o.force_b);
++        ht += 2000;
++        /* squeezed again mid-chain: chain dropped */
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.5f));
++        o = ev(&hs, mk(ht + 300, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(o.force_zr && o.force_b);
++        o = ev(&hs, mk(ht + 316, OOT_SEL_HOOK, 0, 0, 40, 0.5f));
++        assert(!o.force_zr && !o.force_b);
++        o = ev(&hs, mk(ht + 332, OOT_SEL_HOOK, 0, 0, 40, 0.5f));
++        assert(!o.force_zr && !o.force_b);
++        ht += 2000;
++        /* menu opens mid-chain: dropped */
++        o = ev(&hs, mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.5f));
++        o = ev(&hs, mk(ht + 300, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(o.force_zr);
++        OotTrigIn mi = mk(ht + 316, OOT_SEL_HOOK, 0, 0, 40, 0.0f);
++        mi.menu_open = 1;
++        o = oot_trigger_eval(&hs, &cfg, &mi);
++        assert(!o.force_zr && !o.force_b);
++        o = ev(&hs, mk(ht + 332, OOT_SEL_HOOK, 0, 0, 40, 0.0f));
++        assert(!o.force_zr);
++        ht += 2000;
++        /* flag off, deep fire off, other items: nothing */
++        OotTrigCfg c2 = cfg;
++        c2.hook_cancel = 0;
++        OotTrigIn a = mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.5f);
++        o = oot_trigger_eval(&hs, &c2, &a);
++        a = mk(ht + 300, OOT_SEL_HOOK, 0, 0, 40, 0.0f);
++        o = oot_trigger_eval(&hs, &c2, &a);
++        assert(!o.force_zr && !o.force_b);
++        ht += 2000;
++        a = mk(ht, OOT_SEL_HOOK, 0, 0, 40, 0.5f);
++        o = oot_trigger_eval(&hs, &cfg_nodeep, &a);
++        a = mk(ht + 300, OOT_SEL_HOOK, 0, 0, 40, 0.0f);
++        o = oot_trigger_eval(&hs, &cfg_nodeep, &a);
++        assert(!o.force_zr && !o.force_b);
++        ht += 2000;
++        settle(&hs, &ht, OOT_SEL_BOW, 7, 30);
++        o = ev(&hs, mk(ht, OOT_SEL_BOW, 7, 30, 40, 0.5f));
++        o = ev(&hs, mk(ht + 300, OOT_SEL_BOW, 7, 30, 40, 0.0f));
++        assert(!o.force_zr && !o.force_b);
++    }
++
++    puts("PASS: oot_trigger rules");
++    return 0;
++}
++"""
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--cc", default=None)
++    args = parser.parse_args()
++    cc = parse_compiler(args.cc) if args.cc else compiler_command("CC", "gcc", "clang")
++    flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
++    with tempfile.TemporaryDirectory(prefix="oot-trigger-") as tmp:
++        src = Path(tmp) / "t.c"
++        exe = Path(tmp) / "t.exe"
++        src.write_text(FIXTURE, encoding="utf-8")
++        subprocess.run(
++            cc + ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "host"), str(src), "-o", str(exe), "-lm"],
++            check=True,
++            creationflags=flags,
++            timeout=60,
++        )
++        subprocess.run([str(exe)], check=True, creationflags=flags, timeout=30)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_oot_trigprobe.py b/tests/test_oot_trigprobe.py
+new file mode 100644
+index 00000000..568d33cf
+--- /dev/null
++++ b/tests/test_oot_trigprobe.py
+@@ -0,0 +1,71 @@
++"""Trigger probe's pure part (host/oot_trigprobe.h): which flags differ between two snapshots (plan 143 6b).
++
++Compiles host/oot_trigprobe.h as a small standalone C test without the game.
++
++python -I -B tests/test_oot_trigprobe.py [--cc gcc]
++"""
++import argparse
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from compiler_command import compiler_command, parse_compiler  # noqa: E402
++
++RUN_ALL_ARGS = ["--cc", "{cc}"]
++ROOT = Path(__file__).resolve().parents[1]
++
++FIXTURE = r"""
++#include <assert.h>
++#include <stdio.h>
++#include "oot_trigprobe.h"
++
++int main(void) {
++    /* unsorted on purpose: 5 changes, 9 same, 3 gone (not reported), 7 new, 11 text changes */
++    TpFlag a[] = {{9, 1, 'I'}, {5, 10, 'E'}, {3, 4, 'U'}, {11, 100, 'T'}};
++    TpFlag b[] = {{11, 200, 'T'}, {7, 2, 'I'}, {9, 1, 'I'}, {5, 11, 'E'}};
++    TpChange out[8];
++    int n = tp_diff(a, 4, b, 4, out, 8);
++    assert(n == 3);
++    assert(out[0].key == 5 && out[0].old_val == 10 && out[0].new_val == 11 && out[0].kind == 'E' && !out[0].added);
++    assert(out[1].key == 7 && out[1].old_val == 0 && out[1].new_val == 2 && out[1].added);
++    assert(out[2].key == 11 && out[2].kind == 'T' && out[2].new_val == 200 && !out[2].added);
++
++    /* nothing changed -> nothing; the cap stops the list */
++    TpFlag c[] = {{1, 1, 'I'}, {2, 2, 'I'}};
++    TpFlag d[] = {{1, 1, 'I'}, {2, 2, 'I'}};
++    assert(tp_diff(c, 2, d, 2, out, 8) == 0);
++    TpFlag e[] = {{1, 5, 'I'}, {2, 6, 'I'}};
++    TpFlag f[] = {{1, 1, 'I'}, {2, 2, 'I'}};
++    assert(tp_diff(e, 2, f, 2, out, 1) == 1);
++    assert(tp_diff(e, 0, f, 2, out, 8) == 2);   /* an empty first snapshot: all new */
++
++    puts("PASS: oot_trigprobe diff");
++    return 0;
++}
++"""
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--cc", default=None)
++    args = parser.parse_args()
++    cc = parse_compiler(args.cc) if args.cc else compiler_command("CC", "gcc", "clang")
++    flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
++    with tempfile.TemporaryDirectory(prefix="oot-trigprobe-") as tmp:
++        src = Path(tmp) / "t.c"
++        exe = Path(tmp) / "t.exe"
++        src.write_text(FIXTURE, encoding="utf-8")
++        subprocess.run(
++            cc + ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "host"), str(src), "-o", str(exe)],
++            check=True,
++            creationflags=flags,
++            timeout=60,
++        )
++        subprocess.run([str(exe)], check=True, creationflags=flags, timeout=30)
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/tests/test_pad_speaker.py b/tests/test_pad_speaker.py
 index 14bdec71..4cd17b4c 100644
 --- a/tests/test_pad_speaker.py
@@ -5992,7 +8792,7 @@ index 14bdec71..4cd17b4c 100644
  
  
 diff --git a/tests/test_renhdrum.py b/tests/test_renhdrum.py
-index 074469d5..4a4ab3a0 100644
+index 074469d5..a229ec8f 100644
 --- a/tests/test_renhdrum.py
 +++ b/tests/test_renhdrum.py
 @@ -3,7 +3,7 @@
@@ -6031,16 +8831,18 @@ index 074469d5..4a4ab3a0 100644
  
      def test_a_bad_build_is_not_copied(self):
          rc, out, _ = self.build(pe(imports=GOOD_IMPORTS + ("libunwind.dll",)))
-@@ -357,12 +357,12 @@ class Ships(unittest.TestCase):
+@@ -356,15 +356,30 @@ class Ships(unittest.TestCase):
+         self.assertIn('.define("PACKAGE_VERSION", "\\"1.5.2\\"")', (here / "build.rs").read_text(encoding="utf-8"))
          self.assertIn("libopus 1.5.2", (ROOT / "third_party" / "opus" / "PROVENANCE.md").read_text(encoding="utf-8"))
          header = (here / "include" / "renhdrum.h").read_text(encoding="utf-8")
-         self.assertIn("#define RENHDRUM_VERSION 0x000500", header)
+-        self.assertIn("#define RENHDRUM_VERSION 0x000500", header)
 -        module = (ROOT / "host" / "rumble_renhdrum.c").read_text(encoding="utf-8")
 -        self.assertIn('#include "../third_party/renhdrum/include/renhdrum.h"', module)
 -        # (every function the module binds is one the check wants, and is in the header)
 -        bound = ["renhdrum_" + n for n in re.findall(r"^\s*X\([^,]+, (\w+), \(", module, re.M)]
 -        self.assertEqual(sorted(bound), sorted(EXPORTS))
 -        for name in bound:
++        self.assertIn("#define RENHDRUM_VERSION 0x000600", header)
 +        module = (ROOT / "host" / "renhdrum_recomp_bridge.c").read_text(encoding="utf-8")
 +        self.assertEqual((ROOT / "host" / "renhdrum.h").read_bytes(), (here / "include" / "renhdrum.h").read_bytes())
 +        # (every function the check wants is bound by the bridge and present in third_party/renhdrum/include/renhdrum.h)
@@ -6049,7 +8851,24 @@ index 074469d5..4a4ab3a0 100644
 +        for name in EXPORTS:
              self.assertIn(name + "(", header)
  
++    def test_hd_triggers_host_switch(self):
++        menu_cpp = (ROOT / "gpu" / "vk" / "menu" / "hd_rumble.cpp").read_text(encoding="utf-8")
++        i_hap = menu_cpp.index('"rh_dualsense_hd_haptics"')
++        i_trig = menu_cpp.index('"rh_hd_triggers"')
++        self.assertGreater(i_trig, i_hap)
++        block = menu_cpp[i_trig:menu_cpp.index("}", i_trig) + 1]
++        self.assertIn('"hd_triggers"', block)
++        self.assertIn('"DualSense: HD Triggers"', block)
++        self.assertIn("menu::Kind::Toggle, 0, 1, 1, 1", block)
++
++        bridge = (ROOT / "host" / "renhdrum_recomp_bridge.c").read_text(encoding="utf-8")
++        self.assertIn('"hd_triggers"', bridge)
++        self.assertIn("RENHDRUM_TRIG_OFF", bridge)
++        self.assertIn("rh_hd_triggers_on", bridge)
++
      def test_the_release_builds_and_packs_it(self):
+         wf = (ROOT / ".forgejo" / "workflows" / "build-windows.yml").read_text(encoding="utf-8")
+         step = wf[wf.index("- name: renhdrum.dll"):wf.index("- name: Package folder")]
 diff --git a/tests/test_settings_table.py b/tests/test_settings_table.py
 index 8d2df679..5b33ed0b 100644
 --- a/tests/test_settings_table.py
@@ -6146,6 +8965,18 @@ index 37029a60..f5ddbb35 100644
      CHECK(vibration_say(VIB_MOTORS, VIB_PAD_XBOX, 0, 0, A) == VIB_SAY_NO_LIB);
      CHECK(vibration_say(VIB_MOTORS, VIB_PAD_XBOX, 0, 0, B) == VIB_SAY_MOTORS);
      CHECK(vibration_say(VIB_MOTORS, VIB_PAD_DUALSENSE, 0, 1, B) == VIB_SAY_MOTORS);   /* (Basic asked for the motors) */
+diff --git a/tests/test_walk_key.py b/tests/test_walk_key.py
+index 9c679e13..1e4cf5f0 100644
+--- a/tests/test_walk_key.py
++++ b/tests/test_walk_key.py
+@@ -126,6 +126,7 @@ static int64_t script_end_ms;
+ static int64_t script_elapsed_ms(int64_t now) { (void)now; return 0; }
+ static void scripted_input(uint64_t *b, uint64_t *taps, int32_t s[4]) { (void)b; (void)taps; (void)s; }
+ void hos_oot_autoload_input(void) {}   /* (host/oot_autoload.c: Skip title screen off) */
++int hos_pad_touch_zone_held(void) { return -1; }   /* (plan 147: the touchpad halves, not under test here) */
+ int hos_control_input(uint64_t *buttons, int32_t stick[4]) { (void)buttons; (void)stick; return 0; }   /* (host/control.c: off) */
+ static int game_in_front(void) { return front; }
+ static volatile LONG pad_raw_now;
 diff --git a/tests/test_windows_stop.py b/tests/test_windows_stop.py
 index 96414ffc..fcf330f4 100644
 --- a/tests/test_windows_stop.py
@@ -6175,3 +9006,138 @@ index 96414ffc..fcf330f4 100644
      order = 0; relaunch_asked = 1;
      game_quit();
      assert(exited == 1 && restarted == 0 && window_logs == 0 && clean_ends == 2);
+diff --git a/third_party/renhdrum/include/renhdrum.h b/third_party/renhdrum/include/renhdrum.h
+index b9724b5e..fc9e59ce 100644
+--- a/third_party/renhdrum/include/renhdrum.h
++++ b/third_party/renhdrum/include/renhdrum.h
+@@ -3,12 +3,13 @@
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
++#include <stddef.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+ 
+-#define RENHDRUM_VERSION 0x000500
++#define RENHDRUM_VERSION 0x000600
+ 
+ #define RENHDRUM_OK 0
+ #define RENHDRUM_ERR_NULL_PTR -1
+@@ -397,6 +398,30 @@ int32_t renhdrum_tri_trigger_update(
+    a streak started with or after trigger hold (gap > 30 ms starts a new streak) mutes new pulses
+    while held and for 500 ms after the last call. */
+ void renhdrum_tri_trigger_note_action(RenHdcTriTrigger *h, uint32_t now_ms);
++/* Shared adaptive trigger presets (Tier 2, one handle per trigger).
++   Priority rule (the core does not blend Tier 1 and Tier 2): while a preset is active and non-Off
++   (out11[0] != 0x05), the host sends the preset's 11 bytes; when the preset is Off, the host falls
++   back to renhdrum_tri_trigger_update as before.
++   tick returns 1 = send out11, 0 = nothing to send, < 0 = error (null pointer). */
++#define RENHDRUM_TRIG_OFF          0  /* Forced release: smooth free trigger */
++#define RENHDRUM_TRIG_TENSION      1  /* Progressive pull: bow, slingshot, charge (caps after 10 s) */
++#define RENHDRUM_TRIG_TWO_STAGE    2  /* Two-stage: half-pull aim/mode, break through to fire */
++#define RENHDRUM_TRIG_CRISP_SHOT   3  /* Crisp break: semi-auto firearm trigger */
++#define RENHDRUM_TRIG_AUTO_FIRE    4  /* Automatic fire: pulsing kick (caps at 5 s) */
++#define RENHDRUM_TRIG_EMPTY_SOFT   5  /* Empty soft: dry trigger with light bottom tap */
++#define RENHDRUM_TRIG_JAMMED       6  /* Jammed wall: blocked early (caps after 3 s, soft release) */
++#define RENHDRUM_TRIG_BRAKE        7  /* Progressive brake: heavier near full pull (caps after 8 s) */
++#define RENHDRUM_TRIG_ABS_BRAKE    8  /* ABS brake: pulsed release (falls back to Brake after 4 s) */
++#define RENHDRUM_TRIG_WHEELSPIN    9  /* Wheelspin / drift vibration (stops after 5 s) */
++#define RENHDRUM_TRIG_THROTTLE     10 /* Throttle pedal: light continuous curve (capped at strength 4) */
++#define RENHDRUM_TRIG_HEAVY_LOAD   11 /* Heavy load: carrying weight / raised shield (caps after 12 s) */
++#define RENHDRUM_TRIG_IMPACT_PULSE 12 /* One-shot 100 ms impact pulse overlay (>= 80 ms gap) */
++#define RENHDRUM_TRIG_ENGINE_ROUGH 13 /* Engine / rough surface vibration (caps after 10 s) */
++typedef struct RenHdcTriggerPreset RenHdcTriggerPreset;
++RenHdcTriggerPreset *renhdrum_trigger_preset_create(void);
++void renhdrum_trigger_preset_destroy(RenHdcTriggerPreset *h);
++void renhdrum_trigger_preset_set(RenHdcTriggerPreset *h, uint8_t preset_id, float level, uint32_t now_ms);
++int32_t renhdrum_trigger_preset_tick(RenHdcTriggerPreset *h, uint32_t now_ms, uint8_t *out11);
+ /* 47-byte DS5EffectsState_t USB blocks for HD Haptics (speaker open/release, single-trigger update/off).
+    Returns 0 on success, -1 (RENHDRUM_ERR_NULL_PTR) if out47 is NULL. */
+ #define RENHDRUM_DS5_EFFECTS_SIZE 47
+@@ -431,9 +456,84 @@ int32_t renhdrum_xbox_rumble_push_half_sample(
+ int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
+ int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
+ 
++/* Experimental: Switch 2 Pro Controller (USB only, 057E:2069) HD Rumble 2 report 0x02 builder.
++   build_report returns 1 when out_report64 must be sent, 0 when nothing to send, < 0 on error. */
++typedef struct RenHdcPro2 RenHdcPro2;
++#define RENHDRUM_PRO2_REPORT_SIZE 64
++#define RENHDRUM_PRO2_PERIOD_US 15000
++#define RENHDRUM_PRO2_VID 0x057E
++#define RENHDRUM_PRO2_PID 0x2069
++#define RENHDRUM_PRO2_AMP_CEILING_DEFAULT 450
++RenHdcPro2 *renhdrum_pro2_create(uint16_t amp_ceiling);
++void renhdrum_pro2_destroy(RenHdcPro2 *h);
++int32_t renhdrum_pro2_push_half_sample(
++    RenHdcPro2 *h,
++    int64_t now_us,
++    bool is_right,
++    float al,
++    float fl,
++    float ah,
++    float fh
++);
++int32_t renhdrum_pro2_build_report(RenHdcPro2 *h, int64_t now_us, uint8_t *out_report64);
++int32_t renhdrum_pro2_silent_report(RenHdcPro2 *h, uint8_t *out_report64);
++
+ /* Switch 2 rumble mode: 0 = Switch 1 default / untouched, 2 = Switch 2 Mode 2 translation */
+ void renhdrum_set_nx2_mode(int32_t mode);
+ 
++/* Host compiled against this header can use DLL version v (renhdrum_version()). */
++#define RENHDRUM_ABI_COMPATIBLE(v) ((((uint32_t)(v)) >> 16) == ((uint32_t)RENHDRUM_VERSION >> 16) && ((uint32_t)(v)) >= (uint32_t)RENHDRUM_VERSION)
++
++#define RENHDRUM_FAMILY_NONE 0
++#define RENHDRUM_FAMILY_SWITCH1 1
++#define RENHDRUM_FAMILY_SWITCH2 2
++#define RENHDRUM_FAMILY_DUALSENSE 3
++#define RENHDRUM_FAMILY_DUALSENSE_EDGE 4
++#define RENHDRUM_FAMILY_XBOX 5
++#define RENHDRUM_FAMILY_STEAM 6
++#define RENHDRUM_DEVICE_EXPERIMENTAL 1u
++#define RENHDRUM_DEVICE_NO_HD_WRITE 2u      /* never send HD Rumble packets: the pad powers off (057E:2073) */
++#define RENHDRUM_DEVICE_COMBINED_JOYCON 4u  /* SDL's virtual Joy-Con pair */
++typedef struct RenHdcDeviceInfo {
++    uint32_t struct_size;       /* host sets sizeof(RenHdcDeviceInfo) */
++    int32_t family;
++    uint32_t flags;
++    int32_t steam_grip_format;  /* RENHDRUM_VALVE_GRIP_FORMAT_* or 0 */
++} RenHdcDeviceInfo;
++/* RENHDRUM_OK = known family, RENHDRUM_CLAIM_UNSUPPORTED_DEVICE = family NONE (out still filled). */
++int32_t renhdrum_device_classify(uint16_t vid, uint16_t pid, RenHdcDeviceInfo *out);
++
++#define RENHDRUM_CLAIM_OK 0
++#define RENHDRUM_CLAIM_UNSUPPORTED_DEVICE 1
++#define RENHDRUM_CLAIM_BLOCKED_BY_HOST_DRIVER 2
++#define RENHDRUM_CLAIM_RAW_PACKET_REFUSED 3
++#define RENHDRUM_CLAIM_AUDIO_ENDPOINT_MISSING 4
++#define RENHDRUM_CLAIM_AUDIO_FORMAT_MISMATCH 5
++#define RENHDRUM_CLAIM_WINUSB_MI01_REQUIRED 6
++#define RENHDRUM_CLAIM_ABI_MISMATCH 7
++#define RENHDRUM_CLAIM_NO_HD_WRITE 8
++/* Static English text with the fix, never NULL ("Unknown status." for other codes). */
++const char *renhdrum_claim_status_text(int32_t code);
++
++#define RENHDRUM_DEMO_QUICK_PING 0  /* 150 ms tap left, then right: which pad is this slot */
++#define RENHDRUM_DEMO_TECH_SHOW 1   /* ~2.4 s: tap, low-band sweep, high-band notes */
++#define RENHDRUM_DEMO_CHECKUP 2     /* ~4 s: tap, sweep, 4 notes, 4 strength steps, stop */
++/* Sample at t_ms since start. Returns 1 while running (feed both sides into the pad's usual sink:
++   engine push_sample, DualSense / Steam set_target, Xbox, Pro 2), 0 once finished (outputs zero),
++   <0 on error. */
++int32_t renhdrum_demo_sample(int32_t preset, uint32_t t_ms, RenHdSideSample *out_left, RenHdSideSample *out_right);
++
++/* Thread-safe send-rate meter used during checkup tests to record real packet writes. */
++typedef struct RenHdTestMeter RenHdTestMeter;
++/* Allocates a new meter; free with renhdrum_test_meter_destroy. */
++RenHdTestMeter *renhdrum_test_meter_create(void);
++/* Frees a meter (NULL is a no-op). */
++void renhdrum_test_meter_destroy(RenHdTestMeter *meter);
++/* Records one real packet write at monotonic timestamp t_us (NULL is a no-op). */
++void renhdrum_test_meter_record(RenHdTestMeter *meter, uint64_t t_us, bool ok);
++/* Formats "sent <ok>/<total>, <avg> ms avg, stuck <yes|no>" into out; returns bytes written (<0 on error). */
++int32_t renhdrum_test_meter_format(const RenHdTestMeter *meter, char *out, size_t cap);
++
+ #ifdef __cplusplus
+ }
+ #endif

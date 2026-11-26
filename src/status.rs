@@ -436,7 +436,8 @@ impl Entry {
     }
 
     pub fn read_power_level(&self) -> i32 {
-        if let Ok(guard) = self.power_reader.lock() {
+        {
+            let guard = crate::ffi::lock_recover(&self.power_reader);
             if let Some(ref reader) = *guard {
                 return reader();
             }
@@ -445,7 +446,8 @@ impl Entry {
     }
 
     pub fn set_power_reader<F: Fn() -> i32 + Send + Sync + 'static>(&self, reader: Option<F>) {
-        if let Ok(mut guard) = self.power_reader.lock() {
+        {
+            let mut guard = crate::ffi::lock_recover(&self.power_reader);
             *guard = reader.map(|r| Box::new(r) as Box<dyn Fn() -> i32 + Send + Sync>);
         }
     }

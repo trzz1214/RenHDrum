@@ -2086,7 +2086,7 @@ mod tests {
             let out = m.output(t);
             let lg = pct(out[0]);
             assert!(
-                lg >= 3.8 && lg <= 5.0,
+                (3.8..=5.0).contains(&lg),
                 "t={}us Pha 2A LG must be 3.8..5%, got {:.2}%",
                 t,
                 lg
@@ -2108,7 +2108,7 @@ mod tests {
             let out = m.output(t);
             let lg = pct(out[0]);
             assert!(
-                lg >= 4.5 && lg <= 5.0,
+                (4.5..=5.0).contains(&lg),
                 "t={}us Pha 2C LG must be 4.5..5%, got {:.2}%",
                 t,
                 lg
@@ -2124,7 +2124,7 @@ mod tests {
             assert_eq!(out[0], 0, "t={}us Pha 3 LG must be 0", t);
             let rg = pct(out[1]);
             assert!(
-                rg >= 1.95 && rg <= 3.5,
+                (1.95..=3.5).contains(&rg),
                 "t={}us Pha 3 RG must be 2..3.5%, got {:.2}%",
                 t,
                 rg

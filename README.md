@@ -32,6 +32,7 @@ flowchart LR
 | Nintendo Switch Pro Controller | ✅ | ✅ | Full HD Rumble ([how Bluetooth is handled](docs/research/03-bluetooth-congestion-and-pacing.md)) |
 | Xbox One / Series | ✅ | ✅ | HD Rumble [translated to four motors](docs/research/10-xbox-one-rumble.md) (tested on Xbox One S) |
 | Steam Controller (2026) | ✅ | ✅ | Grips only, experimental |
+| 🧪 Switch 2 Pro Controller (USB + Bluetooth, experimental) | 🧪 | 🧪 | HD Rumble 2 (USB in Brontide-NS2 & Longshot, and other recomp ports when their SDL3 has patch `0003` + libusb; Bluetooth in Brontide-NS2 only; close Steam completely; Windows 11 recommended) |
 
 ### HD Haptics on the DualSense
 
@@ -54,9 +55,12 @@ DualSense over Bluetooth still gets rumble, speaker and triggers, with nothing e
 <img src="docs/assets/hd-rumble-panel-light.png" alt="The HD Rumble settings panel, light theme" width="48%">
 </p>
 
-Where it runs today: Brontide-NS2, Brontide-oot, Brontide (Switch 1), Longshot, totk-pc-recomp, dkb-pc-recomp and mkw-recomp. The builds are on the [website](https://ryuhdr.threedola.workers.dev/#download).
+Where it runs today: **Brontide-NS2**, **Brontide** (Switch 1), and **Longshot** are on the [website](https://ryuhdr.threedola.workers.dev/#download). **[dkb-pc-recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases)** and **[mkw-recomp](https://github.com/adriadam10/mkw-recomp/releases)** now include their own RenHDrum 0.5 bridge (`mkw-recomp` downloads `renhdrum.dll` **0.5.0** from its launcher; for `dkb-pc-recomp`, place [`renhdrum.dll` **0.5.0**](https://github.com/trzz1214/RenHDrum/releases/download/v0.5.0/renhdrum.dll) next to `dkb.exe` — `0.6.0` is rejected by the 0.5 bridge). **totk-pc-recomp** is currently being updated.
 
-Switch 2 Pro Controller, Steam Controller (2015) and Steam Deck are still in research, so please hold issues for them for now.
+> [!NOTE]
+> **🧪 Switch 2 Pro Controller (USB + Bluetooth, experimental)**: USB HD Rumble 2 is active in **Brontide-NS2** and **Longshot**, and in other recomp PC ports when their SDL3 includes patch `0003` + libusb; **Bluetooth** is currently only in **Brontide-NS2**. Close Steam completely before playing, and use **Windows 11** for Bluetooth if possible (Windows 10 Bluetooth writes take 50–60 ms, making rumble coarser). I do not own a Switch 2 Pro Controller, so I have not tested this on real hardware — if you have one, run **Test rumble** in Brontide-NS2, press **Copy report**, and paste it into the [controller test form](https://github.com/trzz1214/RenHDrum/issues/new?template=controller-test.yml).
+
+Joy-Con 2, Steam Controller (2015) and Steam Deck are still in research, so please hold issues for them for now.
 
 ## Learn more
 
@@ -96,8 +100,8 @@ RenHDrum exists thanks to people who measured, decoded and shared before me:
 
 - **HD Rumble research**: [dekuNukem](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering), [Switchbrew](https://switchbrew.org/wiki/Joy-Con) contributors, rei-github, ClearlyClaire, [CTCaer](https://github.com/CTCaer/jc_toolkit), felipearmat
 - **DualSense research**: [Nielk1](https://gist.github.com/Nielk1/6d54cc2c00d2201ccb8c2720ad7538db) and the DualSense community, [egormanga (SAxense)](https://github.com/egormanga/SAxense), [ragnarok179 (Enhanced-PS5-DualSense-Haptics-Bridge)](https://github.com/ragnarok179/Enhanced-PS5-DualSense-Haptics-Bridge) for the idea of the Bluetooth speaker report (ideas only, the code is my own)
-- **Emulators and libraries**: the Ryujinx team, [Xiph.Org (libopus)](https://github.com/xiph/opus), Ryubing (GreemDev), Eden / yuzu contributors, [SDL](https://github.com/libsdl-org/SDL) (Sam Lantinga, Valve and contributors)
-- **Switch 2 and PC ports**: neo Luigi (Eglantine), Franseven (PokeDinner), [samaBR85](https://github.com/samaBR85/renhdrum-eden), Frizti (Fritchii), zortos293 (Lichii), Dark (Dynamic FPS), [NotRexed (Hookshot)](https://github.com/NotRexed/Hookshot), [MagicBeanDev (Longshot)](https://git.magicbean.dev/MagicBeanDev), [adriadam10 (mkw-recomp)](https://github.com/adriadam10/mkw-recomp)
+- **Emulators and libraries**: the Ryujinx team, [Xiph.Org (libopus)](https://github.com/xiph/opus), Ryubing (GreemDev), Eden / yuzu contributors, [SDL](https://github.com/libsdl-org/SDL) (Sam Lantinga, Valve and contributors; zlib, including Switch 2 report format)
+- **Switch 2 and PC ports**: neo Luigi (Eglantine), Franseven (PokeDinner), [samaBR85](https://github.com/samaBR85/renhdrum-eden), Frizti (Fritchii), **101Leafy** (`Frizti/Fritchii#6`, Switch 2 Pro frequency measurements on real hardware), **ndeadly** (`switch2_controller_research`), **BlueRetro** (`sw2.h` Switch 2 Pro report layout, Apache-2.0), **NS2Pro-Bridge-Windows** (MIT, 15 ms BLE pacing), zortos293 (Lichii), Dark (Dynamic FPS), [NotRexed (Hookshot)](https://github.com/NotRexed/Hookshot), [MagicBeanDev (Longshot)](https://git.magicbean.dev/MagicBeanDev), [adriadam10 (mkw-recomp)](https://github.com/adriadam10/mkw-recomp)
 
 What each person contributed, and what was copied or only referenced: [docs/CREDITS.md](docs/CREDITS.md) and [`NOTICE`](NOTICE).
 

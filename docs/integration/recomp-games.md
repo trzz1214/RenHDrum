@@ -57,8 +57,15 @@ HMODULE dll = LoadLibraryExW(
 );
 ```
 
+**Search order.** I recommend this order, stopping at the first file that loads:
+
+1. The path in the environment variable `RENHDRUM_LIBRARY` (for testers and side-by-side builds).
+2. The directory of the executable.
+3. The system path (only if you accept the hijack risk above; load with `LOAD_LIBRARY_SEARCH_SYSTEM32`, not a bare name).
+
 After loading:
 
+0. **ABI check at load time.** Call `renhdrum_version()` and test it with the header macro `RENHDRUM_ABI_COMPATIBLE(v)`: it is true when the DLL has the same major.minor branch as the header you built against and is not older. If it is false, unload the DLL and fall back to the host's normal rumble (the `major.minor` snippet in step 2 below is the same idea written out by hand).
 1. **Resolve required core exports** (`renhdrum_version`, `renhdrum_engine_create`, `renhdrum_engine_destroy`, `renhdrum_settings_default`, `renhdrum_engine_apply_settings`, `renhdrum_engine_push_half_sample`, `renhdrum_engine_tick`, `renhdrum_set_nx2_mode`). If any required symbol is missing, call `FreeLibrary` and disable the bridge.
 2. **Verify the `major.minor` branch**:
    ```c
@@ -135,6 +142,13 @@ Follow strict lock discipline:
 - Never acquire the host mutex while holding a bridge lock (`rh_lock`, `rh_ds_lock`, `rh_xb_lock`, `rh_sv_lock`).
 - Release bridge locks **before** calling `SDL_SendJoystickEffect`, `SDL_RumbleJoystick`, or `SDL_RumbleJoystickTriggers`.
 - On detach, clear the engine pointers under the lock, release the lock, then stop devices and `WaitForSingleObject(thread, 2000)` outside the lock. If a worker thread fails to stop within 2000 ms, log and skip `hid_close` / `destroy` rather than risking a use-after-free or shutdown hang.
+
+### 3.4 Classify Before You Send, and Never Call SDL Under the Pad-Table Lock
+
+- **Classify first.** Call `renhdrum_device_classify(vid, pid, &info)` (set `info.struct_size = sizeof(info)` first) for every pad before you send it any HD packet. Check `info.flags & RENHDRUM_DEVICE_NO_HD_WRITE`: this flag is set for `057E:2073`, and an HD Rumble write to that pad makes it power off. Never send HD packets to it; show `renhdrum_claim_status_text(RENHDRUM_CLAIM_NO_HD_WRITE)` instead. Claim only pads whose `info.family` is not `RENHDRUM_FAMILY_NONE`. For Microsoft `045E` the table answers `RENHDRUM_FAMILY_XBOX` for every PID, so call it only for a device the host already treats as a gamepad.
+- **Paired Joy-Con (`057E:2008`).** SDL presents the two Joy-Cons as one virtual pad. `renhdrum_device_classify` reports it as `RENHDRUM_FAMILY_SWITCH1` with `RENHDRUM_DEVICE_COMBINED_JOYCON`; do not send it the Pro Controller packet path, use the normal motor rumble.
+- **No SDL calls under the host's pad-table lock.** If the host keeps a table of pads behind a lock (for example a Raw Input or XInput table for up to 8 players), take what you need from the table, release the lock, and only then call SDL. Some SDL calls pump events or enumerate devices and can re-enter the host's input code, which deadlocks when the lock is still held. This is the same rule as the bridge locks in section 3.3.
+- **Test button.** To let the player check a pad, call `renhdrum_demo_sample` every tick and push both sides into the pad's usual sink (see [ui-guidelines.md](ui-guidelines.md)).
 
 ---
 
@@ -338,6 +352,24 @@ I ported the `0.5.0` bridge to Longshot, to totk-pc-recomp (a Switch 1 game), to
 | Steam Controller (2026) | yes | yes | yes | yes | yes |
 
 Every host here calls the same core functions, so a new core release reaches all of them by replacing `renhdrum.dll` (and the header for the recomp bridge).
+
+---
+
+## Appendix: Linux udev Rules (Community Example, Not Official)
+
+> [!NOTE]
+> This is an example I wrote myself, not an official or tested RenHDrum feature, and I do not ship it. It is a starting point for people who run a host on Linux and cannot open `hidraw` nodes as a normal user. Adjust it to your distribution and check it yourself.
+
+Save as `/etc/udev/rules.d/70-renhdrum-hidraw.rules`, then run `sudo udevadm control --reload-rules && sudo udevadm trigger`:
+
+```
+# Nintendo (057E), Sony (054C), Valve (28DE): let the logged-in user open hidraw
+KERNEL=="hidraw*", ATTRS{idVendor}=="057e", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="054c", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="28de", TAG+="uaccess"
+```
+
+These rules match USB-attached pads only; Bluetooth pads need their own rule on some systems, which I have not tried. The rules also cover `057E:2073`, so the host must still call `renhdrum_device_classify` and never write HD Rumble to that pad (see section 3.4).
 
 ---
 

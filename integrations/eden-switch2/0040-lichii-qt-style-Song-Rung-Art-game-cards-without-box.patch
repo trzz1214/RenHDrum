@@ -1,0 +1,449 @@
+From 8e6a7fca51de8b75414bc51fd1cdb494e80a5738 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 20:46:23 +0700
+Subject: [PATCH 40/41] lichii/qt: style Song Rung Art game cards without box
+ or reflection
+
+---
+ src/lichii/game/carousel.cpp  |  20 +++
+ src/lichii/game/game_card.cpp | 305 ++++++++++++++++++++++++++++++++++
+ src/lichii/game/game_card.h   |   5 +
+ src/lichii/game/game_grid.cpp |  21 +++
+ 4 files changed, 351 insertions(+)
+
+diff --git a/src/lichii/game/carousel.cpp b/src/lichii/game/carousel.cpp
+index 84bf1750d6..dea9b786ff 100644
+--- a/src/lichii/game/carousel.cpp
++++ b/src/lichii/game/carousel.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ #include "qt_common/config/uisettings.h"
++#include "qt_common/game_list/game_list_p.h"
+ #include "qt_common/game_list/model.h"
+ #include "lichii/game/common.h"
+ #include "lichii/game/game_card.h"
+@@ -55,6 +56,25 @@ void GameCarousel::ApplyFilter(const QString& edit_filter_text, GameListModel* m
+ void GameCarousel::UpdateIconSize() {
+     const u32 icon_size = UISettings::values.game_cover_size.GetValue();
+ 
++    if (IsSongRungArt()) {
++        const int effective_icon = icon_size == 0 ? 96 : static_cast<int>(icon_size);
++        constexpr int widthMargin = 48;
++        const int heightMargin = UISettings::values.show_game_name ? (24 + 10 + 42) : (24 + 20);
++
++        const int min_item_width = effective_icon + widthMargin;
++        const int min_item_height = effective_icon + heightMargin;
++        const int grid_height = std::max(min_item_height, viewport()->height());
++
++        const QSize content_size(min_item_width, min_item_height);
++        const QSize grid_size(min_item_width, grid_height);
++        setUpdatesEnabled(false);
++        setGridSize(grid_size);
++        m_gameCard->setSize(grid_size, content_size, 0, 0);
++        setUpdatesEnabled(true);
++        viewport()->update();
++        return;
++    }
++
+     int heightMargin = 0;
+     int widthMargin = 80;
+ 
+diff --git a/src/lichii/game/game_card.cpp b/src/lichii/game/game_card.cpp
+index 3abb9eacad..deedfab66d 100644
+--- a/src/lichii/game/game_card.cpp
++++ b/src/lichii/game/game_card.cpp
+@@ -1,23 +1,320 @@
+ // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
++#include <algorithm>
++#include <cmath>
++#include <vector>
++
++#include <QImage>
+ #include <QPainter>
+ #include <QPainterPath>
++#include <QPixmapCache>
+ #include <QStringList>
+ #include <QTextLayout>
+ #include <QTextOption>
+ #include "game_card.h"
++#include "qt_common/brand/song_rung_theme.h"
+ #include "qt_common/config/uisettings.h"
++#include "qt_common/game_list/game_list_p.h"
++
++namespace {
++
++// tune after review
++constexpr qreal kCardRadius = 12.0;
++constexpr int kArtLiftPx = 8;
++constexpr qreal kArtRingOffset = 3.0;
++constexpr qreal kArtRingWidth = 2.0;
++constexpr qreal kArtHoverRingWidth = 1.5;
++constexpr qreal kArtGlowAlpha = 0.45;
++constexpr int kArtGlowRadius = 24;
++constexpr int kArtInnerBorderAlpha = 56;
++constexpr int kArtHoverRingAlpha = 90;
++constexpr int kArtShadowBlur = 16;
++constexpr int kArtShadowAlphaDark = 145;
++constexpr int kArtShadowAlphaLight = 72;
++constexpr int kArtShadowOffsetY = 6;
++constexpr int kArtTopClearance = 24;
++constexpr int kArtTitleGap = 10;
++
++QImage BlurArgbPremultiplied(const QImage& source, int radius) {
++    if (source.isNull() || radius <= 0) {
++        return source;
++    }
++    QImage img = source.convertToFormat(QImage::Format_ARGB32_Premultiplied);
++    const int w = img.width();
++    const int h = img.height();
++    QImage tmp(w, h, QImage::Format_ARGB32_Premultiplied);
++
++    // 3-pass separable box blur approximates a smooth Gaussian kernel.
++    const int box = std::max(1, (radius * 2) / 3);
++    const int half = box / 2;
++    const int span = half * 2 + 1;
++
++    std::vector<u32> line_buf(static_cast<size_t>(std::max(w, h)));
++
++    for (int pass = 0; pass < 3; ++pass) {
++        // Horizontal pass: img -> tmp
++        for (int y = 0; y < h; ++y) {
++            const auto* src = reinterpret_cast<const QRgb*>(img.constScanLine(y));
++            auto* dst = reinterpret_cast<QRgb*>(tmp.scanLine(y));
++            int sum_a = 0, sum_r = 0, sum_g = 0, sum_b = 0;
++            for (int k = -half; k <= half; ++k) {
++                const int sx = std::clamp(k, 0, w - 1);
++                const QRgb px = src[sx];
++                sum_a += qAlpha(px);
++                sum_r += qRed(px);
++                sum_g += qGreen(px);
++                sum_b += qBlue(px);
++            }
++            for (int x = 0; x < w; ++x) {
++                dst[x] = qRgba(sum_r / span, sum_g / span, sum_b / span, sum_a / span);
++                const int out_x = std::clamp(x - half, 0, w - 1);
++                const int in_x = std::clamp(x + half + 1, 0, w - 1);
++                const QRgb p_out = src[out_x];
++                const QRgb p_in = src[in_x];
++                sum_a += qAlpha(p_in) - qAlpha(p_out);
++                sum_r += qRed(p_in) - qRed(p_out);
++                sum_g += qGreen(p_in) - qGreen(p_out);
++                sum_b += qBlue(p_in) - qBlue(p_out);
++            }
++        }
++        // Vertical pass: tmp -> img
++        for (int x = 0; x < w; ++x) {
++            for (int y = 0; y < h; ++y) {
++                line_buf[static_cast<size_t>(y)] =
++                    reinterpret_cast<const QRgb*>(tmp.constScanLine(y))[x];
++            }
++            int sum_a = 0, sum_r = 0, sum_g = 0, sum_b = 0;
++            for (int k = -half; k <= half; ++k) {
++                const int sy = std::clamp(k, 0, h - 1);
++                const QRgb px = line_buf[static_cast<size_t>(sy)];
++                sum_a += qAlpha(px);
++                sum_r += qRed(px);
++                sum_g += qGreen(px);
++                sum_b += qBlue(px);
++            }
++            for (int y = 0; y < h; ++y) {
++                reinterpret_cast<QRgb*>(img.scanLine(y))[x] =
++                    qRgba(sum_r / span, sum_g / span, sum_b / span, sum_a / span);
++                const int out_y = std::clamp(y - half, 0, h - 1);
++                const int in_y = std::clamp(y + half + 1, 0, h - 1);
++                const QRgb p_out = line_buf[static_cast<size_t>(out_y)];
++                const QRgb p_in = line_buf[static_cast<size_t>(in_y)];
++                sum_a += qAlpha(p_in) - qAlpha(p_out);
++                sum_r += qRed(p_in) - qRed(p_out);
++                sum_g += qGreen(p_in) - qGreen(p_out);
++                sum_b += qBlue(p_in) - qBlue(p_out);
++            }
++        }
++    }
++    return img;
++}
++
++QPixmap CachedBlurredRoundedBox(const QString& key, const QSizeF& box_size, qreal radius,
++                                int blur_radius, int pad, const QColor& color) {
++    QPixmap pix;
++    if (QPixmapCache::find(key, &pix)) {
++        return pix;
++    }
++    const int w = std::max(1, static_cast<int>(std::ceil(box_size.width()))) + pad * 2;
++    const int h = std::max(1, static_cast<int>(std::ceil(box_size.height()))) + pad * 2;
++    QImage canvas(w, h, QImage::Format_ARGB32_Premultiplied);
++    canvas.fill(Qt::transparent);
++    {
++        QPainter p(&canvas);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        p.setPen(Qt::NoPen);
++        p.setBrush(color);
++        p.drawRoundedRect(QRectF(pad, pad, box_size.width(), box_size.height()), radius, radius);
++    }
++    pix = QPixmap::fromImage(BlurArgbPremultiplied(canvas, blur_radius));
++    QPixmapCache::insert(key, pix);
++    return pix;
++}
++
++} // namespace
+ 
+ GameCard::GameCard(QObject* parent) : QStyledItemDelegate{parent} {
+     setObjectName("GameCard");
+ }
+ 
++QRectF GameCard::artCoverRect(const QStyleOptionViewItem& option, const QModelIndex& index,
++                              bool lifted) const {
++    const u32 raw_icon_size = UISettings::values.game_cover_size.GetValue();
++    const int icon_size =
++        raw_icon_size == 0 ? std::max(64, option.rect.width() - 64) : static_cast<int>(raw_icon_size);
++
++    QSizeF cover_size(icon_size, icon_size);
++    const QPixmap icon_pixmap = index.data(Qt::DecorationRole).value<QPixmap>();
++    if (!icon_pixmap.isNull()) {
++        QSize scaled = icon_pixmap.size();
++        scaled.scale(icon_size, icon_size, Qt::KeepAspectRatio);
++        cover_size = QSizeF(scaled);
++    }
++
++    qreal slot_left = option.rect.left();
++    qreal slot_width = option.rect.width();
++    qreal base_top = option.rect.top() + kArtTopClearance;
++
++    if (m_columns >= 1) {
++        const int cell_width = option.rect.width();
++        const int card_width = cell_width - m_padding;
++        const int column = index.row() % m_columns;
++        const int row_width = m_columns * cell_width;
++        const int total_gap = row_width - cardMargin * 2 - m_columns * card_width;
++        const int gap = (m_columns > 1) ? (total_gap / (m_columns - 1)) : 0;
++        slot_left = option.rect.left() - column * cell_width + cardMargin +
++                    column * (card_width + gap) + 4;
++        slot_width = card_width - cardMargin;
++    } else {
++        const int content_top =
++            option.rect.top() + std::max(0, (option.rect.height() - m_contentSize.height()) / 2);
++        base_top = content_top + kArtTopClearance;
++    }
++
++    const qreal cover_x = slot_left + (slot_width - cover_size.width()) * 0.5;
++    const qreal cover_y = base_top - (lifted ? kArtLiftPx : 0);
++    return QRectF(cover_x, cover_y, cover_size.width(), cover_size.height());
++}
++
++void GameCard::paintArt(QPainter* painter, const QStyleOptionViewItem& option,
++                        const QModelIndex& index) const {
++    painter->save();
++    painter->setRenderHint(QPainter::Antialiasing, true);
++    painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
++
++    const bool dark = UISettings::IsDarkTheme();
++    const RenHDrumQt::PaletteTokens t = RenHDrumQt::Tokens(dark);
++    const bool selected = (option.state & QStyle::State_Selected) != 0;
++    const bool hovered = (option.state & QStyle::State_MouseOver) != 0;
++
++    const QRectF baseRect = artCoverRect(option, index, false);
++    const QRectF coverRect =
++        selected ? baseRect.translated(0.0, -static_cast<qreal>(kArtLiftPx)) : baseRect;
++
++    const int shadow_pad = kArtShadowBlur + 8;
++    const QString shadow_key = QStringLiteral("art_shadow:%1x%2:%3")
++                                   .arg(static_cast<int>(std::ceil(coverRect.width())))
++                                   .arg(static_cast<int>(std::ceil(coverRect.height())))
++                                   .arg(dark ? 1 : 0);
++    const QPixmap shadow = CachedBlurredRoundedBox(
++        shadow_key, coverRect.size(), kCardRadius, kArtShadowBlur, shadow_pad,
++        QColor(0, 0, 0, dark ? kArtShadowAlphaDark : kArtShadowAlphaLight));
++    if (!shadow.isNull()) {
++        painter->drawPixmap(coverRect.topLeft() + QPointF(-shadow_pad, -shadow_pad + kArtShadowOffsetY),
++                            shadow);
++    }
++
++    if (selected) {
++        const int glow_pad = kArtGlowRadius + 8;
++        QColor glow_color = t.accent;
++        glow_color.setAlphaF(kArtGlowAlpha);
++        const QString glow_key = QStringLiteral("art_glow:%1x%2:%3")
++                                     .arg(static_cast<int>(std::ceil(coverRect.width())))
++                                     .arg(static_cast<int>(std::ceil(coverRect.height())))
++                                     .arg(glow_color.rgba(), 0, 16);
++        const QPixmap glow = CachedBlurredRoundedBox(
++            glow_key, coverRect.size(), kCardRadius + kArtRingOffset, kArtGlowRadius, glow_pad,
++            glow_color);
++        if (!glow.isNull()) {
++            painter->drawPixmap(coverRect.topLeft() + QPointF(-glow_pad, -glow_pad), glow);
++        }
++    }
++
++    QPainterPath cardPath;
++    cardPath.addRoundedRect(coverRect, kCardRadius, kCardRadius);
++
++    const QPixmap icon_pixmap = index.data(Qt::DecorationRole).value<QPixmap>();
++    painter->save();
++    painter->setClipPath(cardPath);
++    if (icon_pixmap.isNull()) {
++        painter->fillPath(cardPath, t.surface_raised);
++    } else {
++        if (icon_pixmap.hasAlphaChannel()) {
++            painter->fillPath(cardPath, t.surface);
++        }
++        painter->drawPixmap(coverRect, icon_pixmap, QRectF(icon_pixmap.rect()));
++    }
++    QPainterPath innerPath;
++    innerPath.addRoundedRect(coverRect.adjusted(0.5, 0.5, -0.5, -0.5), kCardRadius - 0.5,
++                             kCardRadius - 0.5);
++    painter->setBrush(Qt::NoBrush);
++    painter->setPen(QPen(QColor(255, 255, 255, kArtInnerBorderAlpha), 1.0));
++    painter->drawPath(innerPath);
++    painter->restore();
++
++    if (selected) {
++        const qreal expand = kArtRingOffset + kArtRingWidth * 0.5;
++        const QRectF ringRect = coverRect.adjusted(-expand, -expand, expand, expand);
++        painter->setBrush(Qt::NoBrush);
++        painter->setPen(QPen(t.accent, kArtRingWidth));
++        painter->drawRoundedRect(ringRect, kCardRadius + expand, kCardRadius + expand);
++    } else if (hovered) {
++        const qreal expand = kArtRingOffset + kArtHoverRingWidth * 0.5;
++        const QRectF ringRect = coverRect.adjusted(-expand, -expand, expand, expand);
++        const QColor hoverColor =
++            dark ? QColor(255, 255, 255, kArtHoverRingAlpha)
++                 : QColor(t.text.red(), t.text.green(), t.text.blue(), kArtHoverRingAlpha);
++        painter->setBrush(Qt::NoBrush);
++        painter->setPen(QPen(hoverColor, kArtHoverRingWidth));
++        painter->drawRoundedRect(ringRect, kCardRadius + expand, kCardRadius + expand);
++    }
++
++    if (UISettings::values.show_game_name.GetValue()) {
++        const u32 icon_size = UISettings::values.game_cover_size.GetValue();
++        const qreal text_width = std::min<qreal>(
++            std::max<qreal>(baseRect.width() + 16.0, 96.0),
++            static_cast<qreal>(option.rect.width()) - 8.0);
++        const qreal text_left = baseRect.center().x() - text_width * 0.5;
++        const qreal text_top = baseRect.bottom() + kArtTitleGap;
++        const QRectF textRect(text_left, text_top, text_width,
++                              std::max<qreal>(16.0, option.rect.bottom() - text_top));
++
++        const QString title = index.data(Qt::DisplayRole).toString().split(QLatin1Char('\n')).first();
++
++        QFont font = RenHDrumQt::UiFont(9.5);
++        font.setWeight(selected ? QFont::Bold : QFont::Normal);
++        font.setPixelSize(
++            std::max(11.0, std::sqrt(static_cast<double>(icon_size == 0 ? 96 : icon_size))));
++        painter->setFont(font);
++        painter->setPen(selected ? t.text : t.muted);
++
++        const QFontMetrics fm(font);
++        QTextOption text_option;
++        text_option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
++        QTextLayout layout(title, font);
++        layout.setTextOption(text_option);
++        QStringList lines;
++        layout.beginLayout();
++        for (int i = 0; i < 2; ++i) {
++            QTextLine line = layout.createLine();
++            if (!line.isValid()) {
++                break;
++            }
++            line.setLineWidth(textRect.width());
++            lines.append(i == 0 ? title.mid(line.textStart(), line.textLength()).trimmed()
++                                : fm.elidedText(title.mid(line.textStart()).trimmed(),
++                                                Qt::ElideRight,
++                                                static_cast<int>(textRect.width())));
++        }
++        layout.endLayout();
++        painter->drawText(textRect, Qt::AlignHCenter | Qt::AlignTop,
++                          lines.join(QLatin1Char('\n')));
++    }
++
++    painter->restore();
++}
++
+ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
+                      const QModelIndex& index) const {
+     if (!index.isValid())
+         return;
+ 
++    if (IsSongRungArt()) {
++        paintArt(painter, option, index);
++        return;
++    }
++
+     painter->save();
+     painter->setRenderHint(QPainter::Antialiasing);
+ 
+@@ -110,6 +407,14 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
+ }
+ 
+ QRect GameCard::getCardRect(const QStyleOptionViewItem& option, const QModelIndex& index) const {
++    if (IsSongRungArt()) {
++        const QRectF base = artCoverRect(option, index, false);
++        const int title_extra = UISettings::values.show_game_name.GetValue() ? 48 : 8;
++        return QRectF(base.left() - 6.0, base.top() - kArtLiftPx - 6.0, base.width() + 12.0,
++                      base.height() + kArtLiftPx + 6.0 + title_extra)
++            .toAlignedRect();
++    }
++
+     const int cell_width = option.rect.width();
+ 
+     const int card_width = cell_width - m_padding;
+diff --git a/src/lichii/game/game_card.h b/src/lichii/game/game_card.h
+index 1d522c0ed8..5fd76c9250 100644
+--- a/src/lichii/game/game_card.h
++++ b/src/lichii/game/game_card.h
+@@ -28,6 +28,11 @@ public:
+ private:
+     static constexpr int cardMargin = 8;
+ 
++    void paintArt(QPainter* painter, const QStyleOptionViewItem& option,
++                  const QModelIndex& index) const;
++    QRectF artCoverRect(const QStyleOptionViewItem& option, const QModelIndex& index,
++                        bool lifted) const;
++
+     QSize m_size;
+     QSize m_contentSize;
+     int m_padding;
+diff --git a/src/lichii/game/game_grid.cpp b/src/lichii/game/game_grid.cpp
+index f64e3422a1..843962563c 100644
+--- a/src/lichii/game/game_grid.cpp
++++ b/src/lichii/game/game_grid.cpp
+@@ -5,6 +5,7 @@
+ #include <QScrollerProperties>
+ 
+ #include "qt_common/config/uisettings.h"
++#include "qt_common/game_list/game_list_p.h"
+ #include "qt_common/game_list/model.h"
+ #include "lichii/game/common.h"
+ #include "lichii/game/game_card.h"
+@@ -57,6 +58,26 @@ void GameGrid::ApplyFilter(const QString& edit_filter_text, GameListModel* model
+ void GameGrid::UpdateIconSize() {
+     const u32 icon_size = UISettings::values.game_cover_size.GetValue();
+ 
++    if (IsSongRungArt()) {
++        const int effective_icon = icon_size == 0 ? 96 : static_cast<int>(icon_size);
++        constexpr int widthMargin = 48;
++        const int heightMargin = UISettings::values.show_game_name ? (24 + 10 + 42) : (24 + 20);
++
++        const int view_width = viewport()->width();
++        const double spacing = 0.01;
++        const int min_item_width = effective_icon + widthMargin;
++        const int columns = std::max(1, (view_width - 16) / min_item_width);
++        const int stretched_width = ((view_width) - (spacing * (columns - 1))) / columns;
++
++        const QSize grid_size(stretched_width, effective_icon + heightMargin);
++        setUpdatesEnabled(false);
++        setGridSize(grid_size);
++        m_gameCard->setSize(grid_size, grid_size, stretched_width - min_item_width, columns);
++        setUpdatesEnabled(true);
++        viewport()->update();
++        return;
++    }
++
+     int heightMargin = 0;
+     // The card hugs the icon; the title wraps to the icon's width, so extra width is only
+     // needed for the "no icon" case. Leftover row space becomes the gap between cards.
+-- 
+2.55.0.windows.5
+

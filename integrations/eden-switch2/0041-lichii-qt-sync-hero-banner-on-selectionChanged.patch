@@ -1,0 +1,30 @@
+From 9d55baedae089cff7a529bef7c578e705ff11632 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 20:53:51 +0700
+Subject: [PATCH 41/41] lichii/qt: sync hero banner on selectionChanged
+
+---
+ src/lichii/game/game_list.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/lichii/game/game_list.cpp b/src/lichii/game/game_list.cpp
+index 77a87eaccc..8d916a832b 100644
+--- a/src/lichii/game/game_list.cpp
++++ b/src/lichii/game/game_list.cpp
+@@ -101,6 +101,13 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
+         if (view->selectionModel()) {
+             connect(view->selectionModel(), &QItemSelectionModel::currentChanged, this,
+                     &GameList::OnCurrentGameChanged);
++            connect(view->selectionModel(), &QItemSelectionModel::selectionChanged, this,
++                    [this](const QItemSelection& selected) {
++                        const QModelIndexList indexes = selected.indexes();
++                        if (!indexes.isEmpty()) {
++                            OnCurrentGameChanged(indexes.first());
++                        }
++                    });
+         }
+     }
+     song_rung_art_enabled = IsSongRungArt();
+-- 
+2.55.0.windows.5
+

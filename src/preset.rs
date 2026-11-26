@@ -71,9 +71,11 @@ mod tests {
     #[test]
     fn apply_then_detect_round_trips() {
         for kind in PRESETS {
-            let mut config = RumbleConfigController::default();
-            config.hd_rumble_usb_interval_ms = 30;
-            config.hd_rumble_bluetooth_level = 3;
+            let mut config = RumbleConfigController {
+                hd_rumble_usb_interval_ms: 30,
+                hd_rumble_bluetooth_level: 3,
+                ..RumbleConfigController::default()
+            };
 
             HdRumblePreset::apply(kind, &mut config);
             assert_eq!(HdRumblePreset::detect(&config), kind);
@@ -82,12 +84,14 @@ mod tests {
 
     #[test]
     fn apply_keeps_unrelated_settings() {
-        let mut config = RumbleConfigController::default();
-        config.enable_hd_rumble = false;
-        config.strong_rumble = 1.5;
-        config.weak_rumble = 0.5;
-        config.enable_dualsense_haptics = false;
-        config.dualsense_haptics_volume = 40;
+        let mut config = RumbleConfigController {
+            enable_hd_rumble: false,
+            strong_rumble: 1.5,
+            weak_rumble: 0.5,
+            enable_dualsense_haptics: false,
+            dualsense_haptics_volume: 40,
+            ..RumbleConfigController::default()
+        };
 
         HdRumblePreset::apply(HdRumblePresetKind::Crisp, &mut config);
 
@@ -111,8 +115,10 @@ mod tests {
 
     #[test]
     fn custom_apply_changes_nothing() {
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_bluetooth_level = 3;
+        let mut config = RumbleConfigController {
+            hd_rumble_bluetooth_level: 3,
+            ..RumbleConfigController::default()
+        };
 
         HdRumblePreset::apply(HdRumblePresetKind::Custom, &mut config);
         assert_eq!(config.hd_rumble_bluetooth_level, 3);
@@ -135,9 +141,11 @@ mod tests {
     #[test]
     fn no_preset_turns_sync_on() {
         for kind in PRESETS {
-            let mut config = RumbleConfigController::default();
-            config.hd_rumble_experimental_sync_to_input = true;
-            config.hd_rumble_experimental_sync_bluetooth = true;
+            let mut config = RumbleConfigController {
+                hd_rumble_experimental_sync_to_input: true,
+                hd_rumble_experimental_sync_bluetooth: true,
+                ..RumbleConfigController::default()
+            };
 
             HdRumblePreset::apply(kind, &mut config);
 
@@ -148,8 +156,10 @@ mod tests {
 
     #[test]
     fn sync_on_is_custom() {
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_sync_to_input = true;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_sync_to_input: true,
+            ..RumbleConfigController::default()
+        };
         assert_eq!(HdRumblePreset::detect(&config), HdRumblePresetKind::Custom);
     }
 

@@ -1,0 +1,496 @@
+From b22cf0601517c1e829c6b1c54ddd7fc5edf99e50 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 20:09:46 +0700
+Subject: [PATCH 38/41] lichii/qt: add per-game background art controls to
+ Properties
+
+---
+ .../configuration/configure_per_game.cpp      | 207 +++++++++++++++++-
+ src/lichii/configuration/configure_per_game.h |  16 ++
+ .../configuration/configure_per_game.ui       | 132 +++++++++++
+ src/lichii/main_window.cpp                    |   2 +
+ 4 files changed, 355 insertions(+), 2 deletions(-)
+
+diff --git a/src/lichii/configuration/configure_per_game.cpp b/src/lichii/configuration/configure_per_game.cpp
+index 4dcab02019..77ddd3519f 100644
+--- a/src/lichii/configuration/configure_per_game.cpp
++++ b/src/lichii/configuration/configure_per_game.cpp
+@@ -28,6 +28,8 @@
+ #include <QEventLoop>
+ #include <QFile>
+ #include <QFileInfo>
++#include <QGraphicsScene>
++#include <QGraphicsTextItem>
+ #include <QIcon>
+ #include <QImage>
+ #include <QLineEdit>
+@@ -404,6 +406,47 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
+             &ConfigurePerGame::OnRemoveCustomIcon);
+     connect(ui->button_browse_iidb, &QPushButton::clicked, this,
+             &ConfigurePerGame::OnBrowseIiDB);
++
++    hero_scene = new QGraphicsScene(this);
++    ui->hero_view->setScene(hero_scene);
++    ui->button_detect_hero->setIcon(
++        QIcon::fromTheme(QStringLiteral("edit-find"), QIcon::fromTheme(QStringLiteral("search"))));
++    ui->button_upload_hero->setIcon(QIcon::fromTheme(
++        QStringLiteral("document-open"), QIcon::fromTheme(QStringLiteral("insert-image"))));
++    ui->button_remove_hero->setIcon(QIcon::fromTheme(QStringLiteral("edit-clear")));
++    ui->button_remove_hero->setEnabled(false);
++    connect(ui->button_upload_hero, &QPushButton::clicked, this,
++            &ConfigurePerGame::OnUploadCustomHero);
++    connect(ui->button_detect_hero, &QPushButton::clicked, this,
++            &ConfigurePerGame::OnDetectCustomHero);
++    connect(ui->button_remove_hero, &QPushButton::clicked, this,
++            &ConfigurePerGame::OnRemoveCustomHero);
++    connect(&detect_hero_watcher, &QFutureWatcher<ArtworkLookupResult>::finished, this, [this] {
++        if (!detect_hero_cancel || detect_hero_cancel->load()) {
++            return;
++        }
++        ui->button_detect_hero->setEnabled(true);
++        ui->button_detect_hero->setText(tr("Auto-Find"));
++        ui->button_upload_hero->setEnabled(true);
++        ui->display_name->setEnabled(true);
++        ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(true);
++        if (auto* apply = ui->buttonBox->button(QDialogButtonBox::Apply)) {
++            apply->setEnabled(true);
++        }
++        auto out = detect_hero_watcher.result();
++        if (out.status != ArtworkLookupStatus::Found || out.image.isNull()) {
++            UpdateRemoveHeroButton();
++            QString msg = tr("Could not find background art on SteamGridDB.");
++            if (out.status == ArtworkLookupStatus::BadApiKey) {
++                msg = tr("SteamGridDB rejected the saved API key.");
++            } else if (out.status == ArtworkLookupStatus::NetworkError) {
++                msg = tr("SteamGridDB could not be reached.");
++            }
++            QMessageBox::information(this, tr("Find Background"), msg);
++            return;
++        }
++        StageCustomHero(std::move(out.image));
++    });
+     connect(&detect_watcher, &QFutureWatcher<DetectIconResult>::finished, this, [this] {
+         if (!detect_cancel || detect_cancel->load()) {
+             return;
+@@ -446,15 +489,23 @@ ConfigurePerGame::~ConfigurePerGame() {
+     if (detect_cancel) {
+         detect_cancel->store(true);
+     }
++    if (detect_hero_cancel) {
++        detect_hero_cancel->store(true);
++    }
+ }
+ 
+ void ConfigurePerGame::done(int result) {
+-    if (result == QDialog::Accepted && (detect_watcher.isRunning() || !SaveCustomMetadata(true))) {
++    if (result == QDialog::Accepted &&
++        (detect_watcher.isRunning() || detect_hero_watcher.isRunning() ||
++         !SaveCustomMetadata(true))) {
+         return;
+     }
+     if (detect_cancel) {
+         detect_cancel->store(true);
+     }
++    if (detect_hero_cancel) {
++        detect_hero_cancel->store(true);
++    }
+     QDialog::done(result);
+ }
+ 
+@@ -491,7 +542,8 @@ void ConfigurePerGame::RetranslateUI() {
+ }
+ 
+ void ConfigurePerGame::HandleApplyButtonClicked() {
+-    if (detect_watcher.isRunning() || !SaveCustomMetadata(true)) {
++    if (detect_watcher.isRunning() || detect_hero_watcher.isRunning() ||
++        !SaveCustomMetadata(true)) {
+         return;
+     }
+     UISettings::values.configuration_applied = true;
+@@ -532,6 +584,8 @@ void ConfigurePerGame::LoadConfiguration() {
+     // format and while a game runs.
+     ui->nup_icon_widget->setVisible(title_id != 0);
+     ui->nup_icon_widget->setEnabled(true);
++    ui->hero_artwork_widget->setVisible(title_id != 0);
++    ui->hero_artwork_widget->setEnabled(true);
+     // The name is stored per program ID too: a rename never touches the game file.
+     ui->display_name->setReadOnly(title_id == 0);
+     ui->display_name->setClearButtonEnabled(title_id != 0);
+@@ -591,6 +645,16 @@ void ConfigurePerGame::LoadConfiguration() {
+     UpdateIconPreview(has_custom_icon ? custom_icon : file_icon);
+     UpdateRemoveIconButton();
+ 
++    pending_custom_hero = {};
++    remove_custom_hero = false;
++    QPixmap custom_hero;
++    if (const auto hero_bytes = QtCommon::Game::ReadCustomHero(title_id); !hero_bytes.empty()) {
++        custom_hero.loadFromData(hero_bytes.data(), static_cast<u32>(hero_bytes.size()));
++    }
++    has_custom_hero = !custom_hero.isNull();
++    UpdateHeroPreview(custom_hero);
++    UpdateRemoveHeroButton();
++
+     ui->display_filename->setText(QString::fromStdString(file->GetName()));
+ 
+     if (loader != nullptr) {
+@@ -676,6 +740,119 @@ void ConfigurePerGame::UpdateRemoveIconButton() {
+                                        (has_custom_icon && !remove_custom_icon));
+ }
+ 
++void ConfigurePerGame::UpdateHeroPreview(const QPixmap& map) {
++    hero_scene->clear();
++    const int w = ui->hero_view->maximumWidth();
++    const int h = ui->hero_view->maximumHeight();
++    hero_scene->setSceneRect(0, 0, w, h);
++    if (map.isNull()) {
++        auto* item = hero_scene->addText(tr("No background"));
++        item->setDefaultTextColor(palette().color(QPalette::PlaceholderText));
++        const QRectF br = item->boundingRect();
++        item->setPos((w - br.width()) * 0.5, (h - br.height()) * 0.5);
++        return;
++    }
++    QPixmap scaled = map.scaled(w, h, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
++    if (scaled.width() > w || scaled.height() > h) {
++        const int x = std::max(0, (scaled.width() - w) / 2);
++        const int y = std::max(0, (scaled.height() - h) / 3);
++        scaled = scaled.copy(x, y, std::min(w, scaled.width()), std::min(h, scaled.height()));
++    }
++    hero_scene->addPixmap(scaled);
++}
++
++void ConfigurePerGame::StageCustomHero(QImage hero) {
++    if (hero.isNull()) {
++        return;
++    }
++    pending_custom_hero = std::move(hero);
++    remove_custom_hero = false;
++    UpdateHeroPreview(QPixmap::fromImage(pending_custom_hero));
++    UpdateRemoveHeroButton();
++}
++
++void ConfigurePerGame::OnUploadCustomHero() {
++    if (title_id == 0 || detect_hero_watcher.isRunning()) {
++        return;
++    }
++    const QString default_dir =
++        file_path.has_parent_path()
++            ? QString::fromStdString(Common::FS::PathToUTF8String(file_path.parent_path()))
++            : QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
++    const QString selected = QtCommon::Frontend::GetOpenFileName(
++        tr("Select Background Art"), default_dir,
++        tr("Images (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)"));
++    if (selected.isEmpty()) {
++        return;
++    }
++    QImage img = ReadIconFile(selected);
++    if (img.isNull()) {
++        QMessageBox::warning(this, tr("Invalid Image"),
++                             tr("Select a PNG, JPEG, BMP or WebP image up to 8 MiB, "
++                                "8192 pixels per side and 16 megapixels."));
++        return;
++    }
++    StageCustomHero(std::move(img));
++}
++
++void ConfigurePerGame::OnDetectCustomHero() {
++    if (title_id == 0 || detect_hero_watcher.isRunning()) {
++        return;
++    }
++    const std::string api_key = UISettings::values.steamgriddb_api_key.GetValue();
++    if (api_key.empty()) {
++        QMessageBox::information(
++            this, tr("Find Background"),
++            tr("Set a SteamGridDB API key in Settings to look up background art automatically, or "
++               "upload an image."));
++        return;
++    }
++    QString query_qstr = ui->display_name->text().trimmed();
++    if (query_qstr.isEmpty()) {
++        query_qstr = QFileInfo(QString::fromStdString(
++            Common::FS::PathToUTF8String(file_path))).completeBaseName();
++    }
++    const std::string query = query_qstr.toStdString();
++    if (query.empty()) {
++        QMessageBox::information(
++            this, tr("Find Background"),
++            tr("Please enter a game name first so background art can be looked up."));
++        return;
++    }
++
++    ui->button_detect_hero->setEnabled(false);
++    ui->button_detect_hero->setText(tr("Finding..."));
++    ui->button_upload_hero->setEnabled(false);
++    ui->button_remove_hero->setEnabled(false);
++    ui->display_name->setEnabled(false);
++    ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(false);
++    if (auto* apply = ui->buttonBox->button(QDialogButtonBox::Apply)) {
++        apply->setEnabled(false);
++    }
++
++    detect_hero_cancel = std::make_shared<std::atomic_bool>(false);
++    const bool prefer_newest = (title_id >> 56) == 0x04;
++    detect_hero_watcher.setFuture(
++        QtConcurrent::run([query, api_key, prefer_newest, cancel = detect_hero_cancel] {
++            return LookUpSteamGridDbHero(query, api_key, *cancel, prefer_newest);
++        }));
++}
++
++void ConfigurePerGame::OnRemoveCustomHero() {
++    if (title_id == 0 || detect_hero_watcher.isRunning()) {
++        return;
++    }
++    pending_custom_hero = {};
++    remove_custom_hero = has_custom_hero;
++    UpdateHeroPreview({});
++    UpdateRemoveHeroButton();
++}
++
++void ConfigurePerGame::UpdateRemoveHeroButton() {
++    ui->button_remove_hero->setEnabled(!pending_custom_hero.isNull() ||
++                                       (has_custom_hero && !remove_custom_hero));
++}
++
+ void ConfigurePerGame::OnDetectNupIcon() {
+     if (title_id == 0 || detect_watcher.isRunning()) {
+         return;
+@@ -929,6 +1106,32 @@ bool ConfigurePerGame::SaveCustomMetadata(bool show_error) {
+         UISettings::values.is_game_list_reload_pending.exchange(true);
+         emit CustomArtworkChanged(title_id);
+     }
++    if (remove_custom_hero) {
++        if (!QtCommon::Game::RemoveCustomHero(title_id)) {
++            if (show_error) {
++                QMessageBox::warning(this, tr("Background Art"),
++                                     tr("The background art could not be removed."));
++            }
++            return false;
++        }
++        remove_custom_hero = false;
++        has_custom_hero = false;
++        UpdateRemoveHeroButton();
++        emit CustomHeroChanged(title_id);
++    }
++    if (!pending_custom_hero.isNull()) {
++        if (!QtCommon::Game::SaveCustomHero(title_id, pending_custom_hero)) {
++            if (show_error) {
++                QMessageBox::warning(this, tr("Background Art"),
++                                     tr("The background art could not be saved."));
++            }
++            return false;
++        }
++        pending_custom_hero = {};
++        has_custom_hero = true;
++        UpdateRemoveHeroButton();
++        emit CustomHeroChanged(title_id);
++    }
+     const std::string new_title = ui->display_name->text().simplified().toStdString();
+     if (title_id == 0 || new_title == initial_title) {
+         return true;
+diff --git a/src/lichii/configuration/configure_per_game.h b/src/lichii/configuration/configure_per_game.h
+index 715d815900..a4728301be 100644
+--- a/src/lichii/configuration/configure_per_game.h
++++ b/src/lichii/configuration/configure_per_game.h
+@@ -25,6 +25,7 @@
+ #include "qt_common/config/shared_translation.h"
+ #include "qt_common/util/vk.h"
+ #include "lichii/configuration/configuration_shared.h"
++#include "lichii/util/icon_search.h"
+ 
+ namespace Core {
+ class System;
+@@ -88,6 +89,8 @@ signals:
+ 
+     /// The custom artwork was saved or removed.
+     void CustomArtworkChanged(u64 program_id);
++    /// The custom hero background was saved or removed.
++    void CustomHeroChanged(u64 program_id);
+ 
+ private:
+     void done(int result) override;
+@@ -104,6 +107,12 @@ private:
+     void OnBrowseIiDB();
+     void OnRemoveCustomIcon();
+     void UpdateRemoveIconButton();
++    void UpdateHeroPreview(const QPixmap& map);
++    void StageCustomHero(QImage hero);
++    void OnUploadCustomHero();
++    void OnDetectCustomHero();
++    void OnRemoveCustomHero();
++    void UpdateRemoveHeroButton();
+     bool SaveCustomMetadata(bool show_error = false);
+ 
+     struct DetectIconResult {
+@@ -130,7 +139,14 @@ private:
+     QFutureWatcher<DetectIconResult> detect_watcher;
+     std::shared_ptr<std::atomic_bool> detect_cancel;
+ 
++    QImage pending_custom_hero;
++    bool has_custom_hero{false};
++    bool remove_custom_hero{false};
++    QFutureWatcher<ArtworkLookupResult> detect_hero_watcher;
++    std::shared_ptr<std::atomic_bool> detect_hero_cancel;
++
+     QGraphicsScene* scene;
++    QGraphicsScene* hero_scene{nullptr};
+ 
+     std::unique_ptr<QtConfig> game_config;
+ 
+diff --git a/src/lichii/configuration/configure_per_game.ui b/src/lichii/configuration/configure_per_game.ui
+index e576a0a776..4e37188fc3 100644
+--- a/src/lichii/configuration/configure_per_game.ui
++++ b/src/lichii/configuration/configure_per_game.ui
+@@ -157,6 +157,138 @@
+           </layout>
+          </widget>
+         </item>
++        <item alignment="Qt::AlignHCenter">
++         <widget class="QWidget" name="hero_artwork_widget" native="true">
++          <property name="minimumSize">
++           <size>
++            <width>256</width>
++            <height>0</height>
++           </size>
++          </property>
++          <property name="maximumSize">
++           <size>
++            <width>256</width>
++            <height>16777215</height>
++           </size>
++          </property>
++          <layout class="QVBoxLayout" name="hero_artwork_layout">
++           <property name="spacing">
++            <number>6</number>
++           </property>
++           <property name="leftMargin">
++            <number>0</number>
++           </property>
++           <property name="topMargin">
++            <number>6</number>
++           </property>
++           <property name="rightMargin">
++            <number>0</number>
++           </property>
++           <property name="bottomMargin">
++            <number>2</number>
++           </property>
++           <item>
++            <widget class="QLabel" name="label_hero_artwork">
++             <property name="text">
++              <string>Background Art</string>
++             </property>
++            </widget>
++           </item>
++           <item>
++            <widget class="QGraphicsView" name="hero_view">
++             <property name="sizePolicy">
++              <sizepolicy hsizetype="Maximum" vsizetype="Maximum">
++               <horstretch>0</horstretch>
++               <verstretch>0</verstretch>
++              </sizepolicy>
++             </property>
++             <property name="minimumSize">
++              <size>
++               <width>256</width>
++               <height>84</height>
++              </size>
++             </property>
++             <property name="maximumSize">
++              <size>
++               <width>256</width>
++               <height>84</height>
++              </size>
++             </property>
++             <property name="verticalScrollBarPolicy">
++              <enum>Qt::ScrollBarAlwaysOff</enum>
++             </property>
++             <property name="horizontalScrollBarPolicy">
++              <enum>Qt::ScrollBarAlwaysOff</enum>
++             </property>
++             <property name="interactive">
++              <bool>false</bool>
++             </property>
++            </widget>
++           </item>
++           <item>
++            <layout class="QGridLayout" name="hero_buttons_layout">
++             <property name="spacing">
++              <number>6</number>
++             </property>
++             <property name="leftMargin">
++              <number>0</number>
++             </property>
++             <property name="topMargin">
++              <number>0</number>
++             </property>
++             <property name="rightMargin">
++              <number>0</number>
++             </property>
++             <property name="bottomMargin">
++              <number>0</number>
++             </property>
++             <item row="0" column="0">
++              <widget class="QPushButton" name="button_detect_hero">
++               <property name="sizePolicy">
++                <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
++                 <horstretch>0</horstretch>
++                 <verstretch>0</verstretch>
++                </sizepolicy>
++               </property>
++               <property name="toolTip">
++                <string>Look up background art on SteamGridDB using your saved API key. Apply or OK saves changes.</string>
++               </property>
++               <property name="text">
++                <string>Auto-Find</string>
++               </property>
++              </widget>
++             </item>
++             <item row="0" column="1">
++              <widget class="QPushButton" name="button_upload_hero">
++               <property name="sizePolicy">
++                <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
++                 <horstretch>0</horstretch>
++                 <verstretch>0</verstretch>
++                </sizepolicy>
++               </property>
++               <property name="toolTip">
++                <string>Preview a local image as the game background. Apply or OK saves changes.</string>
++               </property>
++               <property name="text">
++                <string>Upload...</string>
++               </property>
++              </widget>
++             </item>
++             <item row="1" column="0" colspan="2">
++              <widget class="QPushButton" name="button_remove_hero">
++               <property name="toolTip">
++                <string>Remove custom background art. Apply or OK saves changes.</string>
++               </property>
++               <property name="text">
++                <string>Remove Background</string>
++               </property>
++              </widget>
++             </item>
++            </layout>
++           </item>
++          </layout>
++         </widget>
++        </item>
+         <item>
+          <layout class="QGridLayout" name="gridLayout_2">
+           <item row="6" column="1">
+diff --git a/src/lichii/main_window.cpp b/src/lichii/main_window.cpp
+index afafb44736..08ff36b1e5 100644
+--- a/src/lichii/main_window.cpp
++++ b/src/lichii/main_window.cpp
+@@ -4953,6 +4953,8 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
+     // Artwork saved here wins over a SteamGridDB lookup still running for the game.
+     connect(&dialog, &ConfigurePerGame::CustomArtworkChanged, game_list,
+             &GameList::OnCustomArtworkChanged);
++    connect(&dialog, &ConfigurePerGame::CustomHeroChanged, game_list,
++            &GameList::OnCustomHeroChanged);
+     connect(&dialog, &ConfigurePerGame::BrowseModsRequested, this, [&] {
+         QSet<QString> store_toggled;
+         const bool changed = OpenModStore(&dialog, title_id, file_name, store_toggled);
+-- 
+2.55.0.windows.5
+

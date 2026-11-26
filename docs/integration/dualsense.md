@@ -6,8 +6,8 @@ This guide details how to integrate PlayStation 5 DualSense (`0x054C:0x0CE6` / `
 > **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 > [!WARNING]
-> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
-> For authentic HD Rumble synthesis, host emulators **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+> **15 ms rate filter: bypass it only for pads RenHDrum drives**
+> The host rate-limiting block (`src/hid_core/frontend/emulated_controller.cpp`) swallows micro-timed HD Rumble sub-packets before they reach RenHDrum. I do not ask users to turn on `Accurate Vibration`. The host skips that filter conditionally, only for a pad that RenHDrum is currently driving; other pads keep the normal filter. The user changes no setting.
 
 ---
 
@@ -179,6 +179,30 @@ RenHdcTriTrigger *tri = renhdrum_tri_trigger_create();
 ```
 
 Send trigger blocks from **one thread only**, release the speaker and the triggers on unplug and on exit, and give each wired DualSense its own audio stream. Signatures: [c-abi-reference.md](c-abi-reference.md) and `include/renhdrum.h`.
+
+#### Trigger presets
+When a game integration knows what the player is doing (pulling a bow, out of ammo, braking, skidding), I expose a shared set of 14 trigger presets (`RenHdcTriggerPreset`) so every game layer speaks one vocabulary (`preset_id`, `level` in `0.0..=1.0`, monotonic `now_ms`).
+
+| ID (`RENHDRUM_TRIG_*`) | Name | When I use it |
+|---|---|---|
+| `0` `OFF` | Forced release | Menus, pause, cutscenes, or immediate stop (`level = 0` also maps here) |
+| `1` `TENSION` | Progressive pull | Bow, slingshot, charge-up (peak caps to strength 4 after 10 s; immediate Off on release) |
+| `2` `TWO_STAGE` | Two-stage | Half-pull aim or mode selection, break through the wall to fire |
+| `3` `CRISP_SHOT` | Crisp break | Semi-auto firearm trigger break |
+| `4` `AUTO_FIRE` | Auto fire | Rapid-fire pulsing kick (stops after 5 s) |
+| `5` `EMPTY_SOFT` | Empty soft | Dry trigger with a light tap near the bottom |
+| `6` `JAMMED` | Jammed wall | Weapon jam or hard block (caps to strength 4 after 3 s; soft release) |
+| `7` `BRAKE` | Progressive brake | Hydraulic brake pedal getting heavier near full pull (caps after 8 s; soft release) |
+| `8` `ABS_BRAKE` | ABS brake | Pulsed brake vibration (falls back to `BRAKE` after 4 s; soft release) |
+| `9` `WHEELSPIN` | Wheelspin | Tire slip / drift vibration (softly stops after 5 s) |
+| `10` `THROTTLE` | Throttle | Light long-session accelerator curve capped at strength 4 (soft release) |
+| `11` `HEAVY_LOAD` | Heavy load | Carrying a heavy object or holding a heavy shield (caps to strength 3 after 12 s; soft release) |
+| `12` `IMPACT_PULSE` | Impact pulse | One-shot 100 ms overlay (gear shift, collision, parry; >= 80 ms rest between pulses), restores prior preset |
+| `13` `ENGINE_ROUGH` | Engine / rough | Gravel, rev limiter, machinery vibration (caps to amplitude 2 after 10 s; soft release) |
+
+- **500 ms TTL:** Keep calling `renhdrum_trigger_preset_set` periodically (e.g. every frame). If no update arrives for 500 ms, I softly step resistance down over 200 ms and return to `Off`.
+- **Tier 1 / Tier 2 priority:** I do not blend `RenHdcTriggerPreset` (Tier 2) and `RenHdcTriTrigger` (Tier 1) inside the core. When `renhdrum_trigger_preset_tick` outputs a non-Off effect (`out11[0] != 0x05`), send that; while the preset is `Off`, fall back to `renhdrum_tri_trigger_update`.
+- **Safety:** Do not hold heavy static resistance for long periods. Built-in duration caps (3–12 s), a 40 Hz vibration ceiling, and 200 ms soft releases exist to protect fingers and plastic trigger gears.
 
 ### 6.3 Bluetooth
 There is no audio device over Bluetooth, so everything goes into the combined HID report `0x36` (398 bytes, one every `RENHDRUM_DS5_BT_PERIOD_NS`, 10.667 ms): rumble, triggers and the speaker. The host only calls one function:

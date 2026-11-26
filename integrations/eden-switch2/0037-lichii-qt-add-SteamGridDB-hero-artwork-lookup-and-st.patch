@@ -1,0 +1,837 @@
+From beca0e3f0f02bb85af231005bc614bf9e15f3463 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 19:57:54 +0700
+Subject: [PATCH 37/41] lichii/qt: add SteamGridDB hero artwork lookup and
+ storage
+
+---
+ src/lichii/game/game_list.cpp               | 218 +++++++++++----
+ src/lichii/game/game_list.h                 |  15 +-
+ src/lichii/util/icon_search.cpp             | 285 ++++++++++++++------
+ src/lichii/util/icon_search.h               |   7 +
+ src/qt_common/util/custom_game_metadata.cpp |  47 ++++
+ src/qt_common/util/game.h                   |  12 +
+ 6 files changed, 442 insertions(+), 142 deletions(-)
+
+diff --git a/src/lichii/game/game_list.cpp b/src/lichii/game/game_list.cpp
+index e4978f1596..95006ed051 100644
+--- a/src/lichii/game/game_list.cpp
++++ b/src/lichii/game/game_list.cpp
+@@ -506,10 +506,16 @@ void GameList::QueueArtworkLookups() {
+             const QStandardItem* item = parent->child(row);
+             if (item->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                 GameListItemType::Game) {
+-                // Games with an icon in the file or custom artwork already have a picture.
+-                if (!item->data(GameListItemPath::HasIconRole).toBool()) {
+-                    QueueArtworkLookup(item->data(GameListItemPath::ProgramIdRole).toULongLong(),
+-                                       item->data(GameListItemPath::TitleRole).toString(), false);
++                const u64 program_id = item->data(GameListItemPath::ProgramIdRole).toULongLong();
++                const bool need_cover = !item->data(GameListItemPath::HasIconRole).toBool();
++                std::error_code ec;
++                const bool need_hero =
++                    program_id != 0 &&
++                    !std::filesystem::exists(QtCommon::Game::CustomHeroPath(program_id), ec);
++                if (need_cover || need_hero) {
++                    QueueArtworkLookup(program_id,
++                                       item->data(GameListItemPath::TitleRole).toString(), false,
++                                       need_cover, need_hero);
+                 }
+             } else {
+                 visit(item);
+@@ -519,9 +525,11 @@ void GameList::QueueArtworkLookups() {
+     visit(item_model->invisibleRootItem());
+ }
+ 
+-void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool forced) {
++void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool forced,
++                                  bool fetch_cover, bool fetch_hero) {
+     const std::string& key = UISettings::values.steamgriddb_api_key.GetValue();
+-    if (program_id == 0 || title.trimmed().isEmpty() || key.empty()) {
++    if (program_id == 0 || title.trimmed().isEmpty() || key.empty() ||
++        (!fetch_cover && !fetch_hero)) {
+         return;
+     }
+     // A new key gives the games looked up with the old one another try.
+@@ -535,21 +543,40 @@ void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool for
+     artwork_attempted.insert(program_id);
+     for (auto& queued : artwork_queue) {
+         if (queued.program_id == program_id) {
++            queued.fetch_cover = queued.fetch_cover || fetch_cover;
++            queued.fetch_hero = queued.fetch_hero || fetch_hero;
+             // A forced lookup takes over the waiting one, with the name the game has now.
+             if (forced) {
+                 queued.title = title.trimmed();
+                 queued.forced = true;
+             }
++            if (fetch_cover) {
++                artwork_newest.insert(program_id, queued.serial);
++            }
++            if (fetch_hero) {
++                hero_newest.insert(program_id, queued.serial);
++            }
+             return;
+         }
+     }
+     const u64 serial = ++artwork_serial;
+-    artwork_newest.insert(program_id, serial);
+-    artwork_queue.append({program_id, title.trimmed(), forced, serial});
++    if (fetch_cover) {
++        artwork_newest.insert(program_id, serial);
++    }
++    if (fetch_hero) {
++        hero_newest.insert(program_id, serial);
++    }
++    artwork_queue.append({program_id, title.trimmed(), forced, fetch_cover, fetch_hero, serial});
+     StartArtworkLookups();
+ }
+ 
+ void GameList::StartArtworkLookups() {
++    struct CombinedLookupResult {
++        ArtworkLookupResult cover;
++        ArtworkLookupResult hero;
++        bool did_cover{};
++        bool did_hero{};
++    };
+     while (artwork_running < MaxParallelLookups && !artwork_queue.isEmpty()) {
+         ArtworkLookup lookup = artwork_queue.takeFirst();
+         lookup.key = UISettings::values.steamgriddb_api_key.GetValue();
+@@ -560,52 +587,89 @@ void GameList::StartArtworkLookups() {
+             artwork_forced.remove(lookup.program_id);
+         }
+         ++artwork_running;
+-        auto* const watcher = new QFutureWatcher<ArtworkLookupResult>(this);
+-        connect(watcher, &QFutureWatcher<ArtworkLookupResult>::finished, this, [this, watcher,
++        auto* const watcher = new QFutureWatcher<CombinedLookupResult>(this);
++        connect(watcher, &QFutureWatcher<CombinedLookupResult>::finished, this, [this, watcher,
+                                                                                  lookup] {
+             watcher->deleteLater();
+             --artwork_running;
+-            const ArtworkLookupResult result = watcher->result();
++            const CombinedLookupResult result = watcher->result();
+             // A newer lookup of the same game wins, whichever finishes first.
+-            const bool newest = artwork_newest.value(lookup.program_id) == lookup.serial;
+-            if (newest) {
++            const bool newest_cover =
++                result.did_cover && artwork_newest.value(lookup.program_id) == lookup.serial;
++            const bool newest_hero =
++                result.did_hero && hero_newest.value(lookup.program_id) == lookup.serial;
++            if (newest_cover) {
+                 artwork_newest.remove(lookup.program_id);
++            }
++            if (newest_hero) {
++                hero_newest.remove(lookup.program_id);
++            }
++            if (!artwork_newest.contains(lookup.program_id) &&
++                !hero_newest.contains(lookup.program_id)) {
+                 artwork_forced.remove(lookup.program_id);
+             }
+-            // An automatic lookup only fills a game without artwork: artwork the user set while
+-            // it ran stays.
+-            std::error_code ec;
+-            const bool artwork_added =
+-                !lookup.forced &&
+-                std::filesystem::exists(QtCommon::Game::CustomArtworkPath(lookup.program_id), ec);
+             // A lookup whose key was cleared or replaced while it ran saves nothing.
+             const bool key_current =
+                 lookup.key == UISettings::values.steamgriddb_api_key.GetValue();
+-            if (result.status == ArtworkLookupStatus::Found && newest && !artwork_added &&
+-                key_current) {
+-                if (QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.image)) {
+-                    LOG_INFO(Frontend, "SteamGridDB artwork saved for {:016X}", lookup.program_id);
+-                    artwork_saved.insert(lookup.program_id);
+-                    ShowCustomArtwork(lookup.program_id);
++            std::error_code ec;
++            if (result.did_cover) {
++                // An automatic lookup only fills a game without artwork: artwork the user set
++                // while it ran stays.
++                const bool artwork_added =
++                    !lookup.forced &&
++                    std::filesystem::exists(QtCommon::Game::CustomArtworkPath(lookup.program_id),
++                                            ec);
++                if (result.cover.status == ArtworkLookupStatus::Found && newest_cover &&
++                    !artwork_added && key_current) {
++                    if (QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.cover.image)) {
++                        LOG_INFO(Frontend, "SteamGridDB artwork saved for {:016X}",
++                                 lookup.program_id);
++                        artwork_saved.insert(lookup.program_id);
++                        ShowCustomArtwork(lookup.program_id);
++                    }
++                } else if (newest_cover && result.cover.status != ArtworkLookupStatus::Found &&
++                           result.cover.status != ArtworkLookupStatus::Cancelled &&
++                           !artwork_failure_logged) {
++                    // Logged once per session. The key itself is never logged.
++                    artwork_failure_logged = true;
++                    const char* reason = "it could not be reached";
++                    if (result.cover.status == ArtworkLookupStatus::BadApiKey) {
++                        reason = "the API key was rejected";
++                    } else if (result.cover.status == ArtworkLookupStatus::NotFound) {
++                        reason = "no match was found";
++                    }
++                    LOG_INFO(Frontend, "SteamGridDB artwork lookup for {:016X} failed: {} {}",
++                             lookup.program_id, reason, result.cover.detail);
+                 }
+-            } else if (newest && result.status != ArtworkLookupStatus::Found &&
+-                       result.status != ArtworkLookupStatus::Cancelled &&
+-                       !artwork_failure_logged) {
+-                // A found picture that was dropped is no failure, and neither is the result of a
+-                // lookup replaced by a newer one, so the one log stays free.
+-                // Logged once per session. The key itself is never logged.
+-                artwork_failure_logged = true;
+-                const char* reason = "it could not be reached";
+-                if (result.status == ArtworkLookupStatus::BadApiKey) {
+-                    reason = "the API key was rejected";
+-                } else if (result.status == ArtworkLookupStatus::NotFound) {
+-                    reason = "no match was found";
++            }
++            if (result.did_hero) {
++                const bool hero_added =
++                    !lookup.forced &&
++                    std::filesystem::exists(QtCommon::Game::CustomHeroPath(lookup.program_id), ec);
++                if (result.hero.status == ArtworkLookupStatus::Found && newest_hero &&
++                    !hero_added && key_current) {
++                    if (QtCommon::Game::SaveCustomHero(lookup.program_id, result.hero.image)) {
++                        LOG_INFO(Frontend, "SteamGridDB hero saved for {:016X}", lookup.program_id);
++                        emit CustomHeroChanged(lookup.program_id);
++                    }
++                } else if (newest_hero && result.hero.status != ArtworkLookupStatus::Found &&
++                           result.hero.status != ArtworkLookupStatus::Cancelled &&
++                           !artwork_failure_logged) {
++                    artwork_failure_logged = true;
++                    const char* reason = "it could not be reached";
++                    if (result.hero.status == ArtworkLookupStatus::BadApiKey) {
++                        reason = "the API key was rejected";
++                    } else if (result.hero.status == ArtworkLookupStatus::NotFound) {
++                        reason = "no match was found";
++                    }
++                    LOG_INFO(Frontend, "SteamGridDB hero lookup for {:016X} failed: {} {}",
++                             lookup.program_id, reason, result.hero.detail);
+                 }
+-                LOG_INFO(Frontend, "SteamGridDB artwork lookup for {:016X} failed: {} {}",
+-                         lookup.program_id, reason, result.detail);
+             }
+-            if (result.status == ArtworkLookupStatus::BadApiKey &&
+-                lookup.key == UISettings::values.steamgriddb_api_key.GetValue()) {
++            const bool bad_key =
++                (result.did_cover && result.cover.status == ArtworkLookupStatus::BadApiKey) ||
++                (result.did_hero && result.hero.status == ArtworkLookupStatus::BadApiKey);
++            if (bad_key && key_current) {
+                 // Every other lookup would fail the same way. A late failure with a key that was
+                 // replaced since leaves the lookups of the new key alone.
+                 artwork_queue.clear();
+@@ -616,9 +680,22 @@ void GameList::StartArtworkLookups() {
+         // of an older game, so the newest release of that name is the right one.
+         const bool prefer_newest = (lookup.program_id >> 56) == 0x04;
+         watcher->setFuture(QtConcurrent::run(
+-            &artwork_pool, [title = lookup.title.toStdString(), key = lookup.key,
+-                            cancel = artwork_cancel, prefer_newest] {
+-                return LookUpSteamGridDbArtwork(title, key, *cancel, prefer_newest);
++            &artwork_pool,
++            [title = lookup.title.toStdString(), key = lookup.key, cancel = artwork_cancel,
++             prefer_newest, fetch_cover = lookup.fetch_cover, fetch_hero = lookup.fetch_hero] {
++                CombinedLookupResult combined;
++                if (fetch_cover) {
++                    combined.did_cover = true;
++                    combined.cover =
++                        LookUpSteamGridDbArtwork(title, key, *cancel, prefer_newest);
++                }
++                if (fetch_hero && !cancel->load() &&
++                    (!combined.did_cover ||
++                     combined.cover.status != ArtworkLookupStatus::BadApiKey)) {
++                    combined.did_hero = true;
++                    combined.hero = LookUpSteamGridDbHero(title, key, *cancel, prefer_newest);
++                }
++                return combined;
+             }));
+     }
+ }
+@@ -706,30 +783,69 @@ void GameList::SetGameTitle(u64 program_id, const QString& title) {
+             return;
+         }
+     }
+-    if (!artwork_newest.contains(program_id)) {
++    if (!artwork_newest.contains(program_id) && !hero_newest.contains(program_id)) {
+         return;
+     }
+     const bool forced = artwork_forced.contains(program_id);
++    const bool need_cover = artwork_newest.contains(program_id);
++    const bool need_hero = hero_newest.contains(program_id);
+     artwork_newest.remove(program_id);
++    hero_newest.remove(program_id);
+     artwork_forced.remove(program_id);
+     // An automatic lookup only fills a game that still has no artwork.
+     std::error_code ec;
++    const bool want_cover =
++        need_cover &&
++        (forced || !std::filesystem::exists(QtCommon::Game::CustomArtworkPath(program_id), ec));
++    const bool want_hero =
++        need_hero &&
++        (forced || !std::filesystem::exists(QtCommon::Game::CustomHeroPath(program_id), ec));
+     if (search_title.isEmpty() || UISettings::values.steamgriddb_api_key.GetValue().empty() ||
+-        (!forced && std::filesystem::exists(QtCommon::Game::CustomArtworkPath(program_id), ec))) {
++        (!want_cover && !want_hero)) {
+         return;
+     }
+     const u64 serial = ++artwork_serial;
+-    artwork_newest.insert(program_id, serial);
+-    artwork_queue.append({program_id, search_title, forced, serial});
++    if (want_cover) {
++        artwork_newest.insert(program_id, serial);
++    }
++    if (want_hero) {
++        hero_newest.insert(program_id, serial);
++    }
++    artwork_queue.append({program_id, search_title, forced, want_cover, want_hero, serial});
+     StartArtworkLookups();
+ }
+ 
+ void GameList::OnCustomArtworkChanged(u64 program_id) {
+     // A running lookup's result is dropped and a waiting one is not started.
+     artwork_newest.remove(program_id);
+-    artwork_forced.remove(program_id);
+-    artwork_queue.removeIf(
+-        [program_id](const ArtworkLookup& queued) { return queued.program_id == program_id; });
++    if (!hero_newest.contains(program_id)) {
++        artwork_forced.remove(program_id);
++    }
++    for (auto& queued : artwork_queue) {
++        if (queued.program_id == program_id) {
++            queued.fetch_cover = false;
++        }
++    }
++    artwork_queue.removeIf([program_id](const ArtworkLookup& queued) {
++        return queued.program_id == program_id && !queued.fetch_cover && !queued.fetch_hero;
++    });
++}
++
++void GameList::OnCustomHeroChanged(u64 program_id) {
++    // A running hero lookup's result is dropped and a waiting one is not started.
++    hero_newest.remove(program_id);
++    if (!artwork_newest.contains(program_id)) {
++        artwork_forced.remove(program_id);
++    }
++    for (auto& queued : artwork_queue) {
++        if (queued.program_id == program_id) {
++            queued.fetch_hero = false;
++        }
++    }
++    artwork_queue.removeIf([program_id](const ArtworkLookup& queued) {
++        return queued.program_id == program_id && !queued.fetch_cover && !queued.fetch_hero;
++    });
++    emit CustomHeroChanged(program_id);
+ }
+ 
+ void GameList::RefreshGameDirectory() {
+diff --git a/src/lichii/game/game_list.h b/src/lichii/game/game_list.h
+index 820d78eff5..75cff8df0e 100644
+--- a/src/lichii/game/game_list.h
++++ b/src/lichii/game/game_list.h
+@@ -109,6 +109,9 @@ public slots:
+     /// The user saved or removed the program's custom artwork: a lookup still running for it
+     /// does not replace that choice.
+     void OnCustomArtworkChanged(u64 program_id);
++    /// The user saved or removed the program's custom hero art: a lookup still running for it
++    /// does not replace that choice.
++    void OnCustomHeroChanged(u64 program_id);
+     void RefreshExternalContent();
+     void UpdateIconSizes();
+     void OnPopulate();
+@@ -147,6 +150,7 @@ signals:
+     void ShowList(bool show);
+     void PopulatingCompleted();
+     void SaveConfig();
++    void CustomHeroChanged(u64 program_id);
+ 
+ private slots:
+     void OnTextChanged(const QString& new_text);
+@@ -173,10 +177,12 @@ private:
+ 
+     void RetranslateUI();
+ 
+-    /// Queues a SteamGridDB lookup for every game without artwork, once per game per session.
++    /// Queues a SteamGridDB lookup for every game without artwork or hero, once per game per
++    /// session.
+     void QueueArtworkLookups();
+-    /// Queues one game; forced lookups run again and replace existing custom artwork.
+-    void QueueArtworkLookup(u64 program_id, const QString& title, bool forced);
++    /// Queues one game; forced lookups run again and replace existing custom artwork/hero.
++    void QueueArtworkLookup(u64 program_id, const QString& title, bool forced,
++                            bool fetch_cover = true, bool fetch_hero = true);
+     void StartArtworkLookups();
+     /// Shows the program's custom artwork in every library entry of it, without a rescan.
+     void ShowCustomArtwork(u64 program_id);
+@@ -218,6 +224,8 @@ private:
+         u64 program_id;
+         QString title;
+         bool forced{};
++        bool fetch_cover{true};
++        bool fetch_hero{true};
+         /// Only the newest lookup of a program may save its result.
+         u64 serial{};
+         /// The API key the lookup ran with.
+@@ -226,6 +234,7 @@ private:
+     QList<ArtworkLookup> artwork_queue;
+     QSet<u64> artwork_attempted;
+     QHash<u64, u64> artwork_newest;
++    QHash<u64, u64> hero_newest;
+     /// Programs whose running newest lookup was asked for by the user.
+     QSet<u64> artwork_forced;
+     u64 artwork_serial = 0;
+diff --git a/src/lichii/util/icon_search.cpp b/src/lichii/util/icon_search.cpp
+index e2ea08559a..62cc259b5d 100644
+--- a/src/lichii/util/icon_search.cpp
++++ b/src/lichii/util/icon_search.cpp
+@@ -155,6 +155,7 @@ std::string UrlEncode(std::string_view value) {
+ 
+ constexpr std::chrono::seconds SearchDeadline{10};
+ constexpr std::size_t MaxHttpBodySize = 4 * 1024 * 1024;
++constexpr std::size_t MaxHeroHttpBodySize = 16 * 1024 * 1024;
+ constexpr std::chrono::seconds PrimarySourceDeadline{5};
+ // cpp-httplib cannot be interrupted from another thread while it connects or waits for the first
+ // bytes of a reply, so these waits are kept short: a cancelled lookup ends within them instead of
+@@ -179,7 +180,8 @@ struct HttpResult {
+ 
+ // Every request shares one deadline and cancel flag, so a whole search can never run past it.
+ HttpResult HttpGet(const std::string& full_url, std::chrono::steady_clock::time_point deadline,
+-                   const std::atomic_bool& cancel, const std::string& bearer_token = {}) {
++                   const std::atomic_bool& cancel, const std::string& bearer_token = {},
++                   std::size_t max_body_size = MaxHttpBodySize) {
+     using namespace std::chrono;
+     HttpResult result;
+     if (cancel) {
+@@ -234,7 +236,7 @@ HttpResult HttpGet(const std::string& full_url, std::chrono::steady_clock::time_
+             result.detail = fmt::format("HTTP {}", res->status);
+             return result;
+         }
+-        if (res->body.empty() || res->body.size() > MaxHttpBodySize) {
++        if (res->body.empty() || res->body.size() > max_body_size) {
+             result.detail = "unexpected response size";
+             return result;
+         }
+@@ -326,6 +328,41 @@ std::vector<std::string> ParseSgdbIconUrls(const std::string& body) {
+     return urls;
+ }
+ 
++// Static PNG/JPEG hero URLs from a SteamGridDB response, skipping animated images.
++std::vector<std::string> ParseSgdbHeroUrls(const std::string& body) {
++    std::vector<std::string> urls;
++    const auto json = nlohmann::json::parse(body, nullptr, false);
++    if (json.is_discarded() || !json.is_object() || !json.contains("data") ||
++        !json["data"].is_array()) {
++        return urls;
++    }
++    for (const auto& item : json["data"]) {
++        if (urls.size() >= MaxSgdbChoices) {
++            break;
++        }
++        if (!item.is_object() || !item.contains("url") || !item["url"].is_string()) {
++            continue;
++        }
++        if (item.contains("mime") && item["mime"].is_string()) {
++            const auto mime = item["mime"].get<std::string>();
++            if (mime != "image/png" && mime != "image/jpeg") {
++                continue;
++            }
++        }
++        const auto url = item["url"].get<std::string>();
++        const auto lower_url = Common::ToLower(url);
++        const auto query_pos = lower_url.find('?');
++        const std::string_view path_view = query_pos == std::string::npos
++                                               ? std::string_view{lower_url}
++                                               : std::string_view{lower_url}.substr(0, query_pos);
++        if (path_view.ends_with(".webp") || path_view.ends_with(".gif")) {
++            continue;
++        }
++        urls.push_back(url);
++    }
++    return urls;
++}
++
+ int ScoreCandidateTitle(const std::string& candidate, const std::string& query) {
+     const std::string c_slug = NormalizeGameSlug(candidate);
+     const std::string q_slug = NormalizeGameSlug(query);
+@@ -543,11 +580,27 @@ IconSearchResult RunIconSearch(const std::string& raw_query, u64 tid, const std:
+     return out;
+ }
+ 
+-} // namespace
++struct SgdbGameIdResult {
++    ArtworkLookupStatus status{ArtworkLookupStatus::NotFound};
++    int game_id{0};
++    std::string detail;
++};
+ 
+-ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
+-                                             const std::atomic_bool& cancel, bool prefer_newest) {
+-    ArtworkLookupResult out;
++ArtworkLookupStatus ToArtworkFailureStatus(const HttpResult& res) {
++    switch (res.status) {
++    case HttpStatus::Unauthorized:
++        return ArtworkLookupStatus::BadApiKey;
++    case HttpStatus::Cancelled:
++        return ArtworkLookupStatus::Cancelled;
++    default:
++        return ArtworkLookupStatus::NetworkError;
++    }
++}
++
++SgdbGameIdResult ResolveSgdbGameId(const std::string& title, const std::string& api_key,
++                                   std::chrono::steady_clock::time_point deadline,
++                                   const std::atomic_bool& cancel, bool prefer_newest) {
++    SgdbGameIdResult out;
+     // A trailing "(2026)" is not part of the name SteamGridDB knows; it says which release.
+     std::string search_title = title;
+     int wanted_year = 0;
+@@ -566,106 +619,117 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
+         }
+     }
+     if (title.empty() || search_title.empty() || api_key.empty()) {
+-        out.status = ArtworkLookupStatus::NotFound;
+         return out;
+     }
+-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+-    const auto failed = [&out](const HttpResult& res) {
+-        out.status = res.status == HttpStatus::Unauthorized ? ArtworkLookupStatus::BadApiKey
+-                     : res.status == HttpStatus::Cancelled  ? ArtworkLookupStatus::Cancelled
+-                                                            : ArtworkLookupStatus::NetworkError;
+-        out.detail = res.detail;
++    const auto search = HttpGet(
++        std::string{SgdbApiBase} + "/search/autocomplete/" + UrlEncodePathSegment(search_title),
++        deadline, cancel, api_key);
++    if (search.status != HttpStatus::Ok) {
++        out.status = ToArtworkFailureStatus(search);
++        out.detail = search.detail;
+         return out;
++    }
++    // The first autocomplete entry is SteamGridDB's best match. Entries with the same name
++    // are other releases of it (an original and its remake); the year picks between them.
++    struct Entry {
++        int id{};
++        std::string name;
++        int year{};
++        s64 release{};
+     };
+-    const auto sgdb_get = [&](const std::string& path) {
+-        return HttpGet(std::string{SgdbApiBase} + path, deadline, cancel, api_key);
++    std::vector<Entry> entries;
++    const auto parsed = nlohmann::json::parse(search.body, nullptr, false);
++    if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("data") &&
++        parsed["data"].is_array()) {
++        for (const auto& item : parsed["data"]) {
++            if (!item.is_object() || !item.contains("id") || !item["id"].is_number_integer()) {
++                continue;
++            }
++            Entry entry{.id = item["id"].get<int>()};
++            if (item.contains("name") && item["name"].is_string()) {
++                entry.name = item["name"].get<std::string>();
++            }
++            if (item.contains("release_date") && item["release_date"].is_number_integer()) {
++                entry.release = item["release_date"].get<s64>();
++                entry.year = QDateTime::fromSecsSinceEpoch(entry.release).toUTC().date().year();
++            }
++            entries.push_back(std::move(entry));
++        }
++    }
++    const auto simple_name = [](const std::string& name) {
++        std::string out_name;
++        for (const unsigned char c : name) {
++            if (std::isalnum(c)) {
++                out_name += static_cast<char>(std::tolower(c));
++            }
++        }
++        return out_name;
+     };
+-    try {
+-        const auto search =
+-            sgdb_get("/search/autocomplete/" + UrlEncodePathSegment(search_title));
+-        if (search.status != HttpStatus::Ok) {
+-            return failed(search);
+-        }
+-        // The first autocomplete entry is SteamGridDB's best match. Entries with the same name
+-        // are other releases of it (an original and its remake); the year picks between them.
+-        struct Entry {
+-            int id{};
+-            std::string name;
+-            int year{};
+-            s64 release{};
+-        };
+-        std::vector<Entry> entries;
+-        const auto parsed = nlohmann::json::parse(search.body, nullptr, false);
+-        if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("data") &&
+-            parsed["data"].is_array()) {
+-            for (const auto& item : parsed["data"]) {
+-                if (!item.is_object() || !item.contains("id") || !item["id"].is_number_integer()) {
++    if (!entries.empty()) {
++        const Entry* chosen = &entries.front();
++        const std::string best_name = simple_name(chosen->name);
++        const std::string searched_name = simple_name(search_title);
++        // The year only picks between releases of the game: an entry of that year with
++        // another name is a different game.
++        const Entry* same_name_in_year = nullptr;
++        const Entry* searched_name_in_year = nullptr;
++        if (wanted_year != 0) {
++            for (const auto& entry : entries) {
++                const std::string name = simple_name(entry.name);
++                // Names with no ASCII letters or digits (Japanese-only) all match each other.
++                if (entry.year != wanted_year || name.empty()) {
+                     continue;
+                 }
+-                Entry entry{.id = item["id"].get<int>()};
+-                if (item.contains("name") && item["name"].is_string()) {
+-                    entry.name = item["name"].get<std::string>();
++                if (!same_name_in_year && name == best_name) {
++                    same_name_in_year = &entry;
+                 }
+-                if (item.contains("release_date") && item["release_date"].is_number_integer()) {
+-                    entry.release = item["release_date"].get<s64>();
+-                    entry.year =
+-                        QDateTime::fromSecsSinceEpoch(entry.release).toUTC().date().year();
++                if (!searched_name_in_year && name == searched_name) {
++                    searched_name_in_year = &entry;
+                 }
+-                entries.push_back(std::move(entry));
+             }
+         }
+-        const auto simple_name = [](const std::string& name) {
+-            std::string out_name;
+-            for (const unsigned char c : name) {
+-                if (std::isalnum(c)) {
+-                    out_name += static_cast<char>(std::tolower(c));
++        if (same_name_in_year || searched_name_in_year) {
++            chosen = same_name_in_year ? same_name_in_year : searched_name_in_year;
++        } else if (prefer_newest && !best_name.empty()) {
++            for (const auto& entry : entries) {
++                if (simple_name(entry.name) == best_name && entry.release > chosen->release) {
++                    chosen = &entry;
+                 }
+             }
+-            return out_name;
+-        };
+-        int game_id = 0;
+-        if (!entries.empty()) {
+-            const Entry* chosen = &entries.front();
+-            const std::string best_name = simple_name(chosen->name);
+-            const std::string searched_name = simple_name(search_title);
+-            // The year only picks between releases of the game: an entry of that year with
+-            // another name is a different game.
+-            const Entry* same_name_in_year = nullptr;
+-            const Entry* searched_name_in_year = nullptr;
+-            if (wanted_year != 0) {
+-                for (const auto& entry : entries) {
+-                    const std::string name = simple_name(entry.name);
+-                    // Names with no ASCII letters or digits (Japanese-only) all match each other.
+-                    if (entry.year != wanted_year || name.empty()) {
+-                        continue;
+-                    }
+-                    if (!same_name_in_year && name == best_name) {
+-                        same_name_in_year = &entry;
+-                    }
+-                    if (!searched_name_in_year && name == searched_name) {
+-                        searched_name_in_year = &entry;
+-                    }
+-                }
+-            }
+-            if (same_name_in_year || searched_name_in_year) {
+-                chosen = same_name_in_year ? same_name_in_year : searched_name_in_year;
+-            } else if (prefer_newest && !best_name.empty()) {
+-                for (const auto& entry : entries) {
+-                    if (simple_name(entry.name) == best_name && entry.release > chosen->release) {
+-                        chosen = &entry;
+-                    }
+-                }
+-            }
+-            game_id = chosen->id;
+         }
+-        if (game_id <= 0) {
+-            out.status = ArtworkLookupStatus::NotFound;
++        out.game_id = chosen->id;
++        if (out.game_id > 0) {
++            out.status = ArtworkLookupStatus::Found;
++        }
++    }
++    return out;
++}
++
++} // namespace
++
++ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
++                                             const std::atomic_bool& cancel, bool prefer_newest) {
++    ArtworkLookupResult out;
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
++    const auto failed = [&out](const HttpResult& res) {
++        out.status = ToArtworkFailureStatus(res);
++        out.detail = res.detail;
++        return out;
++    };
++    const auto sgdb_get = [&](const std::string& path) {
++        return HttpGet(std::string{SgdbApiBase} + path, deadline, cancel, api_key);
++    };
++    try {
++        const auto resolved = ResolveSgdbGameId(title, api_key, deadline, cancel, prefer_newest);
++        if (resolved.status != ArtworkLookupStatus::Found) {
++            out.status = resolved.status;
++            out.detail = resolved.detail;
+             return out;
+         }
+         // Square grids first, then icons.
+         for (const auto& list_path :
+-             {fmt::format("/grids/game/{}?dimensions=512x512,1024x1024", game_id),
+-              fmt::format("/icons/game/{}", game_id)}) {
++             {fmt::format("/grids/game/{}?dimensions=512x512,1024x1024", resolved.game_id),
++              fmt::format("/icons/game/{}", resolved.game_id)}) {
+             const auto list = sgdb_get(list_path);
+             if (list.status != HttpStatus::Ok) {
+                 return failed(list);
+@@ -693,6 +757,51 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
+     return out;
+ }
+ 
++ArtworkLookupResult LookUpSteamGridDbHero(const std::string& title, const std::string& api_key,
++                                          const std::atomic_bool& cancel, bool prefer_newest) {
++    ArtworkLookupResult out;
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
++    const auto failed = [&out](const HttpResult& res) {
++        out.status = ToArtworkFailureStatus(res);
++        out.detail = res.detail;
++        return out;
++    };
++    try {
++        const auto resolved = ResolveSgdbGameId(title, api_key, deadline, cancel, prefer_newest);
++        if (resolved.status != ArtworkLookupStatus::Found) {
++            out.status = resolved.status;
++            out.detail = resolved.detail;
++            return out;
++        }
++        const auto list = HttpGet(
++            fmt::format("{}/heroes/game/{}?types=static&mimes=image/png,image/jpeg", SgdbApiBase,
++                        resolved.game_id),
++            deadline, cancel, api_key);
++        if (list.status != HttpStatus::Ok) {
++            return failed(list);
++        }
++        for (const auto& url : ParseSgdbHeroUrls(list.body)) {
++            const auto image = HttpGet(url, deadline, cancel, {}, MaxHeroHttpBodySize);
++            if (image.status == HttpStatus::Cancelled || image.status == HttpStatus::Timeout) {
++                return failed(image);
++            }
++            QImage decoded;
++            if (image.status == HttpStatus::Ok &&
++                decoded.loadFromData(reinterpret_cast<const uchar*>(image.body.data()),
++                                     static_cast<int>(image.body.size()))) {
++                out.status = ArtworkLookupStatus::Found;
++                out.image = std::move(decoded);
++                return out;
++            }
++        }
++        out.status = ArtworkLookupStatus::NotFound;
++    } catch (const std::exception& e) {
++        out.status = ArtworkLookupStatus::NetworkError;
++        out.detail = e.what();
++    }
++    return out;
++}
++
+ IconSearch::IconSearch(QWidget* parent) : QObject(parent), parent_widget{parent} {
+     connect(&watcher, &QFutureWatcher<IconSearchResult>::finished, this, &IconSearch::OnFinished);
+ }
+diff --git a/src/lichii/util/icon_search.h b/src/lichii/util/icon_search.h
+index 52e2cfddfc..d81b5e5caa 100644
+--- a/src/lichii/util/icon_search.h
++++ b/src/lichii/util/icon_search.h
+@@ -54,6 +54,13 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
+                                              const std::atomic_bool& cancel,
+                                              bool prefer_newest = false);
+ 
++// Finds a static horizontal hero image for a game title on SteamGridDB with the user's API key:
++// the best title match (same rules as LookUpSteamGridDbArtwork), then its first static PNG/JPEG
++// hero from /heroes/game/{id}. Blocking; stops within 30 seconds or as soon as cancel is set.
++ArtworkLookupResult LookUpSteamGridDbHero(const std::string& title, const std::string& api_key,
++                                          const std::atomic_bool& cancel,
++                                          bool prefer_newest = false);
++
+ // Looks an icon up by game name on switchiconshowdown.com, falling back to SteamGridDB when the
+ // user has set an API key. The search runs in the background under one 10 second deadline; errors,
+ // the API key prompt and the choice between several icons are handled here, so a caller only
+diff --git a/src/qt_common/util/custom_game_metadata.cpp b/src/qt_common/util/custom_game_metadata.cpp
+index d7ef8ba6c7..b0c34a46e8 100644
+--- a/src/qt_common/util/custom_game_metadata.cpp
++++ b/src/qt_common/util/custom_game_metadata.cpp
+@@ -169,6 +169,53 @@ bool RemoveCustomArtwork(u64 program_id) {
+     return true;
+ }
+ 
++std::filesystem::path CustomHeroPath(u64 program_id) {
++    return Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir) / "artwork" /
++           fmt::format("{:016X}_hero.jpg", program_id);
++}
++
++std::vector<u8> ReadCustomHero(u64 program_id) {
++    if (program_id == 0) {
++        return {};
++    }
++    constexpr qint64 MaxHeroBytes = 16 * 1024 * 1024;
++    QFile file(QString::fromStdString(Common::FS::PathToUTF8String(CustomHeroPath(program_id))));
++    if (!file.open(QIODevice::ReadOnly) || file.size() > MaxHeroBytes) {
++        return {};
++    }
++    const QByteArray bytes = file.read(MaxHeroBytes + 1);
++    if (bytes.size() > MaxHeroBytes) {
++        return {};
++    }
++    return std::vector<u8>(bytes.begin(), bytes.end());
++}
++
++bool SaveCustomHero(u64 program_id, const QImage& image) {
++    if (program_id == 0 || image.isNull()) {
++        return false;
++    }
++    constexpr int MaxHeroWidth = 1920;
++    const QImage scaled =
++        image.width() > MaxHeroWidth
++            ? image.scaledToWidth(MaxHeroWidth, Qt::SmoothTransformation)
++            : image;
++    const auto path = CustomHeroPath(program_id);
++    if (!Common::FS::CreateDirs(path.parent_path())) {
++        LOG_ERROR(Frontend, "Cannot create the custom artwork folder");
++        return false;
++    }
++    QSaveFile file(QString::fromStdString(Common::FS::PathToUTF8String(path)));
++    if (!file.open(QIODevice::WriteOnly) || !scaled.save(&file, "JPEG", 90) || !file.commit()) {
++        LOG_ERROR(Frontend, "Cannot write custom hero for {:016X}", program_id);
++        return false;
++    }
++    return true;
++}
++
++bool RemoveCustomHero(u64 program_id) {
++    return RemoveCustomFile(CustomHeroPath(program_id));
++}
++
+ std::filesystem::path CustomTitlePath(u64 program_id) {
+     return Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir) / "names" /
+            fmt::format("{:016X}.txt", program_id);
+diff --git a/src/qt_common/util/game.h b/src/qt_common/util/game.h
+index 241e5bd406..b9d806c898 100644
+--- a/src/qt_common/util/game.h
++++ b/src/qt_common/util/game.h
+@@ -96,6 +96,18 @@ void ClearHomeMenuArtworkCache();
+ /// Deletes the program's custom artwork. Returns true when none is left.
+ bool RemoveCustomArtwork(u64 program_id);
+ 
++/// Where the horizontal hero artwork for a program is stored.
++std::filesystem::path CustomHeroPath(u64 program_id);
++
++/// The custom hero image file bytes for a program, or empty when none is set.
++std::vector<u8> ReadCustomHero(u64 program_id);
++
++/// Stores an image as the program's custom hero artwork (JPEG, at most 1920 px wide).
++[[nodiscard]] bool SaveCustomHero(u64 program_id, const QImage& image);
++
++/// Deletes the program's custom hero artwork. Returns true when none is left.
++bool RemoveCustomHero(u64 program_id);
++
+ // Custom name //
+ 
+ /// Where the name the user gave a program is stored (one UTF-8 line). Like custom artwork it
+-- 
+2.55.0.windows.5
+

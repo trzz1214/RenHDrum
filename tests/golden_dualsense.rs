@@ -35,7 +35,9 @@ fn run(scenario: &str, chunk: usize) -> Vec<(String, Vec<f32>)> {
                 while left > 0 {
                     let frames = left.min(chunk);
                     dsp.fill_interleaved_f32(&mut buf[..frames * DUALSENSE_CHANNELS]);
-                    for frame in buf[..frames * DUALSENSE_CHANNELS].chunks_exact(DUALSENSE_CHANNELS)
+                    for frame in buf[..frames * DUALSENSE_CHANNELS]
+                        .as_chunks::<DUALSENSE_CHANNELS>()
+                        .0
                     {
                         out.push(frame[DUALSENSE_LEFT_CHANNEL]);
                         out.push(frame[DUALSENSE_RIGHT_CHANNEL]);
@@ -60,8 +62,10 @@ fn dualsense_matches_ryuhdr_golden() {
         for (name, ours) in run(&scenario, chunk) {
             let bytes = std::fs::read(dir.join(format!("{name}.f32"))).unwrap();
             let gold: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             assert_eq!(ours.len(), gold.len(), "{name}: frame count");
             assert!(

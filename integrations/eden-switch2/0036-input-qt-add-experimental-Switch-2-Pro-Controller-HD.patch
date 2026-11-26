@@ -1,0 +1,511 @@
+From 1b8dc1bd6a36a8ecbc66728b6cd276a571528e33 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 15:29:07 +0700
+Subject: [PATCH 36/36] input/qt: add experimental Switch 2 Pro Controller HD
+ Rumble 2 via RenHDrum
+
+Frequency law measured by 101Leafy (Frizti/Fritchii#6). SDL libusb build after zortos293/Lichii#2046.
+---
+ externals/renhdrum/renhdrum.h                 |  54 +++++-
+ src/input_common/drivers/renhdrum_pad.cpp     | 183 +++++++++++++++++-
+ src/input_common/drivers/renhdrum_pad.h       |   5 +-
+ .../configuration/configure_hd_rumble.cpp     |   2 +-
+ .../renhdrum_settings_dialog.cpp              |  11 +-
+ .../configuration/renhdrum_settings_dialog.h  |   2 +-
+ 6 files changed, 248 insertions(+), 9 deletions(-)
+
+diff --git a/externals/renhdrum/renhdrum.h b/externals/renhdrum/renhdrum.h
+index c2b956192a..880b0afff8 100644
+--- a/externals/renhdrum/renhdrum.h
++++ b/externals/renhdrum/renhdrum.h
+@@ -8,7 +8,7 @@
+ extern "C" {
+ #endif
+ 
+-#define RENHDRUM_VERSION 0x000400
++#define RENHDRUM_VERSION 0x000500
+ 
+ #define RENHDRUM_OK 0
+ #define RENHDRUM_ERR_NULL_PTR -1
+@@ -322,8 +322,10 @@ int32_t renhdrum_dualsense_dsp_build_bt_report(
+     uint8_t buffer_length,
+     uint8_t *out_report142
+ );
+-/* DualSense over Bluetooth, combined report 0x36 (rumble + adaptive triggers, no speaker), one per
+-   RENHDRUM_DS5_BT_PERIOD_NS. Layout after Enhanced-PS5-DualSense-Haptics-Bridge (MIT, ragnarok179).
++/* DualSense over Bluetooth, combined report 0x36 (rumble + adaptive triggers + speaker), one per
++   RENHDRUM_DS5_BT_PERIOD_NS. The speaker is one Opus frame (200 bytes) per report, on while HD Haptics is on
++   (the core turns it on by itself if the host never called renhdrum_dualsense_dsp_set_speaker; hosts should
++   call it on Bluetooth too). Layout after Enhanced-PS5-DualSense-Haptics-Bridge (MIT, ragnarok179).
+    state47_or_null: 47-byte block (byte 0 bits 0x04 R2 / 0x08 L2, R2 effect [10..21], L2 [21..32]);
+    NULL = triggers untouched. seq is reserved/unused. out_report398 needs 398 bytes.
+    Returns 1 = send out_report398, 0 = nothing to send (rumble + triggers idle over 2 s), < 0 on error. */
+@@ -395,6 +397,30 @@ int32_t renhdrum_tri_trigger_update(
+    a streak started with or after trigger hold (gap > 30 ms starts a new streak) mutes new pulses
+    while held and for 500 ms after the last call. */
+ void renhdrum_tri_trigger_note_action(RenHdcTriTrigger *h, uint32_t now_ms);
++/* Shared adaptive trigger presets (Tier 2, one handle per trigger).
++   Priority rule (the core does not blend Tier 1 and Tier 2): while a preset is active and non-Off
++   (out11[0] != 0x05), the host sends the preset's 11 bytes; when the preset is Off, the host falls
++   back to renhdrum_tri_trigger_update as before.
++   tick returns 1 = send out11, 0 = nothing to send, < 0 = error (null pointer). */
++#define RENHDRUM_TRIG_OFF          0  /* Forced release: smooth free trigger */
++#define RENHDRUM_TRIG_TENSION      1  /* Progressive pull: bow, slingshot, charge (caps after 10 s) */
++#define RENHDRUM_TRIG_TWO_STAGE    2  /* Two-stage: half-pull aim/mode, break through to fire */
++#define RENHDRUM_TRIG_CRISP_SHOT   3  /* Crisp break: semi-auto firearm trigger */
++#define RENHDRUM_TRIG_AUTO_FIRE    4  /* Automatic fire: pulsing kick (caps at 5 s) */
++#define RENHDRUM_TRIG_EMPTY_SOFT   5  /* Empty soft: dry trigger with light bottom tap */
++#define RENHDRUM_TRIG_JAMMED       6  /* Jammed wall: blocked early (caps after 3 s, soft release) */
++#define RENHDRUM_TRIG_BRAKE        7  /* Progressive brake: heavier near full pull (caps after 8 s) */
++#define RENHDRUM_TRIG_ABS_BRAKE    8  /* ABS brake: pulsed release (falls back to Brake after 4 s) */
++#define RENHDRUM_TRIG_WHEELSPIN    9  /* Wheelspin / drift vibration (stops after 5 s) */
++#define RENHDRUM_TRIG_THROTTLE     10 /* Throttle pedal: light continuous curve (capped at strength 4) */
++#define RENHDRUM_TRIG_HEAVY_LOAD   11 /* Heavy load: carrying weight / raised shield (caps after 12 s) */
++#define RENHDRUM_TRIG_IMPACT_PULSE 12 /* One-shot 100 ms impact pulse overlay (>= 80 ms gap) */
++#define RENHDRUM_TRIG_ENGINE_ROUGH 13 /* Engine / rough surface vibration (caps after 10 s) */
++typedef struct RenHdcTriggerPreset RenHdcTriggerPreset;
++RenHdcTriggerPreset *renhdrum_trigger_preset_create(void);
++void renhdrum_trigger_preset_destroy(RenHdcTriggerPreset *h);
++void renhdrum_trigger_preset_set(RenHdcTriggerPreset *h, uint8_t preset_id, float level, uint32_t now_ms);
++int32_t renhdrum_trigger_preset_tick(RenHdcTriggerPreset *h, uint32_t now_ms, uint8_t *out11);
+ /* 47-byte DS5EffectsState_t USB blocks for HD Haptics (speaker open/release, single-trigger update/off).
+    Returns 0 on success, -1 (RENHDRUM_ERR_NULL_PTR) if out47 is NULL. */
+ #define RENHDRUM_DS5_EFFECTS_SIZE 47
+@@ -429,6 +455,28 @@ int32_t renhdrum_xbox_rumble_push_half_sample(
+ int32_t renhdrum_xbox_rumble_tick(RenHdcXboxRumble *rumble, int64_t now_us, uint16_t *out_motors4);
+ int32_t renhdrum_xbox_rumble_resend(RenHdcXboxRumble *rumble);
+ 
++/* Experimental: Switch 2 Pro Controller (USB only, 057E:2069) HD Rumble 2 report 0x02 builder.
++   build_report returns 1 when out_report64 must be sent, 0 when nothing to send, < 0 on error. */
++typedef struct RenHdcPro2 RenHdcPro2;
++#define RENHDRUM_PRO2_REPORT_SIZE 64
++#define RENHDRUM_PRO2_PERIOD_US 15000
++#define RENHDRUM_PRO2_VID 0x057E
++#define RENHDRUM_PRO2_PID 0x2069
++#define RENHDRUM_PRO2_AMP_CEILING_DEFAULT 450
++RenHdcPro2 *renhdrum_pro2_create(uint16_t amp_ceiling);
++void renhdrum_pro2_destroy(RenHdcPro2 *h);
++int32_t renhdrum_pro2_push_half_sample(
++    RenHdcPro2 *h,
++    int64_t now_us,
++    bool is_right,
++    float al,
++    float fl,
++    float ah,
++    float fh
++);
++int32_t renhdrum_pro2_build_report(RenHdcPro2 *h, int64_t now_us, uint8_t *out_report64);
++int32_t renhdrum_pro2_silent_report(RenHdcPro2 *h, uint8_t *out_report64);
++
+ /* Switch 2 rumble mode: 0 = Switch 1 default / untouched, 2 = Switch 2 Mode 2 translation */
+ void renhdrum_set_nx2_mode(int32_t mode);
+ 
+diff --git a/src/input_common/drivers/renhdrum_pad.cpp b/src/input_common/drivers/renhdrum_pad.cpp
+index 2b368a61e3..889263c231 100644
+--- a/src/input_common/drivers/renhdrum_pad.cpp
++++ b/src/input_common/drivers/renhdrum_pad.cpp
+@@ -96,6 +96,16 @@ struct RenHDrumApi {
+     decltype(&renhdrum_hd_haptics_speaker_block) hd_speaker_block{};
+     decltype(&renhdrum_hd_haptics_trigger_block) hd_trigger_block{};
+     decltype(&renhdrum_dualsense_dsp_build_bt36_report) dsp_build_bt36_report{};
++    // Optional (plan 139): Switch 2 Pro Controller (USB, experimental)
++    decltype(&renhdrum_pro2_create) pro2_create{};
++    decltype(&renhdrum_pro2_destroy) pro2_destroy{};
++    decltype(&renhdrum_pro2_push_half_sample) pro2_push_half_sample{};
++    decltype(&renhdrum_pro2_build_report) pro2_build_report{};
++    decltype(&renhdrum_pro2_silent_report) pro2_silent_report{};
++    bool HasPro2() const {
++        return pro2_create && pro2_destroy && pro2_push_half_sample && pro2_build_report &&
++               pro2_silent_report;
++    }
+     bool HasTriTrigger() const {
+         return tri_create && tri_destroy && tri_update;
+     }
+@@ -184,6 +194,11 @@ const RenHDrumApi& Api() {
+             (void)a.library.GetSymbol("renhdrum_hd_haptics_trigger_block", &a.hd_trigger_block);
+             (void)a.library.GetSymbol("renhdrum_dualsense_dsp_build_bt36_report",
+                                       &a.dsp_build_bt36_report);
++            (void)a.library.GetSymbol("renhdrum_pro2_create", &a.pro2_create);
++            (void)a.library.GetSymbol("renhdrum_pro2_destroy", &a.pro2_destroy);
++            (void)a.library.GetSymbol("renhdrum_pro2_push_half_sample", &a.pro2_push_half_sample);
++            (void)a.library.GetSymbol("renhdrum_pro2_build_report", &a.pro2_build_report);
++            (void)a.library.GetSymbol("renhdrum_pro2_silent_report", &a.pro2_silent_report);
+             LOG_INFO(Input, "RenHDrum: loaded {}", name);
+         } else {
+             LOG_WARNING(Input, "RenHDrum: {} is missing functions, using the standard rumble", name);
+@@ -233,6 +248,8 @@ constexpr Uint64 SteamGripTailNs = 100'000'000ULL;
+ constexpr std::array<Uint8, 10> NeutralPacket{0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
+ constexpr int DualSenseAudioMaxAttempts = 10;
+ constexpr int HdRumbleMaxInitialSendFails = 8;
++constexpr int Pro2MaxFailsInRow = 100;
++constexpr std::int64_t Pro2SilentGapUs = 5'000;
+ // SDL no-queue gap while the 5 ms envelope runs (Ryuhdr AmFmNoQueueGapMs)
+ [[maybe_unused]] constexpr int NoQueueEnvelopeGapMs = 10;
+ 
+@@ -257,6 +274,18 @@ bool IsSwitchHdController(Uint16 vid, Uint16 pid) {
+     return vid == NintendoVendorId && (pid == 0x2009 || pid == 0x2006 || pid == 0x2007);
+ }
+ 
++bool IsSwitch2ProController(Uint16 vid, Uint16 pid) {
++    return vid == RENHDRUM_PRO2_VID && pid == RENHDRUM_PRO2_PID;
++}
++
++bool SendPro2Effect(SDL_Gamepad* gamepad, SDL_Joystick* joystick,
++                    const std::array<std::uint8_t, RENHDRUM_PRO2_REPORT_SIZE>& report) {
++    if (gamepad) {
++        return SDL_SendGamepadEffect(gamepad, report.data(), static_cast<int>(report.size()));
++    }
++    return SDL_SendJoystickEffect(joystick, report.data(), static_cast<int>(report.size()));
++}
++
+ /// Xbox One / Series and Xbox 360 style pads, Microsoft's or not (GameSir, 8BitDo, PowerA...).
+ /// RenHDrum's converter was tuned on an Xbox One S; others get the same four-motor mix, and
+ /// a pad whose path has no trigger motors (XInput) keeps only the grips.
+@@ -339,7 +368,7 @@ UserSettings ReadUserSettings(const RenHdcStore* s) {
+ }
+ 
+ // Controllers RenHDrum drives, per kind, for the settings dialog
+-std::array<std::atomic<int>, 4> connected_count{};
++std::array<std::atomic<int>, 5> connected_count{};
+ std::atomic<int> last_connected_kind{-1};
+ // Connected Xbox-style controllers that expose trigger motors
+ std::atomic<int> xbox_trigger_pads{};
+@@ -396,6 +425,8 @@ std::string PadName(SDL_Joystick* joystick, SDL_Gamepad* gamepad, int kind, Uint
+         return "Xbox Controller";
+     case 3:
+         return "Steam Controller (2026)";
++    case 4:
++        return "Switch 2 Pro Controller (USB, experimental)";
+     default:
+         return fmt::format("{:04X}:{:04X}", vid, pid);
+     }
+@@ -485,6 +516,13 @@ struct RenHDrumPad::Impl {
+     bool bt_starting{};
+     std::int64_t bt_next_us{};
+ 
++    // Switch 2 Pro Controller (057E:2069, USB only, experimental): paced by Tick on the input
++    // thread outside SDL_joystick_lock, so no sender thread or join() in Shutdown().
++    RenHdcPro2* pro2{};
++    std::atomic<int> pro2_send_fails{0};
++    int pro2_silent_left{};
++    std::int64_t pro2_silent_next_us{};
++
+     ~Impl() {
+         if (store) {
+             Api().store_destroy(store);
+@@ -644,6 +682,10 @@ struct RenHDrumPad::Impl {
+                 SDL_UnlockAudioStream(audio_stream);
+             }
+         }
++        if (pro2 && old.hd_enabled && !now.hd_enabled) {
++            pro2_silent_left = 3;
++            pro2_silent_next_us = 0;
++        }
+         return {
+             .reconfigure_engine = engine != nullptr,
+             .stop_engine = engine != nullptr && old.hd_enabled && !now.hd_enabled,
+@@ -1365,6 +1407,11 @@ struct RenHDrumPad::Impl {
+             api.dsp_destroy(dsp);
+             dsp = nullptr;
+         }
++        if (pro2) {
++            api.pro2_destroy(pro2);
++            pro2 = nullptr;
++            pro2_silent_left = 0;
++        }
+         return had_engine;
+     }
+ };
+@@ -1416,6 +1463,58 @@ std::shared_ptr<RenHDrumPad> RenHDrumPad::Create(SDL_Joystick* joystick, SDL_Gam
+     }
+     const Uint16 vid = SDL_GetJoystickVendor(joystick);
+     const Uint16 pid = SDL_GetJoystickProduct(joystick);
++    if (IsSwitch2ProController(vid, pid)) {
++        if (SDL_GetJoystickConnectionState(joystick) == SDL_JOYSTICK_CONNECTION_WIRELESS) {
++            LOG_INFO(Input, "RenHDrum: Switch 2 Pro Controller over Bluetooth is not supported yet, "
++                            "using the standard rumble");
++            return nullptr;
++        }
++        const auto& pro2_api = Api();
++        if (!pro2_api.HasPro2()) {
++            LOG_INFO(Input, "RenHDrum: Switch 2 Pro HD Rumble needs a newer renhdrum.dll, using "
++                            "the standard rumble");
++            return nullptr;
++        }
++        RenHdcPro2* handle = pro2_api.pro2_create(0);
++        if (!handle) {
++            return nullptr;
++        }
++        std::array<std::uint8_t, RENHDRUM_PRO2_REPORT_SIZE> probe{};
++        if (pro2_api.pro2_silent_report(handle, probe.data()) != RENHDRUM_OK ||
++            !SendPro2Effect(gamepad, joystick, probe)) {
++            LOG_INFO(Input,
++                     "RenHDrum: Switch 2 Pro Controller ({:04X}:{:04X}) raw HD Rumble 2 not "
++                     "accepted by SDL ({}), using the standard rumble",
++                     vid, pid, SDL_GetError());
++            pro2_api.pro2_destroy(handle);
++            return nullptr;
++        }
++        // Not shared yet: no other thread can reach `pro2_pad` until it is returned.
++        auto pro2_pad = std::make_unique<Impl>();
++        pro2_pad->vid = vid;
++        pro2_pad->pid = pid;
++        pro2_pad->joystick = joystick;
++        pro2_pad->gamepad = gamepad;
++        pro2_pad->is_bluetooth = false;
++        pro2_pad->SyncStore();
++        pro2_pad->user = ReadUserSettings(pro2_pad->store);
++        pro2_pad->pro2 = handle;
++        pro2_pad->kind = 4;
++        ++connected_count[pro2_pad->kind];
++        last_connected_kind = pro2_pad->kind;
++        LOG_INFO(Input, "RenHDrum: Switch 2 Pro Controller {:04X}:{:04X} (USB, experimental)", vid,
++                 pid);
++        RegisterActivePad(pro2_pad.get(), {
++            .name = PadName(joystick, gamepad, pro2_pad->kind, vid, pid),
++            .guid = PadGuid(joystick),
++            .vid = vid,
++            .pid = pid,
++            .kind = pro2_pad->kind,
++            .is_bluetooth = false,
++            .xbox_triggers = false,
++        });
++        return std::shared_ptr<RenHDrumPad>(new RenHDrumPad(std::move(pro2_pad)));
++    }
+     if (IsSteamController(vid, pid)) {
+ #ifndef _WIN32
+         if (pid == 0x1303) {
+@@ -1587,7 +1686,10 @@ RenHDrumPad::~RenHDrumPad() {
+ 
+ void RenHDrumPad::Shutdown() {
+     SDL_Joystick* joystick = nullptr;
++    SDL_Gamepad* gamepad = nullptr;
+     bool had_engine = false;
++    bool had_pro2 = false;
++    std::array<std::uint8_t, RENHDRUM_PRO2_REPORT_SIZE> pro2_silent{};
+     bool had_xbox = false;
+     bool triggers = false;
+     bool restore_speaker = false;
+@@ -1598,6 +1700,10 @@ void RenHDrumPad::Shutdown() {
+             return;
+         }
+         joystick = impl->joystick;
++        gamepad = impl->gamepad;
++        if (impl->pro2) {
++            had_pro2 = Api().pro2_silent_report(impl->pro2, pro2_silent.data()) == RENHDRUM_OK;
++        }
+         had_engine = impl->Release();
+         had_xbox = impl->had_xbox;
+         restore_speaker = std::exchange(impl->bo3_restore_speaker, false);
+@@ -1617,6 +1723,9 @@ void RenHDrumPad::Shutdown() {
+         impl->gamepad = nullptr;
+     }
+     UnregisterActivePad(impl.get());
++    if (had_pro2) {
++        (void)SendPro2Effect(gamepad, joystick, pro2_silent);
++    }
+     if (had_engine) {
+         SendNeutralPacket(joystick);
+     }
+@@ -1641,6 +1750,9 @@ void RenHDrumPad::Shutdown() {
+ 
+ bool RenHDrumPad::IsActive() const {
+     std::scoped_lock lock{impl->mutex};
++    if (impl->pro2) {
++        return impl->user.hd_enabled && impl->pro2_silent_left == 0;
++    }
+     if (impl->steam_dsp) {
+         return impl->bt_running.load();
+     }
+@@ -1702,6 +1814,14 @@ bool RenHDrumPad::Vibrate(std::int64_t now_us, bool is_right,
+                 handled = true;
+                 engine_sample = true;
+             }
++        } else if (impl->pro2) {
++            if (u.hd_enabled && impl->pro2_silent_left == 0) {
++                api.pro2_push_half_sample(impl->pro2, now_us, is_right,
++                                          impl->Shape(status.low_amplitude), status.low_frequency,
++                                          impl->Shape(status.high_amplitude),
++                                          status.high_frequency);
++                handled = true;
++            }
+         } else if (impl->steam_dsp) {
+             // Steam Controller grips: the same two bands as a DualSense; the sender thread reads
+             // the DSP. General HD Rumble switch off or a stopped sender: standard rumble.
+@@ -1762,6 +1882,11 @@ bool RenHDrumPad::Vibrate(std::int64_t now_us, bool is_right,
+ void RenHDrumPad::Tick(std::int64_t now_us) {
+     std::array<Uint8, 10> packet{};
+     SDL_Joystick* joystick = nullptr;
++    SDL_Gamepad* pro2_gamepad = nullptr;
++    bool send_pro2 = false;
++    bool send_pro2_silent = false;
++    bool pro2_dropped = false;
++    std::array<std::uint8_t, RENHDRUM_PRO2_REPORT_SIZE> pro2_report{};
+     bool open_audio = false;
+     SDL_AudioStream* check_audio_stream = nullptr;
+     SDL_AudioDeviceID check_audio_device = 0;
+@@ -1782,6 +1907,29 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+             return;
+         }
+         joystick = impl->joystick;
++        if (impl->pro2) {
++            (void)impl->RefreshUserSettings();
++            pro2_gamepad = impl->gamepad;
++            if (impl->pro2_silent_left > 0) {
++                if (now_us >= impl->pro2_silent_next_us) {
++                    send_pro2_silent =
++                        Api().pro2_silent_report(impl->pro2, pro2_report.data()) == RENHDRUM_OK;
++                    --impl->pro2_silent_left;
++                    impl->pro2_silent_next_us = now_us + Pro2SilentGapUs;
++                    if (impl->pro2_silent_left == 0) {
++                        Api().pro2_destroy(impl->pro2);
++                        impl->pro2 = nullptr;
++                        if (impl->kind >= 0) {
++                            --connected_count[impl->kind];
++                            impl->kind = -1;
++                        }
++                        pro2_dropped = true;
++                    }
++                }
++            } else if (impl->user.hd_enabled) {
++                send_pro2 = Api().pro2_build_report(impl->pro2, now_us, pro2_report.data()) == 1;
++            }
++        }
+         // Bluetooth tries once (it sets the count to the max); wired keeps looking, slower after
+         // the quick attempts.
+         if (impl->dsp && !impl->audio_stream && !impl->audio_opening &&
+@@ -1944,6 +2092,39 @@ void RenHDrumPad::Tick(std::int64_t now_us) {
+             }
+         }
+     }
++    if (send_pro2_silent) {
++        (void)SendPro2Effect(pro2_gamepad, joystick, pro2_report);
++    }
++    if (pro2_dropped) {
++        UnregisterActivePad(impl.get());
++    } else if (send_pro2) {
++        if (SendPro2Effect(pro2_gamepad, joystick, pro2_report)) {
++            impl->pro2_send_fails.store(0, std::memory_order_relaxed);
++        } else if (impl->pro2_send_fails.fetch_add(1, std::memory_order_relaxed) + 1 >=
++                   Pro2MaxFailsInRow) {
++            bool drop_pro2 = false;
++            {
++                std::scoped_lock lock{impl->mutex};
++                if (impl->pro2) {
++                    Api().pro2_destroy(impl->pro2);
++                    impl->pro2 = nullptr;
++                    impl->pro2_silent_left = 0;
++                    if (impl->kind >= 0) {
++                        --connected_count[impl->kind];
++                        impl->kind = -1;
++                    }
++                    drop_pro2 = true;
++                }
++            }
++            if (drop_pro2) {
++                UnregisterActivePad(impl.get());
++                LOG_WARNING(Input,
++                            "RenHDrum: Switch 2 Pro Controller ({:04X}:{:04X}) HD Rumble 2 writes "
++                            "failing ({}), using the standard rumble",
++                            impl->vid, impl->pid, SDL_GetError());
++            }
++        }
++    }
+ }
+ 
+ } // namespace InputCommon
+diff --git a/src/input_common/drivers/renhdrum_pad.h b/src/input_common/drivers/renhdrum_pad.h
+index 25d776a3c4..9cff4bc7f4 100644
+--- a/src/input_common/drivers/renhdrum_pad.h
++++ b/src/input_common/drivers/renhdrum_pad.h
+@@ -20,7 +20,7 @@ struct RenHDrumPadInfo {
+     std::string guid;
+     std::uint16_t vid{};
+     std::uint16_t pid{};
+-    int kind{-1}; ///< 0 Switch, 1 DualSense, 2 Xbox style, 3 Steam Controller (2026)
++    int kind{-1}; ///< 0 Switch, 1 DualSense, 2 Xbox style, 3 Steam Controller (2026), 4 Switch 2 Pro (USB, experimental)
+     bool is_bluetooth{};
+     bool xbox_triggers{};
+ };
+@@ -42,7 +42,8 @@ std::string GetRenHDrumVersionString();
+ std::vector<RenHDrumPadInfo> GetRenHDrumPads();
+ 
+ /// Kind of the controller RenHDrum connected most recently and still drives: 0 Switch
+-/// controller, 1 DualSense, 2 Xbox style, 3 Steam Controller (2026), or -1 when none.
++/// controller, 1 DualSense, 2 Xbox style, 3 Steam Controller (2026), 4 Switch 2 Pro (USB,
++/// experimental), or -1 when none.
+ int GetRenHDrumConnectedKind();
+ 
+ /// For connected Xbox-style controllers: 1 when one exposes trigger motors, 0 when none does,
+diff --git a/src/lichii/configuration/configure_hd_rumble.cpp b/src/lichii/configuration/configure_hd_rumble.cpp
+index 00f8b2b147..d2a0649583 100644
+--- a/src/lichii/configuration/configure_hd_rumble.cpp
++++ b/src/lichii/configuration/configure_hd_rumble.cpp
+@@ -81,7 +81,7 @@ QWidget* CreateHdRumbleSettingsPage(QWidget* parent, std::function<void()> test_
+         }
+         for (const auto& pad : InputCommon::GetRenHDrumPads()) {
+             if (pad.kind == kind) {
+-                active.device = 1u << kind; // 0 Switch, 1 DualSense, 2 Xbox, 3 Steam
++                active.device = 1u << kind; // 0 Switch, 1 DualSense, 2 Xbox, 3 Steam, 4 Switch 2 Pro
+                 active.bluetooth = pad.is_bluetooth;
+                 active.name = QString::fromStdString(pad.name);
+             }
+diff --git a/src/lichii/configuration/renhdrum_settings_dialog.cpp b/src/lichii/configuration/renhdrum_settings_dialog.cpp
+index ca90dc28a8..3922cc6175 100644
+--- a/src/lichii/configuration/renhdrum_settings_dialog.cpp
++++ b/src/lichii/configuration/renhdrum_settings_dialog.cpp
+@@ -35,6 +35,7 @@ constexpr unsigned DEV_SWITCH = 1;
+ constexpr unsigned DEV_DUALSENSE = 2;
+ constexpr unsigned DEV_XBOX = 4;
+ constexpr unsigned DEV_STEAM = 8;
++constexpr unsigned DEV_PRO2 = 16;
+ constexpr unsigned DEV_ALL = 15;
+ constexpr const char REPO_URL[] = "https://github.com/trzz1214/RenHDrum";
+ 
+@@ -69,6 +70,8 @@ QString DeviceName(unsigned device) {
+         return QObject::tr("Xbox and Xbox-style controllers");
+     case DEV_STEAM:
+         return QObject::tr("Steam Controller (2026) · Experimental");
++    case DEV_PRO2:
++        return QObject::tr("Switch 2 Pro Controller (USB, experimental)");
+     case DEV_ALL:
+         return QObject::tr("All controllers");
+     default:
+@@ -565,6 +568,12 @@ QWidget* SettingsWidget::MakeCard(const QString& title, unsigned device, bool on
+                              "stops, close Steam or reconnect the controller."),
+                           true, card));
+     }
++    if (device == DEV_PRO2) {
++        add_row(MakeMuted(tr("USB only · Experimental. Follows the HD Rumble switch. Close "
++                             "Steam completely so it does not claim the controller. Bluetooth "
++                             "is not supported yet."),
++                          true, card));
++    }
+     if (device == DEV_XBOX && host.xbox_extra_row) {
+         if (QWidget* extra = host.xbox_extra_row(card)) {
+             add_row(extra);
+@@ -744,7 +753,7 @@ void SettingsWidget::Rebuild() {
+     auto* ocol = new QVBoxLayout(others);
+     ocol->setContentsMargins(0, 0, 0, 0);
+     ocol->setSpacing(8);
+-    for (const unsigned device : {DEV_SWITCH, DEV_DUALSENSE, DEV_XBOX, DEV_STEAM}) {
++    for (const unsigned device : {DEV_SWITCH, DEV_DUALSENSE, DEV_XBOX, DEV_STEAM, DEV_PRO2}) {
+         if (device == pad.device) {
+             continue;
+         }
+diff --git a/src/lichii/configuration/renhdrum_settings_dialog.h b/src/lichii/configuration/renhdrum_settings_dialog.h
+index ea1dbac595..d3505a9f33 100644
+--- a/src/lichii/configuration/renhdrum_settings_dialog.h
++++ b/src/lichii/configuration/renhdrum_settings_dialog.h
+@@ -41,7 +41,7 @@ struct Api {
+ };
+ 
+ /// The controller in use right now. `device` is one bit of RenHdcOption::devices (1 Switch,
+-/// 2 DualSense, 4 Xbox, 8 Steam); 0 = none connected.
++/// 2 DualSense, 4 Xbox, 8 Steam, 16 Switch 2 Pro); 0 = none connected.
+ struct ActivePad {
+     unsigned device{};
+     bool bluetooth{};
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,53 @@
+name: Controller rumble test
+description: Share a Test rumble report from Brontide-NS2 (especially Switch 2 Pro or Steam Controller 2026)
+title: "[Controller test] "
+labels: ["controller-test"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        1. Open **Brontide-NS2** → **HD Rumble** settings → press **Test rumble** (5 short parts, ~4 s total).
+        2. Pick how it felt (`All 5 parts were clear`, `Some notes or steps felt the same`, or `No vibration`) and press **Copy report**.
+        3. Paste the copied line below. Nothing is sent automatically; do not attach games, keys, or save files.
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Test report line
+      description: Paste the line from Copy report
+      placeholder: "Switch 2 Pro Controller | 057E:2069 | USB | RenHDrum 0.6.0 | Brontide-NS2 1.5.0 | sent 240/240, 15.0 ms avg, stuck no | All 5 parts were clear"
+    validations:
+      required: true
+
+  - type: input
+    id: game
+    attributes:
+      label: Game played (optional)
+      description: Which game did you try, if any?
+
+  - type: textarea
+    id: felt
+    attributes:
+      label: What felt off or notable (optional)
+      description: Anything that felt too weak, too strong, missing, stuck, or unexpectedly good.
+
+  - type: input
+    id: recording
+    attributes:
+      label: Phone recording link (optional)
+      description: Optional link to a short phone recording of the controller resting on a table.
+
+  - type: checkboxes
+    id: credit
+    attributes:
+      label: Thank-you board
+      description: If your report helps improve rumble support, I would like to thank you on the website.
+      options:
+        - label: You may list my name on the thank-you board
+          required: false
+
+  - type: input
+    id: display_name
+    attributes:
+      label: Display name (optional)
+      description: Name you want shown on the thank-you board (leave blank to use your GitHub username if you checked the box above).

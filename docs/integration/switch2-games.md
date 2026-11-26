@@ -1,15 +1,15 @@
 # Switch 2 Games HD Rumble Integration
 
-This guide describes how to integrate RenHDrum into an Eden-family (or PokeDinner / yuzu derived) emulator to enable authentic HD Rumble in Switch 2 titles across DualSense, Switch Pro Controller 1, Xbox One, and experimental Steam Controller (2026) gamepads.
+This guide describes how to integrate RenHDrum into an Eden-family (or PokeDinner / yuzu derived) emulator to enable authentic HD Rumble in Switch 2 titles across DualSense, Switch Pro Controller 1, Xbox One, experimental Steam Controller (2026), and experimental Switch 2 Pro Controller (USB + Bluetooth) gamepads.
 
 Background and physical analysis: [research/11: Switch 2 HD Rumble](../research/11-switch2-hd-rumble.md). Before shipping, go through the [integration checklist](recomp-games.md#integration-checklist).
 
 > [!NOTE]
-> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
+> **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)` · `🧪 Switch 2 Pro Controller (USB + Bluetooth, experimental)`.
 
 > [!WARNING]
-> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
-> For authentic HD Rumble synthesis, host emulators (Eden, yuzu, PokeDinner derivatives) **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) in controller settings, or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host frontend rate limiter will swallow and drop micro-timed HD Rumble packets before they ever reach RenHDrum!
+> **15 ms rate filter: bypass it only for pads RenHDrum drives**
+> In host emulators (Eden, yuzu, PokeDinner derivatives) the rate-limiting block (`src/hid_core/frontend/emulated_controller.cpp`) swallows micro-timed HD Rumble packets before they reach RenHDrum. I do not ask users to turn on `Accurate Vibration`. The host skips that filter conditionally, only for a pad that RenHDrum is currently driving; other pads keep the normal filter. The user changes no setting.
 
 > [!IMPORTANT]
 > **Licensing & Clean Boundary**: RenHDrum is licensed under MIT OR Apache-2.0. The emulator integration relies exclusively on the public C ABI defined in `include/renhdrum.h`. Do not copy GPL emulator code into this repository; use function signatures and architectural descriptions only.
@@ -62,6 +62,7 @@ renhdrum_set_nx2_mode(0);
   - **Sony DualSense**: Automatically passes vibration amplitudes through the fixed Mode 2 law (`a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`, no EQ) before DSP synthesis, matching physical voice-coil dynamics.
   - **Nintendo Switch Pro Controller 1**: Automatically maps amplitudes through the Pro curve `PRO_DEFAULT` (`T = 0.004, P1 = 0.048, P2 = 0.240, P3 = 0.640, P4 = 0.950`), silencing micro-vibrations at or below `0.004` instead of lifting them, and applies a 1.2x onset boost for the first 25 ms on low frequencies below 150 Hz.
   - **Microsoft Xbox One S**: Maps amplitudes through the same Pro curve (`PRO_DEFAULT`, `T = 0.004`, without the 1.2x boost), then passes them to the Switch 1 four-motor converter.
+  - **🧪 Nintendo Switch 2 Pro Controller (USB + Bluetooth, experimental)**: Uses DualSense's `mode2_amp` law (`a <= 0.001 -> 0`, else `min(1, 3.5 * a^0.75)`) scaled linearly into the safety ceiling (default `450 / 1023`), rather than the Switch 1 Pro Controller curve.
 - **`mode == 0` (Classic Switch 1)**:
   - Input amplitudes pass through 100% bit-exact and untouched.
 
@@ -135,6 +136,36 @@ renhdrum_xbox_rumble_push_half_sample(
 ```
 
 The translator ticks on a 10 ms (USB) or 20 ms (Bluetooth) cadence, outputting 4-motor values (left/right grips and left/right triggers) over `rawinput` or Windows.Gaming.Input (WGI). See [xbox.md](xbox.md).
+
+#### D. 🧪 Switch 2 Pro Controller (USB + Bluetooth, experimental)
+For `057E:2069`, push samples into `RenHdcPro2` and dispatch the resulting 64-byte raw report `0x02` (two `0x70 | tid` 3-sample blocks) from the existing `Tick` loop outside the driver mutex (no extra thread):
+
+```cpp
+renhdrum_pro2_push_half_sample(
+    pro2,
+    now_us,
+    is_right,
+    low_amp,
+    low_freq,
+    high_amp,
+    high_freq
+);
+
+uint8_t report64[RENHDRUM_PRO2_REPORT_SIZE];
+if (renhdrum_pro2_build_report(pro2, now_us, report64) == 1) {
+    SDL_SendGamepadEffect(gamepad, report64, RENHDRUM_PRO2_REPORT_SIZE);
+}
+```
+
+> [!IMPORTANT]
+> **Experimental Usage Notes (🧪 Switch 2 Pro Controller, USB + Bluetooth, experimental)**:
+> - **USB**: Requires SDL3 built with `SDL_HIDAPI_LIBUSB=ON` and SDL3 patch [`0003-switch2-raw-hd-rumble.patch`](../../integrations/sdl3/sdl3-patches/0003-switch2-raw-hd-rumble.patch).
+> - **USB & Bluetooth scope**: USB HD Rumble 2 works in **Brontide-NS2** and **Longshot** (and in other recomp PC ports when their SDL3 includes patch `0003` + libusb, or via a host virtual joystick with `SendEffect`). **Bluetooth** is currently in **Brontide-NS2** only. Because SDL3 has no Switch 2 Bluetooth yet (`libsdl-org/SDL#15963`), the host owns the BLE link as an SDL virtual joystick implementing `SDL_VirtualJoystickDesc::SendEffect` (copy the 64-byte `0x02` payload under a tiny lock with no WinRT/SDL calls, then write bytes `1..32` after `0x00` — 33 bytes — to handle `0x0012` every 15 ms, latest wins, always delivering the 3 silent stop reports); the RenHDrum side detects it via `SDL_IsJoystickVirtual`.
+> - **Windows 11 recommended for Bluetooth**: Windows 10 BLE writes take 50–60 ms, which makes rumble coarser.
+> - **Close Steam completely**: Steam claims the Switch 2 Pro interface if running, preventing the host from opening or sending raw reports.
+> - **Untested on real hardware by me**: I do not own a Switch 2 Pro Controller, so please report back if you test it.
+> - **Toggle off mid-session**: Turning the HD Rumble switch off sends three `silent_report` packets and destroys the `RenHdcPro2` handle, falling back to standard SDL rumble; replug or reconnect the controller to re-enable raw HD Rumble 2.
+> - **Credits**: Frequency law measured on a real Switch 2 Pro Controller by **101Leafy** (`Frizti/Fritchii#6`), report `0x02` / `0x70` and BLE layout from **ndeadly** (`switch2_controller_research`), **SDL** (zlib), and **BlueRetro** (`sw2.h`, Apache-2.0), and 15 ms BLE pacing from **NS2Pro-Bridge-Windows** (MIT).
 
 ---
 

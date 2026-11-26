@@ -1,0 +1,125 @@
+From b7444a56de6f1549fb976a661132206d936af445 Mon Sep 17 00:00:00 2001
+From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 15:26:54 +0700
+Subject: [PATCH 35/36] sdl3: apply Switch 2 Pro raw HD Rumble 2 patch (0003)
+
+Frequency law measured by 101Leafy (Frizti/Fritchii#6). SDL libusb build after zortos293/Lichii#2046.
+---
+ .../0003-switch2-raw-hd-rumble.patch          | 90 +++++++++++++++++++
+ cpmfile.json                                  |  3 +-
+ 2 files changed, 92 insertions(+), 1 deletion(-)
+ create mode 100644 .patch/sdl3-hdrumble/0003-switch2-raw-hd-rumble.patch
+
+diff --git a/.patch/sdl3-hdrumble/0003-switch2-raw-hd-rumble.patch b/.patch/sdl3-hdrumble/0003-switch2-raw-hd-rumble.patch
+new file mode 100644
+index 0000000000..5c4d42c5b6
+--- /dev/null
++++ b/.patch/sdl3-hdrumble/0003-switch2-raw-hd-rumble.patch
+@@ -0,0 +1,90 @@
++From 87dab5d03e91445af96ee30520cba54d0423880a Mon Sep 17 00:00:00 2001
++From: trzz1214 <162259342+trzz1214@users.noreply.github.com>
++Date: Wed, 25 Nov 2026 14:28:35 +0700
++Subject: [PATCH] hidapi/switch2: accept raw 64-byte HD Rumble 2 report 0x02 on
++ Pro 2
++
++---
++ src/joystick/hidapi/SDL_hidapi_switch2.c | 41 ++++++++++++++++++++++--
++ 1 file changed, 39 insertions(+), 2 deletions(-)
++
++diff --git a/src/joystick/hidapi/SDL_hidapi_switch2.c b/src/joystick/hidapi/SDL_hidapi_switch2.c
++index 773405c..09471e6 100644
++--- a/src/joystick/hidapi/SDL_hidapi_switch2.c
+++++ b/src/joystick/hidapi/SDL_hidapi_switch2.c
++@@ -107,6 +107,9 @@ typedef struct
++     Uint16 rumble_lo_freq;
++     Uint32 rumble_error;
++     bool rumble_updated;
+++    Uint8 rumble_raw[64];
+++    bool rumble_raw_pending;
+++    Uint64 rumble_raw_until;
++ 
++     Switch2_StickCalibration left_stick;
++     Switch2_StickCalibration right_stick;
++@@ -624,6 +627,12 @@ static bool HIDAPI_DriverSwitch2_RumbleJoystick(SDL_HIDAPI_Device *device, SDL_J
++ {
++     SDL_DriverSwitch2_Context *ctx = (SDL_DriverSwitch2_Context *)device->context;
++ 
+++    if (ctx->rumble_raw_pending || ctx->rumble_raw_until) {
+++        ctx->rumble_raw_pending = false;
+++        ctx->rumble_raw_until = 0;
+++        ctx->rumble_updated = true;
+++    }
+++
++     if (low_frequency_rumble != ctx->rumble_lo_amp || high_frequency_rumble != ctx->rumble_hi_amp) {
++         ctx->rumble_lo_amp = low_frequency_rumble;
++         ctx->rumble_hi_amp = high_frequency_rumble;
++@@ -656,7 +665,17 @@ static bool HIDAPI_DriverSwitch2_SetJoystickLED(SDL_HIDAPI_Device *device, SDL_J
++ 
++ static bool HIDAPI_DriverSwitch2_SendJoystickEffect(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, const void *data, int size)
++ {
++-    return SDL_Unsupported();
+++    SDL_DriverSwitch2_Context *ctx = (SDL_DriverSwitch2_Context *)device->context;
+++
+++    if (device->product_id != USB_PRODUCT_NINTENDO_SWITCH2_PRO ||
+++        !data || size != 64 || ((const Uint8 *)data)[0] != 0x02) {
+++        return SDL_Unsupported();
+++    }
+++
+++    SDL_memcpy(ctx->rumble_raw, data, sizeof(ctx->rumble_raw));
+++    ctx->rumble_raw_pending = true;
+++    ctx->rumble_raw_until = SDL_GetTicks() + 100;
+++    return true;
++ }
++ 
++ static bool HIDAPI_DriverSwitch2_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, bool enabled)
++@@ -1039,11 +1058,29 @@ static void EncodeHDRumble(Uint16 high_freq, Uint16 high_amp, Uint16 low_freq, U
++ 
++ static bool UpdateRumble(SDL_DriverSwitch2_Context *ctx)
++ {
++-    if (!ctx->rumble_updated && !ctx->rumble_lo_amp && !ctx->rumble_hi_amp) {
+++    if (ctx->rumble_raw_pending) {
+++        if (!SDL_HIDAPI_LockRumble()) {
+++            return false;
+++        }
+++        ctx->rumble_raw_pending = false;
+++        if (SDL_HIDAPI_SendRumbleAndUnlock(ctx->device, ctx->rumble_raw, sizeof(ctx->rumble_raw)) != sizeof(ctx->rumble_raw)) {
+++            return SDL_SetError("Couldn't send rumble packet");
+++        }
++         return true;
++     }
++ 
++     Uint64 timestamp = SDL_GetTicks();
+++    if (ctx->rumble_raw_until) {
+++        if (timestamp < ctx->rumble_raw_until) {
+++            return true;
+++        }
+++        ctx->rumble_raw_until = 0;
+++    }
+++
+++    if (!ctx->rumble_updated && !ctx->rumble_lo_amp && !ctx->rumble_hi_amp) {
+++        return true;
+++    }
+++
++     Uint64 interval = RUMBLE_INTERVAL;
++ 
++     if (timestamp < ctx->rumble_timestamp) {
++-- 
++2.55.0.windows.5
++
+diff --git a/cpmfile.json b/cpmfile.json
+index 965bb79544..bf9251aebe 100644
+--- a/cpmfile.json
++++ b/cpmfile.json
+@@ -290,7 +290,8 @@
+             "0003-switch2-sensor-enabled.patch",
+             "0004-no-static-export-without-install.patch",
+             "0001-hdrumble.patch",
+-            "0002-hdrumble-idle-write.patch"
++            "0002-hdrumble-idle-write.patch",
++            "0003-switch2-raw-hd-rumble.patch"
+         ]
+     },
+     "sdl3-ci": {
+-- 
+2.55.0.windows.5
+

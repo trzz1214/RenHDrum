@@ -583,18 +583,22 @@ mod tests {
                 .usb_auto_slow
         );
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_usb_auto_slow = false;
+        let config = RumbleConfigController {
+            hd_rumble_usb_auto_slow: false,
+            ..RumbleConfigController::default()
+        };
         assert!(!dir.resolve(Some(&config)).usb_auto_slow);
     }
 
     #[test]
     fn config_values_are_used() {
         let dir = TempFlagDir::new();
-        let mut config = RumbleConfigController::default();
-        config.enable_hd_rumble = false;
-        config.hd_rumble_usb_interval_ms = 30;
-        config.hd_rumble_bluetooth_level = 1;
+        let config = RumbleConfigController {
+            enable_hd_rumble: false,
+            hd_rumble_usb_interval_ms: 30,
+            hd_rumble_bluetooth_level: 1,
+            ..RumbleConfigController::default()
+        };
 
         let settings = dir.resolve(Some(&config));
         assert!(!settings.enabled);
@@ -606,9 +610,11 @@ mod tests {
     fn invalid_config_values_fall_back_to_defaults() {
         let dir = TempFlagDir::new();
         for &(usb, bt) in &[(0, 5), (200, 7)] {
-            let mut config = RumbleConfigController::default();
-            config.hd_rumble_usb_interval_ms = usb;
-            config.hd_rumble_bluetooth_level = bt;
+            let config = RumbleConfigController {
+                hd_rumble_usb_interval_ms: usb,
+                hd_rumble_bluetooth_level: bt,
+                ..RumbleConfigController::default()
+            };
 
             let settings = dir.resolve(Some(&config));
             assert_eq!(settings.usb_interval_ms, 15);
@@ -627,8 +633,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::OFF_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.enable_hd_rumble = true;
+        let config = RumbleConfigController {
+            enable_hd_rumble: true,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(!settings.enabled);
@@ -644,8 +652,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::USB_INTERVAL_FLAG_FILE, " 20\r\n");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_usb_interval_ms = 10;
+        let config = RumbleConfigController {
+            hd_rumble_usb_interval_ms: 10,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert_eq!(settings.usb_interval_ms, 20);
@@ -674,8 +684,10 @@ mod tests {
                 HdRumbleSettings::BLUETOOTH_LEVEL_FLAG_FILE,
                 &level.to_string(),
             );
-            let mut config = RumbleConfigController::default();
-            config.hd_rumble_bluetooth_level = 2;
+            let config = RumbleConfigController {
+                hd_rumble_bluetooth_level: 2,
+                ..RumbleConfigController::default()
+            };
             let settings = dir.resolve(Some(&config));
 
             assert_eq!(settings.bluetooth_level, level);
@@ -692,8 +704,10 @@ mod tests {
         let dir = TempFlagDir::new();
         for bad in &["5", "0", "fast"] {
             dir.write_flag(HdRumbleSettings::BLUETOOTH_LEVEL_FLAG_FILE, bad);
-            let mut config = RumbleConfigController::default();
-            config.hd_rumble_bluetooth_level = 1;
+            let config = RumbleConfigController {
+                hd_rumble_bluetooth_level: 1,
+                ..RumbleConfigController::default()
+            };
             let settings = dir.resolve(Some(&config));
 
             assert_eq!(settings.bluetooth_level, 1);
@@ -715,10 +729,12 @@ mod tests {
         dir.write_flag(HdRumbleSettings::USB_INTERVAL_FLAG_FILE, "8");
         dir.write_flag(HdRumbleSettings::BLUETOOTH_LEVEL_FLAG_FILE, "1");
 
-        let mut config = RumbleConfigController::default();
-        config.enable_hd_rumble = true;
-        config.hd_rumble_usb_interval_ms = 30;
-        config.hd_rumble_bluetooth_level = 3;
+        let config = RumbleConfigController {
+            enable_hd_rumble: true,
+            hd_rumble_usb_interval_ms: 30,
+            hd_rumble_bluetooth_level: 3,
+            ..RumbleConfigController::default()
+        };
 
         let settings = dir.resolve(Some(&config));
         assert!(!settings.enabled);
@@ -742,8 +758,10 @@ mod tests {
     #[test]
     fn sync_to_input_follows_config() {
         let dir = TempFlagDir::new();
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_sync_to_input = true;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_sync_to_input: true,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
         assert!(!settings.sync_to_input);
         assert_eq!(settings.sync_to_input_source, "removed in 0.2.5");
@@ -754,8 +772,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::SYNC_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_sync_to_input = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_sync_to_input: false,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(!settings.sync_to_input);
@@ -778,8 +798,10 @@ mod tests {
         assert!(!off.click_pulse);
         assert_eq!(off.click_pulse_source, "removed in 0.2.5");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_click_pulse = true;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_click_pulse: true,
+            ..RumbleConfigController::default()
+        };
         let on = dir.resolve(Some(&config));
         assert!(!on.click_pulse);
         assert_eq!(on.click_pulse_source, "removed in 0.2.5");
@@ -790,8 +812,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::CLICK_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_click_pulse = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_click_pulse: false,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(!settings.click_pulse);
@@ -807,10 +831,12 @@ mod tests {
     #[test]
     fn auto_slow_is_off_while_sync_is_on_unless_re_enabled() {
         let dir = TempFlagDir::new();
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_sync_to_input = true;
-        config.hd_rumble_usb_auto_slow = true;
-        config.hd_rumble_sync_auto_slow = false;
+        let mut config = RumbleConfigController {
+            hd_rumble_experimental_sync_to_input: true,
+            hd_rumble_usb_auto_slow: true,
+            hd_rumble_sync_auto_slow: false,
+            ..RumbleConfigController::default()
+        };
 
         assert!(dir.resolve(Some(&config)).usb_auto_slow);
 
@@ -842,8 +868,10 @@ mod tests {
         assert!(!off.sync_bluetooth);
         assert_eq!(off.sync_bluetooth_source, "removed in 0.2.5");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_sync_bluetooth = true;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_sync_bluetooth: true,
+            ..RumbleConfigController::default()
+        };
         let on = dir.resolve(Some(&config));
 
         assert!(!on.sync_bluetooth);
@@ -858,8 +886,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::SYNC_BLUETOOTH_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_sync_bluetooth = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_sync_bluetooth: false,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(!settings.sync_bluetooth);
@@ -877,8 +907,10 @@ mod tests {
     fn sync_settings_are_not_part_of_the_other_values() {
         let dir = TempFlagDir::new();
         let off = dir.resolve(Some(&RumbleConfigController::default()));
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_sync_to_input = true;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_sync_to_input: true,
+            ..RumbleConfigController::default()
+        };
         let on = dir.resolve(Some(&config));
 
         assert_eq!(on.usb_interval_ms, off.usb_interval_ms);
@@ -892,9 +924,11 @@ mod tests {
         dir.write_flag(HdRumbleSettings::CLICK_FLAG_FILE, "");
         dir.write_flag(HdRumbleSettings::SYNC_BLUETOOTH_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_usb_auto_slow = true;
-        config.hd_rumble_sync_auto_slow = false;
+        let mut config = RumbleConfigController {
+            hd_rumble_usb_auto_slow: true,
+            hd_rumble_sync_auto_slow: false,
+            ..RumbleConfigController::default()
+        };
 
         let settings = dir.resolve(Some(&config));
         assert!(!settings.sync_to_input);
@@ -922,8 +956,10 @@ mod tests {
     #[test]
     fn usb_no_queue_follows_config() {
         let dir = TempFlagDir::new();
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_usb_no_queue = false;
+        let mut config = RumbleConfigController {
+            hd_rumble_experimental_usb_no_queue: false,
+            ..RumbleConfigController::default()
+        };
         let off = dir.resolve(Some(&config));
         assert!(!off.usb_no_queue);
         assert_eq!(off.usb_no_queue_source, "config");
@@ -939,8 +975,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::USB_NO_QUEUE_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_usb_no_queue = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_usb_no_queue: false,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(settings.usb_no_queue);
@@ -984,8 +1022,10 @@ mod tests {
         assert!(!defaults.envelope_5ms);
         assert_eq!(defaults.envelope_5ms_source, "default");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_envelope_5ms = true;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_envelope_5ms: true,
+            ..RumbleConfigController::default()
+        };
         let on = dir.resolve(Some(&config));
         assert!(on.envelope_5ms);
         assert_eq!(on.envelope_5ms_source, "config");
@@ -997,8 +1037,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::ENVELOPE_5MS_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_envelope_5ms = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_envelope_5ms: false,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(settings.envelope_5ms);
@@ -1019,8 +1061,10 @@ mod tests {
         assert!(!defaults.frequency_in_packet);
         assert_eq!(defaults.frequency_in_packet_source, "default");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_frequency_in_packet = true;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_frequency_in_packet: true,
+            ..RumbleConfigController::default()
+        };
         let on = dir.resolve(Some(&config));
         assert!(on.frequency_in_packet);
         assert_eq!(on.frequency_in_packet_source, "config");
@@ -1032,8 +1076,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::FREQUENCY_IN_PACKET_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_frequency_in_packet = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_frequency_in_packet: false,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(settings.frequency_in_packet);
@@ -1054,9 +1100,11 @@ mod tests {
         assert!(!defaults.frequency_both_bands);
         assert_eq!(defaults.frequency_both_bands_source, "default");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_frequency_both_bands = true;
-        config.hd_rumble_experimental_frequency_in_packet = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_frequency_both_bands: true,
+            hd_rumble_experimental_frequency_in_packet: false,
+            ..RumbleConfigController::default()
+        };
         let on = dir.resolve(Some(&config));
         assert!(on.frequency_both_bands);
         assert!(!on.frequency_in_packet);
@@ -1071,8 +1119,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::FREQUENCY_BOTH_BANDS_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_frequency_both_bands = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_frequency_both_bands: false,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(settings.frequency_both_bands);
@@ -1097,8 +1147,10 @@ mod tests {
                 .bt_after_input
         );
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_bt_after_input = false;
+        let mut config = RumbleConfigController {
+            hd_rumble_experimental_bt_after_input: false,
+            ..RumbleConfigController::default()
+        };
         assert!(!dir.resolve(Some(&config)).bt_after_input);
 
         config.hd_rumble_experimental_bt_after_input = true;
@@ -1117,8 +1169,10 @@ mod tests {
         let dir = TempFlagDir::new();
         dir.write_flag(HdRumbleSettings::BT_AFTER_INPUT_FLAG_FILE, "");
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_bt_after_input = false;
+        let config = RumbleConfigController {
+            hd_rumble_experimental_bt_after_input: false,
+            ..RumbleConfigController::default()
+        };
         let settings = dir.resolve(Some(&config));
 
         assert!(settings.bt_after_input);
@@ -1143,8 +1197,10 @@ mod tests {
         let fresh = dir.resolve(Some(&RumbleConfigController::default()));
         assert!(fresh.crisp_notes && fresh.bt_crisp_notes);
 
-        let mut wired_config = RumbleConfigController::default();
-        wired_config.hd_rumble_experimental_bt_crisp_notes = false;
+        let wired_config = RumbleConfigController {
+            hd_rumble_experimental_bt_crisp_notes: false,
+            ..RumbleConfigController::default()
+        };
         let wired = dir.resolve(Some(&wired_config));
         assert!(wired.crisp_notes);
         assert!(!wired.bt_crisp_notes);
@@ -1153,8 +1209,10 @@ mod tests {
             .to_string()
             .contains("crisp notes on (config), Bluetooth crisp notes off (config)"));
 
-        let mut bt_config = RumbleConfigController::default();
-        bt_config.hd_rumble_experimental_crisp_notes = false;
+        let bt_config = RumbleConfigController {
+            hd_rumble_experimental_crisp_notes: false,
+            ..RumbleConfigController::default()
+        };
         let bt = dir.resolve(Some(&bt_config));
         assert!(!bt.crisp_notes);
         assert!(bt.bt_crisp_notes);
@@ -1188,8 +1246,10 @@ mod tests {
                 || unconfigured.usb_no_queue)
         );
 
-        let mut bad_config = RumbleConfigController::default();
-        bad_config.hd_rumble_bluetooth_level = 9;
+        let bad_config = RumbleConfigController {
+            hd_rumble_bluetooth_level: 9,
+            ..RumbleConfigController::default()
+        };
         assert_eq!(dir.resolve(Some(&bad_config)).bluetooth_level, 1);
     }
 
@@ -1199,8 +1259,10 @@ mod tests {
         let default_on = dir.resolve(Some(&RumbleConfigController::default()));
         assert!(!default_on.bt_fast);
 
-        let mut config = RumbleConfigController::default();
-        config.hd_rumble_experimental_bt_fast = true;
+        let mut config = RumbleConfigController {
+            hd_rumble_experimental_bt_fast: true,
+            ..RumbleConfigController::default()
+        };
         let on = dir.resolve(Some(&config));
         assert!(on.bt_fast);
         assert_eq!(on.bt_fast_source, "config");

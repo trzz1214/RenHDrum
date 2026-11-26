@@ -315,7 +315,7 @@ mod tests {
         for segment in hd_am_fm_measure_segments() {
             for slot in 0..slots(&segment) {
                 let side = segment.side_at(slot);
-                let is_valid = side.is_none() || side.as_ref().map_or(false, |s| s.len() == 4);
+                let is_valid = side.is_none() || side.as_ref().is_some_and(|s| s.len() == 4);
                 assert!(is_valid, "segment {}", segment.name);
             }
         }

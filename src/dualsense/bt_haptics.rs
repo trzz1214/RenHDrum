@@ -264,7 +264,7 @@ mod tests {
         let mut b_pcm = [0.0f32; 1024 * DUALSENSE_CHANNELS];
         dsp_b.fill_interleaved_f32(&mut b_pcm);
 
-        for r in 0..2 {
+        for (r, report) in reports.iter().enumerate() {
             let offset_frames = r * DSP_FRAMES;
             for frame in 0..DS5_BT_HAPTICS_FRAMES {
                 let start_f = offset_frames + frame * DS5_BT_HAPTICS_DECIMATION;
@@ -276,7 +276,7 @@ mod tests {
                     let mean = sum / DS5_BT_HAPTICS_DECIMATION as f32;
                     let expected = (mean * 127.0).round().clamp(-128.0, 127.0) as i8 as u8;
                     assert_eq!(
-                        reports[r][PCM_OFFSET + frame * 2 + side],
+                        report[PCM_OFFSET + frame * 2 + side],
                         expected,
                         "Mismatch at report {r}, frame {frame}, side {side}"
                     );

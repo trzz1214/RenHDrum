@@ -12,6 +12,7 @@ mod speaker_replay;
 mod tri_replay;
 pub mod tri_trigger;
 pub mod trigger_effect;
+pub mod trigger_preset;
 pub mod trigger_profile;
 
 pub use bt_haptics::{
@@ -31,6 +32,7 @@ pub use haptics::{
 pub use settings::{DualSenseSettings, DualSenseSettingsFull};
 pub use tri_trigger::TriTrigger;
 pub use trigger_effect::DualSenseTriggerEffect;
+pub use trigger_preset::TriggerPreset;
 pub use trigger_profile::{
     pack_ds5_effects_state, DualSenseTriggerInput, DualSenseTriggerProfile,
     DualSenseTriggerProfileConfig,

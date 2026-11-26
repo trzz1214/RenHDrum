@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.6.0] - 2026-11-26
+
+### Added
+- **Shared DualSense adaptive trigger presets (Tier 2)**: added `TriggerPreset` (`src/dualsense/trigger_preset.rs`) with 14 game-state presets (`RENHDRUM_TRIG_*` 0..13), 500 ms signal TTL, duration/fatigue caps, 200 ms 3-step soft release, 40 Hz frequency cap, and C ABI (`renhdrum_trigger_preset_create` / `destroy` / `set` / `tick`).
+- **Switch 2 Pro Controller (`057E:2069`) USB HD Rumble 2 (experimental)**: added 3-sample `0x70` report `0x02` encoder and C ABI (`renhdrum_pro2_create` / `destroy` / `push_half_sample` / `build_report` / `silent_report`), using Mode 2 amplitude shaping (`mode2_amp`) and the frequency law measured by `101Leafy` (`Frizti/Fritchii#6`).
+- **Switch 2 Pro Controller (`057E:2069`) Bluetooth, virtual-joystick docs & `recomp-c` bridge (experimental)**: added the Switch 2 Pro branch and `RENHDRUM_ABI_COMPATIBLE` check to `integrations/recomp-c/bridge/`, and documented the 33-byte `0x00` BLE vibration path (15 ms pacing, Brontide-NS2 only; USB HD Rumble 2 works in Brontide-NS2 and Longshot, and in other recomp ports when their SDL3 has patch `0003` + libusb) plus the SDL virtual-joystick `SendEffect` bridge pattern.
+- **Shared device table & claim status**: I added `renhdrum_device_classify` so every host reads one VID/PID table and never sends HD Rumble packets to the GameCube 2 controller (`057E:2073`, flagged `RENHDRUM_DEVICE_NO_HD_WRITE`), plus `renhdrum_claim_status_text` for plain-English diagnostics and `RENHDRUM_ABI_COMPATIBLE` in `renhdrum.h` to check the DLL at load time.
+- **Stateless test vibration & send-rate meter**: I added `renhdrum_demo_sample` (`RENHDRUM_DEMO_QUICK_PING`, `RENHDRUM_DEMO_TECH_SHOW`, and the 5-part `RENHDRUM_DEMO_CHECKUP`) and the thread-safe `renhdrum_test_meter_create` / `destroy` / `record` / `format` meter to verify real packet delivery during controller checkups.
+- **CI header and lint gates**: CI now compiles strict-warning C and C++ smoke checks against `include/renhdrum.h` on gcc, clang, and MSVC, runs tests, and enforces `cargo clippy --all-targets` and `rustfmt`.
+
+- **Controller test issue form** (`.github/ISSUE_TEMPLATE/controller-test.yml`): added a structured GitHub Issue form for sharing `Test rumble` / `Copy report` results from Brontide-NS2 with optional thank-you board opt-in.
+
+### Changed
+- Getting started guide and `README.md` refreshed (Switch 2 Pro experimental, wired DualSense Windows volume note, Longshot DualSense features, `Test your controller` section + form link, upstream `dkb-pc-recomp` / `mkw-recomp` built-in 0.5 bridge notes, and version-neutral DLL wording).
+- Integration docs updated: I clarified that hosts must bypass their 15 ms rate filter only for pads RenHDrum drives, added Windows DLL search order notes, added a Linux udev permissions example, and added an `Upgrading from 0.5 to 0.6` section to `docs/integration/c-abi-reference.md`.
+- I documented the optional host-side **HD Triggers** (`hd_triggers`) toggle template for Tier 2 DualSense trigger presets in `docs/integration/ui-guidelines.md` and `integrations/recomp-c/README.md`.
+- I cleaned up 54 `clippy --all-targets` warnings and ran `rustfmt` across the workspace.
+- I normalized the SDL3 patch files in `integrations/sdl3/sdl3-patches/` (`0001`, `0002`) to LF line endings so `git apply` works out of the box (thanks to Octelly, #11).
+- `RENHDRUM_VERSION` is now `0x000600`.
+
+### Fixed
+- Internal mutexes now recover from lock poisoning instead of panicking or silencing haptics across the C ABI.
+- `renhdrum_store_shape_amplitude` now rejects `NaN` and non-positive values instead of letting bad inputs through.
+
 ## [0.5.0] - 2026-11-20
 
 ### Added

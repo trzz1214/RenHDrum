@@ -428,7 +428,7 @@ mod tests {
             let code = HdClickEncoding::amp4(a);
             assert!(
                 code == 0
-                    || (code >= HdClickEncoding::MIN_CODE4 && code <= HdClickEncoding::MAX_CODE4)
+                    || (HdClickEncoding::MIN_CODE4..=HdClickEncoding::MAX_CODE4).contains(&code)
             );
             assert_ne!(code, 1);
             a += 0.01;
@@ -446,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::excessive_precision)] // exact probe value, do not round
     fn four_bit_code_is_nearest_table_entry() {
         let cases = [
             (0.713429339f32, 2),

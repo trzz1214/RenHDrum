@@ -8,8 +8,8 @@ Background and measurements: [research/10: Xbox One Rumble](../research/10-xbox-
 > **Supported Controllers**: `✅ DualSense` · `✅ Nintendo Pro Controller` · `✅ Xbox One S` · `🧪 Steam Controller 2026 (experimental)`.
 
 > [!WARNING]
-> **CRITICAL: Enable Accurate Vibration / 15 ms Throttle Bypass**
-> For authentic HD Rumble synthesis, host emulators **must** enable `Accurate Vibration` (`enable_accurate_vibrations = true`) in controller settings or bypass the 15 ms rate-limiting block in `src/hid_core/frontend/emulated_controller.cpp`. If accurate vibration is disabled, the host rate limiter swallows and drops micro-timed HD Rumble sub-packets before they reach RenHDrum!
+> **15 ms rate filter: bypass it only for pads RenHDrum drives**
+> The host rate-limiting block (`src/hid_core/frontend/emulated_controller.cpp`) swallows micro-timed HD Rumble sub-packets before they reach RenHDrum. I do not ask users to turn on `Accurate Vibration`. The host skips that filter conditionally, only for a pad that RenHDrum is currently driving; other pads keep the normal filter. The user changes no setting.
 
 ---
 

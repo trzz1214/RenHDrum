@@ -303,6 +303,9 @@ pub unsafe extern "C" fn renhdrum_store_shape_amplitude(
     amplitude: f32,
 ) -> f32 {
     crate::ffi::ffi_guard(amplitude, || {
+        if !amplitude.is_finite() || amplitude <= 0.0 {
+            return 0.0;
+        }
         if s.is_null() {
             return amplitude;
         }
@@ -461,6 +464,35 @@ mod tests {
             }
         }
         assert_eq!(checked, OPTIONS.len());
+    }
+
+    #[test]
+    fn shape_amplitude_rejects_bad_input_and_is_monotone() {
+        for boost in [0, 25, 50, 100] {
+            let s = renhdrum_store_create();
+            set(s, "low_boost", boost);
+            let f = |a: f32| unsafe { renhdrum_store_shape_amplitude(s, a) };
+            for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.5] {
+                assert_eq!(f(bad), 0.0, "boost {boost} input {bad}");
+            }
+            assert_eq!(f(0.0), 0.0);
+            assert!(f(1.0) <= 1.0);
+            let eps = 1e-6;
+            assert!(
+                (f(0.02 - eps) - f(0.02 + eps)).abs() < 1e-4,
+                "boost {boost}"
+            );
+            let mut prev = 0.0f32;
+            for i in 0..=1000 {
+                let v = f(i as f32 / 1000.0);
+                assert!(v.is_finite() && v >= prev, "boost {boost} i {i}");
+                prev = v;
+            }
+            if boost == 100 {
+                assert!(f(0.40) / f(0.05) > 1.0);
+            }
+            unsafe { renhdrum_store_destroy(s) };
+        }
     }
 
     #[test]
