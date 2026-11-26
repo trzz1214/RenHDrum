@@ -26,6 +26,8 @@ integrations/recomp-c/
 
 Note: [dkb-pc-recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp) and [mkw-recomp](https://github.com/adriadam10/mkw-recomp) now ship their own RenHDrum integration (0.5 bridge, needs `renhdrum.dll` 0.5.0).
 
+For a feature-by-feature breakdown of the Longshot `v3.2.0-rh2` fork changes (`RENHDRUM_ABI_COMPATIBLE`, adaptive triggers, `HD Triggers` toggle, DualSense lights/touchpad, USB volume pin, Switch 2 Pro experimental), see [`docs/integration/longshot-0.6.0-changes.md`](../../docs/integration/longshot-0.6.0-changes.md).
+
 ---
 
 ## 1. What You Need
