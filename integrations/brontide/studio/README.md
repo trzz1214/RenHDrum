@@ -8,7 +8,7 @@ These files are **reference implementations**, not patches to be applied directl
 
 ## What these components do
 
-- **`hd_rumble_dialog.h` / `.cpp`**: The main HD Rumble Studio dialog. Reads and writes the shared settings file (`%APPDATA%\RenHDrum\renhdrum-settings.txt`) so companion tools and in-emulator settings remain synchronized. Monitors connected controllers every second and adapts the UI pages accordingly.
+- **`hd_rumble_dialog.h` / `.cpp`**: The main HD Rumble Studio dialog. Reads and writes the shared settings file (`%APPDATA%\RenHDrum\renhdrum-settings.txt` on Windows; `$XDG_CONFIG_HOME/RenHDrum/renhdrum-settings.txt` or `~/.config/RenHDrum/renhdrum-settings.txt` on Linux in current Brontide, which this snapshot predates) so companion tools and in-emulator settings remain synchronized. Monitors connected controllers every second and adapts the UI pages accordingly.
 - **`hd_rumble_widgets.h` / `.cpp`**: Specialized UI widgets for toggle switches, controller status cards, and settings rows.
 - **`thunder.h` / `.cpp`**: The signature rumble pattern demonstration ("Try the thunder"), firing a synthetic haptic envelope through the emulator's vibration pipeline to test low/high band response across connected controllers.
 - **`renhdrum_pads.h`**: Shared enumeration of controller models and helper functions used to query connected controller types from the input driver.

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Settings file on Linux and other Unix systems**: `renhdrum-settings.txt` is now found at `$XDG_CONFIG_HOME/RenHDrum/renhdrum-settings.txt`, or `~/.config/RenHDrum/renhdrum-settings.txt` when `XDG_CONFIG_HOME` is unset, empty or relative. Before, the core only looked at `%APPDATA%`, which Linux does not set, so saved settings were never read and `save_settings_file` failed. Windows still uses `%APPDATA%\RenHDrum\renhdrum-settings.txt`.
+
 ## [0.6.0] - 2026-11-26
 
 ### Added

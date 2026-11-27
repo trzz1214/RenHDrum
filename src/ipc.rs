@@ -398,13 +398,46 @@ pub fn shared() -> Option<&'static RenHDrumSharedMemory> {
 }
 
 /// Path to the settings file read by renhdrum.dll when the App is closed:
-/// `%APPDATA%\RenHDrum\renhdrum-settings.txt`. Returns `None` if `APPDATA` is unset.
+/// - Windows: `%APPDATA%\RenHDrum\renhdrum-settings.txt`
+/// - Linux and other Unix: `$XDG_CONFIG_HOME/RenHDrum/renhdrum-settings.txt`, or
+///   `~/.config/RenHDrum/renhdrum-settings.txt` when `XDG_CONFIG_HOME` is unset, empty or relative
+///   (as the XDG Base Directory spec asks).
+///
+/// Returns `None` if none of those variables gives a usable directory.
 pub fn settings_file_path() -> Option<PathBuf> {
-    let appdata = std::env::var_os("APPDATA")?;
-    let mut p = PathBuf::from(appdata);
-    p.push("RenHDrum");
-    p.push("renhdrum-settings.txt");
-    Some(p)
+    let dir = if cfg!(windows) {
+        settings_dir_windows(std::env::var_os("APPDATA"))
+    } else {
+        settings_dir_unix(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        )
+    };
+    dir.map(|d| d.join("renhdrum-settings.txt"))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn settings_dir_windows(appdata: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let appdata = appdata.filter(|v| !v.is_empty())?;
+    Some(PathBuf::from(appdata).join("RenHDrum"))
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn settings_dir_unix(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let xdg = xdg_config_home
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute());
+    let base = match xdg {
+        Some(p) => p,
+        None => {
+            let home = home.filter(|v| !v.is_empty())?;
+            PathBuf::from(home).join(".config")
+        }
+    };
+    Some(base.join("RenHDrum"))
 }
 
 /// Serializes all 25 fields of `RenHdcConfig` to simple `key=value` text format.
@@ -626,12 +659,17 @@ pub fn parse_settings_text(text: &str) -> Option<RenHdcConfig> {
     }
 }
 
-/// Saves configuration to `%APPDATA%\RenHDrum\renhdrum-settings.txt` (creates directory if missing).
+/// Saves configuration to the settings file (see [`settings_file_path`]); creates the directory if
+/// missing.
 pub fn save_settings_file(c: &RenHdcConfig) -> std::io::Result<()> {
     let path = settings_file_path().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "APPDATA environment variable not set",
+            if cfg!(windows) {
+                "APPDATA environment variable not set"
+            } else {
+                "neither XDG_CONFIG_HOME nor HOME environment variable is set"
+            },
         )
     })?;
     if let Some(parent) = path.parent() {
@@ -818,5 +856,52 @@ mod tests {
         assert!(!parsed_legacy.dualsense_hd_haptics_off);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod settings_path_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    #[test]
+    fn windows_uses_appdata() {
+        let appdata = std::env::temp_dir().join("Roaming");
+        assert_eq!(
+            settings_dir_windows(Some(appdata.clone().into_os_string())),
+            Some(appdata.join("RenHDrum"))
+        );
+        assert_eq!(settings_dir_windows(None), None);
+        assert_eq!(settings_dir_windows(os("")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_prefers_absolute_xdg_config_home() {
+        assert_eq!(
+            settings_dir_unix(os("/xdg/config"), os("/home/u")),
+            Some(PathBuf::from("/xdg/config/RenHDrum"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_falls_back_to_home_dot_config() {
+        let want = Some(PathBuf::from("/home/u/.config/RenHDrum"));
+        assert_eq!(settings_dir_unix(None, os("/home/u")), want);
+        assert_eq!(settings_dir_unix(os(""), os("/home/u")), want);
+        // The XDG spec says a relative XDG_CONFIG_HOME must be ignored
+        assert_eq!(settings_dir_unix(os("relative/dir"), os("/home/u")), want);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_without_any_directory_is_none() {
+        assert_eq!(settings_dir_unix(None, None), None);
+        assert_eq!(settings_dir_unix(os(""), os("")), None);
     }
 }
