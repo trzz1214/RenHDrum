@@ -99,24 +99,24 @@ In the real-time audio callback:
 void SDLCALL AudioStreamCallback(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount) {
     if (additional_amount <= 0) return;
 
-    int total_floats = additional_amount / sizeof(float);
-    // Ensure float count is a multiple of 4 channels
-    total_floats -= (total_floats % 4);
+    constexpr int bytes_per_frame = 4 * static_cast<int>(sizeof(float));
+    int frames_needed = additional_amount / bytes_per_frame;
+    if (frames_needed <= 0) return;
 
-    std::vector<float> buffer(total_floats);
+    // Fixed stack buffer — never allocate on the audio callback thread.
+    constexpr int CHUNK_FRAMES = 256;
+    float chunk[CHUNK_FRAMES * 4];
 
     std::lock_guard<std::mutex> lock(dsp_mutex);
-    if (dsp) {
-        int res = renhdrum_dualsense_dsp_fill_f32(dsp, buffer.data(), total_floats);
-        if (res < 0) {
-            // Error occurred: fill with silence
-            std::fill(buffer.begin(), buffer.end(), 0.0f);
+    while (frames_needed > 0) {
+        const int cur_frames = (std::min)(frames_needed, CHUNK_FRAMES);
+        if (!dsp || renhdrum_dualsense_dsp_fill_f32(dsp, chunk, static_cast<size_t>(cur_frames)) < 0) {
+            // Error or null DSP: fill with silence
+            std::memset(chunk, 0, sizeof(chunk));
         }
-    } else {
-        std::fill(buffer.begin(), buffer.end(), 0.0f);
+        SDL_PutAudioStreamData(stream, chunk, cur_frames * bytes_per_frame);
+        frames_needed -= cur_frames;
     }
-
-    SDL_PutAudioStreamData(stream, buffer.data(), buffer.size() * sizeof(float));
 }
 ```
 
@@ -197,7 +197,7 @@ When a game integration knows what the player is doing (pulling a bow, out of am
 | `9` `WHEELSPIN` | Wheelspin | Tire slip / drift vibration (softly stops after 5 s) |
 | `10` `THROTTLE` | Throttle | Light long-session accelerator curve capped at strength 4 (soft release) |
 | `11` `HEAVY_LOAD` | Heavy load | Carrying a heavy object or holding a heavy shield (caps to strength 3 after 12 s; soft release) |
-| `12` `IMPACT_PULSE` | Impact pulse | One-shot 100 ms overlay (gear shift, collision, parry; >= 80 ms rest between pulses), restores prior preset |
+| `12` `IMPACT_PULSE` | Impact pulse | One-shot 150 ms overlay (gear shift, collision, parry; >= 80 ms rest between pulses), restores prior preset |
 | `13` `ENGINE_ROUGH` | Engine / rough | Gravel, rev limiter, machinery vibration (caps to amplitude 2 after 10 s; soft release) |
 
 - **500 ms TTL:** Keep calling `renhdrum_trigger_preset_set` periodically (e.g. every frame). If no update arrives for 500 ms, I softly step resistance down over 200 ms and return to `Off`.

@@ -1,7 +1,7 @@
 //! Inviolable physical constants and hardware constraints. Calibration values must remain unchanged.
 
 use renhdrum::backend::nintendo_hd::{
-    BT_SYNC_MAX_GAP_MS, BT_SYNC_MIN_GAP_MS, KEEP_ALIVE_TIMEOUT_MS,
+    BT_SYNC_MAX_GAP_MS, BT_SYNC_MIN_GAP_MS, KEEP_ALIVE_TIMEOUT_MS, SILENCE_WATCHDOG_MS,
 };
 use renhdrum::dualsense::{
     DUALSENSE_AMPLITUDE_EXPONENT, DUALSENSE_BUFFER_FRAMES, DUALSENSE_OUTPUT_CEILING,
@@ -52,6 +52,7 @@ fn bluetooth_pacing_unchanged() {
     );
     assert_eq!((BT_SYNC_MIN_GAP_MS, BT_SYNC_MAX_GAP_MS), (60, 120));
     assert_eq!(KEEP_ALIVE_TIMEOUT_MS, 150);
+    assert_eq!(SILENCE_WATCHDOG_MS, 1000);
 }
 
 #[test]

@@ -21,6 +21,8 @@ pub const SYNC_FEED_MS: i32 = 8;
 pub const NO_QUEUE_FEED_MS: i32 = 4;
 pub const AM_FM_NO_QUEUE_GAP_MS: i32 = 10;
 pub const KEEP_ALIVE_TIMEOUT_MS: i32 = 150;
+/// Game sends no new sample for this long: the core pushes silence itself, so one stop packet goes out (DECISIONS 27/11).
+pub const SILENCE_WATCHDOG_MS: i64 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct HdSample {
@@ -93,6 +95,7 @@ pub struct NintendoHdEngine {
 
     latest_l: HdSample,
     latest_r: HdSample,
+    last_push_us: Option<i64>,
     peak_l: HdSample,
     peak_r: HdSample,
     dirty: bool,
@@ -129,6 +132,7 @@ impl NintendoHdEngine {
             bt_token_time_us: 0,
             latest_l: HdSample::default(),
             latest_r: HdSample::default(),
+            last_push_us: None,
             peak_l: HdSample::default(),
             peak_r: HdSample::default(),
             dirty: false,
@@ -248,6 +252,7 @@ impl NintendoHdEngine {
         if !self.settings.enabled {
             return;
         }
+        self.last_push_us = Some(now_us);
 
         let l = HdSample::new(left_al, left_fl, left_ah, left_fh);
         let r = HdSample::new(right_al, right_fl, right_ah, right_fh);
@@ -309,6 +314,7 @@ impl NintendoHdEngine {
         if !self.settings.enabled {
             return;
         }
+        self.last_push_us = Some(now_us);
 
         let s = HdSample::new(al, fl, ah, fh);
         if is_right {
@@ -361,6 +367,31 @@ impl NintendoHdEngine {
     pub fn tick(&mut self, now_us: i64, out_packet: &mut [u8; 10]) -> bool {
         if !self.settings.enabled {
             return false;
+        }
+
+        // Silence watchdog: the game stopped sending, so feed silence through the normal push path.
+        if self
+            .last_push_us
+            .is_some_and(|t| now_us.saturating_sub(t) >= SILENCE_WATCHDOG_MS * 1000)
+            && !(self.latest_l.is_silent() && self.latest_r.is_silent())
+        {
+            use crate::planner::amfm_planner::HdAmFmPlanner as P;
+            self.push_half_sample(
+                now_us,
+                false,
+                0.0,
+                P::DEFAULT_FREQ_LOW,
+                0.0,
+                P::DEFAULT_FREQ_HIGH,
+            );
+            self.push_half_sample(
+                now_us,
+                true,
+                0.0,
+                P::DEFAULT_FREQ_LOW,
+                0.0,
+                P::DEFAULT_FREQ_HIGH,
+            );
         }
 
         let now_ms = now_us / 1000;
@@ -769,6 +800,80 @@ mod tests {
             }
         }
         assert_eq!(silent_sends, 1);
+    }
+
+    fn watchdog_engine(bt: bool, level: i32, am_fm: bool) -> NintendoHdEngine {
+        let settings = HdRumbleSettings {
+            bluetooth_level: level,
+            bt_fast: bt && am_fm,
+            envelope_5ms: am_fm,
+            usb_no_queue: am_fm,
+            ..HdRumbleSettings::default()
+        };
+        let mut e = NintendoHdEngine::new(bt, true);
+        e.apply_settings(&settings);
+        e
+    }
+
+    /// Returns (ms of each silent packet, ms of each non-silent packet) while the game pushes every
+    /// `push_every` ms (0 = pushes once) for 3 s.
+    fn run_watchdog(mut e: NintendoHdEngine, push_every: i64) -> (Vec<i64>, Vec<i64>) {
+        let (mut silent, mut loud) = (Vec::new(), Vec::new());
+        let mut out = [0u8; 10];
+        let t0 = 1_000_000;
+        for ms in 0..=3000i64 {
+            let now = t0 + ms * 1000;
+            if (push_every == 0 && ms == 0) || (push_every > 0 && ms % push_every == 0) {
+                e.push_sample(now, 0.5, 160.0, 0.5, 320.0, 0.5, 160.0, 0.5, 320.0);
+            }
+            if e.tick(now, &mut out) {
+                if hd_is_silent_packet(&out) {
+                    silent.push(ms);
+                } else {
+                    loud.push(ms);
+                }
+            }
+        }
+        (silent, loud)
+    }
+
+    #[test]
+    fn test_silence_watchdog_stops_after_1s() {
+        for (bt, level, amfm) in [
+            (true, 4, false),
+            (true, 3, false),
+            (false, 1, false),
+            (false, 1, true),
+            (true, 3, true),
+        ] {
+            let (silent, _) = run_watchdog(watchdog_engine(bt, level, amfm), 0);
+            assert_eq!(
+                silent.len(),
+                1,
+                "bt={bt} level={level} amfm={amfm}: {silent:?}"
+            );
+            assert!(
+                (1000..=1100).contains(&silent[0]),
+                "bt={bt} level={level} amfm={amfm}: {silent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_silence_watchdog_quiet_while_game_keeps_pushing() {
+        for (bt, level, amfm) in [
+            (true, 4, false),
+            (true, 3, false),
+            (false, 1, false),
+            (false, 1, true),
+            (true, 3, true),
+        ] {
+            let (silent, _) = run_watchdog(watchdog_engine(bt, level, amfm), 15);
+            assert!(
+                silent.is_empty(),
+                "bt={bt} level={level} amfm={amfm}: {silent:?}"
+            );
+        }
     }
 
     #[test]

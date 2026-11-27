@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-27
+
+### Changed
+- I added a 1-second silence watchdog so rumble auto-stops across Switch Pro / Joy-Con, DualSense, Steam grip, and Switch 2 Pro.
+- I now apply the Switch 2 curve before gain and low_boost in Xbox Direct mode so Switch 2 vibrations scale properly.
+- `RENHDRUM_VERSION` is now `0x000601` (ABI-compatible drop-in replacement for `0.6.0` hosts).
+
 ### Fixed
-- **Settings file on Linux and other Unix systems**: `renhdrum-settings.txt` is now found at `$XDG_CONFIG_HOME/RenHDrum/renhdrum-settings.txt`, or `~/.config/RenHDrum/renhdrum-settings.txt` when `XDG_CONFIG_HOME` is unset, empty or relative. Before, the core only looked at `%APPDATA%`, which Linux does not set, so saved settings were never read and `save_settings_file` failed. Windows still uses `%APPDATA%\RenHDrum\renhdrum-settings.txt`.
+- I removed per-frame config reads on DualSense Bluetooth `0x36` and fixed lock ordering and shared-memory aliasing on trace/IPC paths.
+- I capped Xbox catch-up loops, sanitized invalid Xbox frequencies, and synced `RenHdcXboxDirect` with the options table.
+- Linux and other Unix systems now find `renhdrum-settings.txt` in `$XDG_CONFIG_HOME/RenHDrum/` (or `~/.config/RenHDrum/`); before, only `%APPDATA%` was checked. Windows is unchanged.
+
+### Docs
+- I synced `c-abi-reference.md`, `dualsense.md`, and `renhdrum.h` with current defaults, timing, and `GETTING-STARTED.md` notes.
 
 ## [0.6.0] - 2026-11-26
 

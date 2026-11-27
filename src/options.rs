@@ -79,6 +79,8 @@ const I_BT_MODE: usize = 1;
 const I_DS_HAPTICS: usize = 2;
 const I_DS_HD: usize = 3;
 const I_DS_VOLUME: usize = 4;
+pub(crate) const I_GAIN: usize = 6;
+pub(crate) const I_LOW_BOOST: usize = 7;
 const I_NO_QUEUE: usize = 8;
 const I_ENVELOPE: usize = 9;
 const I_FREQ_PACKET: usize = 10;
@@ -89,6 +91,10 @@ const I_USB_AUTO_SLOW: usize = 14;
 const I_BT_AFTER_INPUT: usize = 15;
 const I_BT_CRISP: usize = 16;
 const I_DS_CRISP: usize = 17;
+pub(crate) const I_XBOX_STRENGTH: usize = 19;
+pub(crate) const I_XBOX_DETAIL: usize = 20;
+pub(crate) const I_XBOX_ACCENTS: usize = 21;
+pub(crate) const I_XBOX_TRIGGER_MIX: usize = 22;
 
 static OPTIONS: [RenHdcOption; 23] = [
     opt!("enable_hd_rumble", "HD Rumble", "Plays the game's HD Rumble in full detail. Off: the standard rumble.", "", BOOL, 0, 1, 1, 1, ALL, 0, 0, -1),
@@ -134,9 +140,9 @@ fn find(key: *const c_char) -> Option<usize> {
 }
 
 impl RenHdcStore {
-    /// Value by key; unknown key = 0 (callers use fixed keys from the table).
-    pub(crate) fn value(&self, key: &str) -> i32 {
-        index_of(key).map_or(0, |i| self.values[i])
+    /// Value by constant row index into `OPTIONS`.
+    pub(crate) fn at(&self, idx: usize) -> i32 {
+        self.values[idx]
     }
 
     fn new() -> Self {
@@ -302,15 +308,15 @@ pub unsafe extern "C" fn renhdrum_store_shape_amplitude(
     s: *const RenHdcStore,
     amplitude: f32,
 ) -> f32 {
-    crate::ffi::ffi_guard(amplitude, || {
+    crate::ffi::ffi_guard(0.0, || {
         if !amplitude.is_finite() || amplitude <= 0.0 {
             return 0.0;
         }
         if s.is_null() {
             return amplitude;
         }
-        let gain = (*s).value("gain") as f32;
-        let boost = (*s).value("low_boost");
+        let gain = (*s).at(I_GAIN) as f32;
+        let boost = (*s).at(I_LOW_BOOST);
         let x = (amplitude * gain / 100.0).min(1.0);
         if x <= 0.0 || boost <= 0 {
             return x;
@@ -375,6 +381,13 @@ mod tests {
         }
         assert_eq!(USB_INTERVALS_MS[OPTIONS[I_USB_INTERVAL].def as usize], 15);
         assert_eq!(OPTIONS[18].max, 1);
+        let opt_key = |i: usize| unsafe { CStr::from_ptr(OPTIONS[i].key) }.to_str().unwrap();
+        assert_eq!(opt_key(I_GAIN), "gain");
+        assert_eq!(opt_key(I_LOW_BOOST), "low_boost");
+        assert_eq!(opt_key(I_XBOX_STRENGTH), "xbox_strength");
+        assert_eq!(opt_key(I_XBOX_DETAIL), "xbox_detail");
+        assert_eq!(opt_key(I_XBOX_ACCENTS), "xbox_accents");
+        assert_eq!(opt_key(I_XBOX_TRIGGER_MIX), "xbox_trigger_mix");
     }
 
     #[test]

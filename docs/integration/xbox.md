@@ -102,7 +102,7 @@ Built and tested on the Xbox One S controller (Switch 1 games, and Switch 2 game
 
 ## 8. Direct mode (store key `xbox_mode` = 1)
 
-Direct skips the rotor model: the two bands of each Switch side drive the grip motors and the triggers straight. The host no longer computes anything; it feeds raw amplitudes and sends what the core returns. Settings (`gain`, `low_boost`, `xbox_strength`, `xbox_detail`, `xbox_accents`, `xbox_trigger_mix`) are read from the `RenHdcStore` (see `c-abi-reference.md`, "Settings table").
+Direct skips the rotor model: the two bands of each Switch side drive the grip motors and the triggers straight. The host no longer computes anything; it feeds raw amplitudes and sends what the core returns. Settings (`gain`, `low_boost`, `xbox_strength`, `xbox_detail`, `xbox_accents`, `xbox_trigger_mix`) are read from the `RenHdcStore` (see `c-abi-reference.md`, "Settings table"). Switch 2 games (nx2 mode 2) get the same Switch 2 curve as RenHDrum mode, before gain.
 
 ```c
 RenHdcXboxDirect *d = renhdrum_xbox_direct_create();   // one per pad

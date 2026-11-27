@@ -763,18 +763,26 @@ impl XboxRumbleMapper {
             .is_some_and(|last| now_us - last > hold_us)
     }
 
+    #[cfg(test)]
+    pub(crate) fn band_pitch(&self, band: usize) -> f32 {
+        self.classifiers[band].pitch
+    }
+
     fn advance_state(&mut self, now_us: i64) {
         let Some(prev_us) = self.last_eval_us else {
             self.last_eval_us = Some(now_us);
             return;
         };
-        let dt_us = now_us - prev_us;
+        let dt_us = now_us.saturating_sub(prev_us);
         if dt_us <= 0 {
             return;
         }
+        // After 2 s the rotor is completely at rest; catching up further only wastes CPU
+        // (a 1-hour game pause previously ran 360,000 iterations).
+        const MAX_CATCHUP_US: i64 = 2_000_000;
         // Step rotor in <= 10 ms slices so kick endings and silence transitions within a long gap
         // update rotor speed accurately.
-        let mut t = prev_us;
+        let mut t = prev_us.max(now_us.saturating_sub(MAX_CATCHUP_US));
         while t < now_us {
             let step = (now_us - t).min(10_000);
             let drive = self.current_drive_pct(t);
@@ -2297,6 +2305,30 @@ mod tests {
             out[1] >= pct_to_u16(0.040),
             "RG kick should be around 4.5%, got {:.2}%",
             f32::from(out[1]) / 65535.0 * 100.0
+        );
+    }
+
+    #[test]
+    fn advance_state_caps_long_gap_catchup() {
+        let mut m = mapper();
+        m.push_half_sample(0, false, 0.5, 160.0, 0.3, 320.0);
+        let _ = m.tick(0);
+
+        let started = std::time::Instant::now();
+        let _ = m.tick(3_600_000_000);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "3600s gap catchup took {:?}",
+            elapsed
+        );
+
+        let started_max = std::time::Instant::now();
+        m.advance_state(i64::MAX);
+        assert!(
+            started_max.elapsed() < std::time::Duration::from_millis(50),
+            "i64::MAX gap catchup took {:?}",
+            started_max.elapsed()
         );
     }
 }

@@ -16,7 +16,7 @@ Library name: `renhdrum.dll` (Windows), `librenhdrum.so` (Linux), `librenhdrum.d
 
 | Constant | Value | Description |
 |---|---|---|
-| `RENHDRUM_VERSION` | `0x000600` | Encoded as `0xMMNNPP` (Major 0, Minor 6, Patch 0). |
+| `RENHDRUM_VERSION` | `0x000601` | Encoded as `0xMMNNPP` (Major 0, Minor 6, Patch 1). |
 | `RENHDRUM_OK` | `0` | Call completed successfully. |
 | `RENHDRUM_ERR_NULL_PTR` | `-1` | A required pointer argument was null. |
 | `RENHDRUM_ERR_INVALID_ARG` | `-2` | An argument value was outside acceptable bounds. |
@@ -32,13 +32,13 @@ Host runtime configuration passed to `renhdrum_engine_apply_settings`.
 typedef struct RenHdcSettings {
     bool enabled;                  /* Global engine enable */
     int32_t usb_interval_ms;       /* USB target frame spacing (default 15 ms) */
-    int32_t bluetooth_level;       /* Token bucket tier (1=Stable 60ms, 2=Balanced 45ms, 3=Quality 35ms, 4=Compatible 32ms newest-value, default) */
+    int32_t bluetooth_level;       /* Token bucket tier (1=Stable 60ms [NULL config default], 2=Balanced 45ms, 3=Quality 35ms, 4=Compatible 32ms newest-value [Standard preset]) */
     bool usb_auto_slow;            /* Auto-slowdown to 30 ms under high sample rates */
     bool sync_to_input;            /* Input synchronization */
     bool click_pulse;              /* Enable hardware click packet emulation */
     bool sync_bluetooth;           /* Pacing on Bluetooth */
     bool usb_no_queue;             /* Idle-gated non-blocking writes on USB */
-    int32_t usb_pause_ms;          /* Inter-packet pause duration (default 0) */
+    int32_t usb_pause_ms;          /* Inter-packet pause duration (default 2) */
     bool envelope_5ms;             /* 5 ms multi-sample AM/FM envelope on USB */
     bool frequency_in_packet;      /* In-packet frequency changes (FormatThree7bit / Two14bit) */
     bool frequency_both_bands;     /* Dual-band frequency switching */
@@ -98,7 +98,7 @@ These functions perform pure mathematical transformations and packet encoding wi
 ```c
 uint32_t renhdrum_version(void);
 ```
-Returns the integer library version `0x000600`.
+Returns the integer library version `0x000601`.
 
 ### `renhdrum_set_nx2_mode`
 ```c
@@ -237,9 +237,9 @@ Sets the vibration target for a single channel.
 
 ### `renhdrum_dualsense_dsp_fill_f32`
 ```c
-int32_t renhdrum_dualsense_dsp_fill_f32(RenHdcDualSenseDsp *dsp, float *out_buffer, int32_t total_floats);
+int32_t renhdrum_dualsense_dsp_fill_f32(RenHdcDualSenseDsp *dsp, float *out_interleaved_4ch, size_t frame_count);
 ```
-Fills `out_buffer` with interleaved 4-channel 48 kHz float samples (Channels 0 & 1 = Audio left/right; Channels 2 & 3 = Haptics left/right). `total_floats` must be a multiple of 4.
+Fills `out_interleaved_4ch` with interleaved 4-channel 48 kHz float samples (Channels 0 & 1 = Audio left/right; Channels 2 & 3 = Haptics left/right). `out_interleaved_4ch` must hold `frame_count * 4` floats.
 
 ### `renhdrum_valve_grip_dsp_create` / `renhdrum_valve_grip_build_report` (experimental)
 ```c

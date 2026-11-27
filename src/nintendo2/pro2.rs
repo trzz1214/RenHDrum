@@ -9,8 +9,8 @@ pub const PRO2_REPORT_SIZE: usize = 64;
 
 const PRO2_DEFAULT_HIGH_FREQ_HZ: f32 = 160.0;
 const PRO2_DEFAULT_LOW_FREQ_HZ: f32 = 80.0;
-// ponytail: 2 s like SDL; change once a real pad is measured
-const PRO2_IDLE_TIMEOUT_US: i64 = 2_000_000;
+// 1 s without a push: same silence watchdog as the other pads (DECISIONS 27/11)
+const PRO2_IDLE_TIMEOUT_US: i64 = 1_000_000;
 const PRO2_SLOTS_PER_REPORT: i64 = 3;
 const PRO2_SILENT_TRAIL_PACKETS: u8 = 3;
 const SLOT_HISTORY: usize = 8;
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_two_seconds_without_push_returns_to_silence() {
+    fn idle_one_second_without_push_returns_to_silence() {
         let _g = NX2_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_nx2_mode(0);
 
@@ -485,15 +485,15 @@ mod tests {
         assert!(p.build_report(15_000, &mut out));
         assert!(decode_sample(&out[18..23]).3 > 0);
 
-        // 2 s after last push -> transitions to 3 silent packets, then stops
+        // 1 s after last push -> transitions to 3 silent packets, then stops
         for step in 0..3 {
-            assert!(p.build_report(2_000_000 + step * 15_000, &mut out));
+            assert!(p.build_report(1_000_000 + step * 15_000, &mut out));
             for s in [&out[18..23], &out[23..28], &out[28..33]] {
                 let (_, ha, _, la) = decode_sample(s);
                 assert_eq!((ha, la), (0, 0));
             }
         }
-        assert!(!p.build_report(2_045_000, &mut out));
+        assert!(!p.build_report(1_045_000, &mut out));
         set_nx2_mode(0);
     }
 

@@ -475,7 +475,7 @@ impl BandClassifier {
     }
 
     pub fn relative_pitch(freq: f32, base_freq: f32) -> f32 {
-        if freq <= 0.0 || base_freq <= 0.0 {
+        if !(freq > 0.0 && base_freq > 0.0) {
             return 0.0;
         }
         (freq / base_freq).log2().clamp(-1.0, 1.0)
@@ -629,5 +629,13 @@ mod tests {
         }
         assert_eq!(c.classify(400_000), Some(RumbleKind::Texture));
         assert_eq!(c.run_hits, 1);
+    }
+
+    #[test]
+    fn relative_pitch_rejects_nan_and_non_positive() {
+        assert_eq!(BandClassifier::relative_pitch(f32::NAN, 160.0), 0.0);
+        assert_eq!(BandClassifier::relative_pitch(160.0, f32::NAN), 0.0);
+        assert_eq!(BandClassifier::relative_pitch(0.0, 160.0), 0.0);
+        assert_eq!(BandClassifier::relative_pitch(-10.0, 160.0), 0.0);
     }
 }

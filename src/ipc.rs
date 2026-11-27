@@ -92,7 +92,7 @@ pub struct RenHDrumSharedMemory {
     pub diag_max_interval_us: AtomicU32, // Maximum interval between packets
     pub blackbox_write_idx: AtomicU32, // Ring-buffer write index
     pub _pad3: [u8; 4],
-    pub blackbox_samples: [BlackboxSampleEntry; 32],
+    pub blackbox_samples: std::cell::UnsafeCell<[BlackboxSampleEntry; 32]>,
     pub _reserved: [u8; 4096
         - 16
         - std::mem::size_of::<RenHdcConfig>()
@@ -104,8 +104,13 @@ pub struct RenHDrumSharedMemory {
         - std::mem::size_of::<DiagnosticTelemetry>()
         - 28
         - 4
-        - (32 * std::mem::size_of::<BlackboxSampleEntry>())],
+        - std::mem::size_of::<std::cell::UnsafeCell<[BlackboxSampleEntry; 32]>>()],
 }
+
+// SAFETY: blackbox_samples uses UnsafeCell (`repr(transparent)`) and is only accessed via
+// volatile raw-pointer reads/writes coordinated by `blackbox_write_idx`; other shared fields use
+// atomics or the `config_sequence` seqlock.
+unsafe impl Sync for RenHDrumSharedMemory {}
 
 // Compile-time assertion that the struct is exactly 4096 bytes and offsets are consistent
 const _: () = assert!(std::mem::size_of::<RenHDrumSharedMemory>() == 4096);
@@ -137,7 +142,7 @@ impl RenHDrumSharedMemory {
         self.diag_max_interval_us = AtomicU32::new(0);
         self.blackbox_write_idx = AtomicU32::new(0);
         self._pad3 = [0; 4];
-        self.blackbox_samples = [BlackboxSampleEntry::default(); 32];
+        self.blackbox_samples = std::cell::UnsafeCell::new([BlackboxSampleEntry::default(); 32]);
         self._reserved = [0; _];
     }
 
@@ -146,8 +151,11 @@ impl RenHDrumSharedMemory {
         let idx = self.blackbox_write_idx.fetch_add(1, Ordering::Relaxed);
         let slot = (idx % 32) as usize;
         unsafe {
-            let ptr = self.blackbox_samples.as_ptr() as *mut BlackboxSampleEntry;
-            ptr.add(slot).write_volatile(sample);
+            self.blackbox_samples
+                .get()
+                .cast::<BlackboxSampleEntry>()
+                .add(slot)
+                .write_volatile(sample);
         }
     }
 
@@ -164,7 +172,7 @@ impl RenHDrumSharedMemory {
                 (start + i) % 32
             };
             unsafe {
-                let ptr = self.blackbox_samples.as_ptr();
+                let ptr = self.blackbox_samples.get().cast::<BlackboxSampleEntry>();
                 samples.push(ptr.add(idx).read_volatile());
             }
         }
@@ -381,7 +389,10 @@ mod win {
             (false, false) => "Joy-Con · USB",
         };
         unsafe {
-            (*p).set_status(status);
+            let dst = std::ptr::addr_of_mut!((*p).player1_status_utf8).cast::<u8>();
+            let n = status.len().min(255);
+            std::ptr::copy_nonoverlapping(status.as_ptr(), dst, n);
+            dst.add(n).write_volatile(0);
         }
     }
 }

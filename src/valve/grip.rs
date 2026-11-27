@@ -525,6 +525,9 @@ mod tests {
         let mut skips = 0;
         let mut plain_skips = 0;
         for i in 0..25_000 {
+            // The game keeps rumbling (the 1 s silence watchdog would stop a target set only once).
+            dsp_drift.set_half_target(false, 0.5, 160.0, 0.0, 320.0);
+            dsp_plain.set_half_target(false, 0.5, 160.0, 0.0, 320.0);
             let res_d = drift.build_report(&mut dsp_drift, 8, &mut out_drift);
             if res_d == Some(ValveGripBuildOutcome::DriftSkip) {
                 assert_eq!(i, 24_999);
@@ -567,6 +570,7 @@ mod tests {
         let mut out = [0u8; VALVE_GRIP_REPORT_SIZE];
 
         for _ in 0..24_000 {
+            dsp.set_half_target(false, 0.5, 160.0, 0.0, 320.0); // keeps the 1 s silence watchdog quiet
             assert_eq!(
                 state.build_report(&mut dsp, 8, &mut out),
                 Some(ValveGripBuildOutcome::Active)
@@ -583,6 +587,7 @@ mod tests {
 
         dsp.set_half_target(false, 0.5, 160.0, 0.0, 320.0);
         for _ in 0..24_000 {
+            dsp.set_half_target(false, 0.5, 160.0, 0.0, 320.0);
             assert_eq!(
                 state.build_report(&mut dsp, 8, &mut out),
                 Some(ValveGripBuildOutcome::Active)
@@ -599,6 +604,7 @@ mod tests {
             Some(2)
         );
         for _ in 0..24_000 {
+            dsp2.set_half_target(false, 0.5, 160.0, 0.0, 320.0);
             assert_eq!(
                 state2.build_report(&mut dsp2, 9, &mut out),
                 Some(ValveGripBuildOutcome::Active)
@@ -621,6 +627,7 @@ mod tests {
             Some(2)
         );
         for _ in 0..24_000 {
+            dsp2.set_half_target(false, 0.5, 160.0, 0.0, 320.0);
             assert_eq!(
                 state2.build_report(&mut dsp2, 9, &mut out),
                 Some(ValveGripBuildOutcome::Active)

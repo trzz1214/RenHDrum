@@ -23,7 +23,7 @@ use crate::valve::{
 };
 use crate::xbox::{XboxRumbleMapper, XboxRumbleTuning};
 
-pub const RENHDRUM_VERSION: u32 = 0x000600; // 0.6.0
+pub const RENHDRUM_VERSION: u32 = 0x000601; // 0.6.1
 
 pub const RENHDRUM_OK: i32 = 0;
 pub const RENHDRUM_ERR_NULL_PTR: i32 = -1;
@@ -800,6 +800,8 @@ pub struct RenHdcDualSenseDsp {
     pub(crate) bt_crisp_notes: bool,
     pub(crate) speaker_explicit: std::sync::atomic::AtomicBool,
     pub(crate) bt_auto_speaker: std::sync::atomic::AtomicBool,
+    /// Saved `dualsense_hd_haptics_off` read once from file at creation; live changes come from shared memory.
+    pub(crate) hd_off_saved: bool,
     pub(crate) valve_grip: std::sync::Mutex<ValveGripState>,
     pub(crate) trace: Option<std::sync::Mutex<crate::trace::RumbleTrace>>,
 }
@@ -929,19 +931,17 @@ pub unsafe extern "C" fn renhdrum_engine_push_sample(
             guard.push_sample(
                 now_us, left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
             );
-            if let Some(trace) = &(*engine).trace {
-                {
-                    let mut t = lock_recover(trace);
-                    t.log_sample_raw(
-                        now_us, false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh,
-                    );
-                    t.log_sample_raw(
-                        now_us, true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh,
-                    );
-                }
-            }
-            RENHDRUM_OK
         }
+        if let Some(trace) = &(*engine).trace {
+            let mut t = lock_recover(trace);
+            t.log_sample_raw(
+                now_us, false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh,
+            );
+            t.log_sample_raw(
+                now_us, true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh,
+            );
+        }
+        RENHDRUM_OK
     })
 }
 
@@ -987,15 +987,13 @@ pub unsafe extern "C" fn renhdrum_engine_push_half_sample(
         {
             let mut guard = lock_recover(&(*engine).inner);
             guard.push_half_sample(now_us, is_right, al, fl, ah, fh);
-            if let Some(trace) = &(*engine).trace {
-                {
-                    let mut t = lock_recover(trace);
-                    t.log_sample_raw(now_us, is_right, al, fl, ah, fh, raw_al, raw_ah);
-                }
-            }
-            crate::ipc::note_sample(u_now, al, fl, ah, fh);
-            RENHDRUM_OK
         }
+        if let Some(trace) = &(*engine).trace {
+            let mut t = lock_recover(trace);
+            t.log_sample_raw(now_us, is_right, al, fl, ah, fh, raw_al, raw_ah);
+        }
+        crate::ipc::note_sample(u_now, al, fl, ah, fh);
+        RENHDRUM_OK
     })
 }
 
@@ -1009,22 +1007,21 @@ pub unsafe extern "C" fn renhdrum_engine_tick(
         if engine.is_null() || out_packet10.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
-        {
+        let mut packet = [0u8; 10];
+        let ticked = {
             let mut guard = lock_recover(&(*engine).inner);
-            let mut packet = [0u8; 10];
-            if guard.tick(now_us, &mut packet) {
-                slice::from_raw_parts_mut(out_packet10, 10).copy_from_slice(&packet);
-                crate::ipc::note_packet(&packet);
-                if let Some(trace) = &(*engine).trace {
-                    {
-                        let mut t = lock_recover(trace);
-                        t.log_packet(now_us, &packet);
-                    }
-                }
-                1
-            } else {
-                0
+            guard.tick(now_us, &mut packet)
+        };
+        if ticked {
+            slice::from_raw_parts_mut(out_packet10, 10).copy_from_slice(&packet);
+            crate::ipc::note_packet(&packet);
+            if let Some(trace) = &(*engine).trace {
+                let mut t = lock_recover(trace);
+                t.log_packet(now_us, &packet);
             }
+            1
+        } else {
+            0
         }
     })
 }
@@ -1039,7 +1036,9 @@ pub extern "C" fn renhdrum_dualsense_dsp_create(
     crisp_notes: bool,
 ) -> *mut RenHdcDualSenseDsp {
     ffi_guard(std::ptr::null_mut(), || {
-        let (vol, crisp, bt_crisp) = if let Some(app) = crate::ipc::app_config() {
+        let app = crate::ipc::app_config();
+        let hd_off_saved = app.is_some_and(|c| c.dualsense_hd_haptics_off);
+        let (vol, crisp, bt_crisp) = if let Some(app) = app {
             (
                 app.dualsense_haptics_volume,
                 app.dualsense_crisp_notes,
@@ -1058,6 +1057,7 @@ pub extern "C" fn renhdrum_dualsense_dsp_create(
             bt_crisp_notes: bt_crisp,
             speaker_explicit: std::sync::atomic::AtomicBool::new(false),
             bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+            hd_off_saved,
             valve_grip: std::sync::Mutex::new(ValveGripState::default()),
             trace: crate::trace::RumbleTrace::open_in("dualsense", None).map(std::sync::Mutex::new),
         }))
@@ -1086,7 +1086,9 @@ pub extern "C" fn renhdrum_valve_grip_dsp_create_ex(
     drift_compensation: bool,
 ) -> *mut RenHdcDualSenseDsp {
     ffi_guard(std::ptr::null_mut(), || {
-        let (vol, crisp) = if let Some(app) = crate::ipc::app_config() {
+        let app = crate::ipc::app_config();
+        let hd_off_saved = app.is_some_and(|c| c.dualsense_hd_haptics_off);
+        let (vol, crisp) = if let Some(app) = app {
             (app.dualsense_haptics_volume, app.dualsense_crisp_notes)
         } else {
             (volume_percent, crisp_notes)
@@ -1097,6 +1099,7 @@ pub extern "C" fn renhdrum_valve_grip_dsp_create_ex(
             bt_crisp_notes: crisp,
             speaker_explicit: std::sync::atomic::AtomicBool::new(false),
             bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+            hd_off_saved,
             valve_grip: std::sync::Mutex::new(ValveGripState::new(drift_compensation)),
             trace: crate::trace::RumbleTrace::open_in("valve-grip", None)
                 .map(std::sync::Mutex::new),
@@ -1142,10 +1145,10 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_target(
             guard.set_target(
                 left_al, left_fl, left_ah, left_fh, right_al, right_fl, right_ah, right_fh,
             );
-            (*dsp).trace_half(false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh);
-            (*dsp).trace_half(true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh);
-            RENHDRUM_OK
         }
+        (*dsp).trace_half(false, left_al, left_fl, left_ah, left_fh, raw_l, raw_lh);
+        (*dsp).trace_half(true, right_al, right_fl, right_ah, right_fh, raw_r, raw_rh);
+        RENHDRUM_OK
     })
 }
 
@@ -1170,9 +1173,9 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_set_half_target(
         {
             let mut guard = lock_recover(&(*dsp).inner);
             guard.set_half_target(is_right, al, fl, ah, fh);
-            (*dsp).trace_half(is_right, al, fl, ah, fh, raw_al, raw_ah);
-            RENHDRUM_OK
         }
+        (*dsp).trace_half(is_right, al, fl, ah, fh, raw_al, raw_ah);
+        RENHDRUM_OK
     })
 }
 
@@ -1298,7 +1301,7 @@ pub unsafe extern "C" fn renhdrum_trigger_preset_destroy(h: *mut RenHdcTriggerPr
 }
 
 /// Sets or refreshes a trigger preset (`0..13`) with normalized intensity `level` (`0.0..=1.0`).
-/// Unknown IDs or `level <= 0` release to Off. Preset `12` fires a 100 ms impact pulse overlay.
+/// Unknown IDs or `level <= 0` release to Off. Preset `12` fires a 150 ms impact pulse overlay.
 /// Same monotonic clock as `renhdrum_trigger_preset_tick`. Null-safe.
 #[no_mangle]
 pub unsafe extern "C" fn renhdrum_trigger_preset_set(
@@ -1424,6 +1427,16 @@ pub unsafe extern "C" fn renhdrum_xbox_rumble_push_half_sample(
         }
         let low_amp = if low_amp.is_finite() { low_amp } else { 0.0 };
         let high_amp = if high_amp.is_finite() { high_amp } else { 0.0 };
+        let low_freq = if low_freq.is_finite() && low_freq > 0.0 {
+            low_freq
+        } else {
+            160.0
+        };
+        let high_freq = if high_freq.is_finite() && high_freq > 0.0 {
+            high_freq
+        } else {
+            320.0
+        };
         let (low_amp, high_amp) = crate::nx2::apply_xbox_nx2(low_amp, high_amp);
         {
             let mut guard = lock_recover(&(*rumble).inner);
@@ -1632,16 +1645,18 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt36_report(
         if dsp.is_null() || out_report398.is_null() {
             return RENHDRUM_ERR_NULL_PTR;
         }
+        let hd_off = crate::ipc::shared()
+            .and_then(|s| s.read_config())
+            .map_or((*dsp).hd_off_saved, |c| c.dualsense_hd_haptics_off);
         let mut packer = lock_recover(&(*dsp).bt_packer);
         let mut inner = lock_recover(&(*dsp).inner);
         if inner.crisp_notes != (*dsp).bt_crisp_notes {
             inner.set_crisp_notes((*dsp).bt_crisp_notes);
         }
-        let hd_off = crate::ipc::app_config().is_some_and(|c| c.dualsense_hd_haptics_off);
-        if !(*dsp)
+        let speaker_explicit = (*dsp)
             .speaker_explicit
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if !speaker_explicit {
             let target_pct = if hd_off {
                 0
             } else {
@@ -1660,7 +1675,9 @@ pub unsafe extern "C" fn renhdrum_dualsense_dsp_build_bt36_report(
             Some(&*(state47_or_null as *const [u8; DS5_EFFECTS_STATE_SIZE]))
         };
         let out = &mut *(out_report398 as *mut [u8; DS5_BT36_REPORT_SIZE]);
-        i32::from(packer.build36_with_speaker(&mut inner, state, !hd_off, out) != 0)
+        i32::from(
+            packer.build36_with_speaker(&mut inner, state, speaker_explicit || !hd_off, out) != 0,
+        )
     })
 }
 
@@ -1792,7 +1809,7 @@ mod tests {
 
     #[test]
     fn ffi_version() {
-        assert_eq!(renhdrum_version(), 0x000600);
+        assert_eq!(renhdrum_version(), 0x000601);
     }
 
     #[test]
@@ -2080,6 +2097,8 @@ mod tests {
             let mut report = [0u8; VALVE_GRIP_REPORT_SIZE];
             let mut skips = 0;
             for _ in 0..25_000 {
+                // keeps the 1 s silence watchdog quiet
+                renhdrum_dualsense_dsp_set_half_target(dsp, false, 0.5, 160.0, 0.0, 320.0);
                 if renhdrum_valve_grip_build_report(dsp, 8, report.as_mut_ptr()) == 2 {
                     skips += 1;
                 }
@@ -2416,6 +2435,7 @@ mod tests {
                 bt_crisp_notes: false,
                 speaker_explicit: std::sync::atomic::AtomicBool::new(false),
                 bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+                hd_off_saved: false,
                 valve_grip: std::sync::Mutex::new(ValveGripState::default()),
                 trace,
             };
@@ -2814,6 +2834,68 @@ mod tests {
             assert!(silent[33..].iter().all(|&b| b == 0));
 
             renhdrum_pro2_destroy(h);
+        }
+        crate::nx2::set_nx2_mode(0);
+    }
+
+    #[test]
+    fn bt36_respects_hd_off_saved_and_explicit_speaker() {
+        let mut dsp = RenHdcDualSenseDsp {
+            inner: std::sync::Mutex::new(DualSenseHapticsDsp::new(100, false)),
+            bt_packer: std::sync::Mutex::new(DualSenseBtPacker::default()),
+            bt_crisp_notes: false,
+            speaker_explicit: std::sync::atomic::AtomicBool::new(false),
+            bt_auto_speaker: std::sync::atomic::AtomicBool::new(false),
+            hd_off_saved: true,
+            valve_grip: std::sync::Mutex::new(ValveGripState::default()),
+            trace: None,
+        };
+        let ptr = std::ptr::addr_of_mut!(dsp);
+        let mut report = [0u8; DS5_BT36_REPORT_SIZE];
+        unsafe {
+            let rc = renhdrum_dualsense_dsp_build_bt36_report(
+                ptr,
+                std::ptr::null(),
+                0,
+                report.as_mut_ptr(),
+            );
+            assert!(rc >= 0);
+            assert!(!lock_recover(&dsp.inner).speaker_enabled());
+
+            assert_eq!(renhdrum_dualsense_dsp_set_speaker(ptr, 60), RENHDRUM_OK);
+            let rc2 = renhdrum_dualsense_dsp_build_bt36_report(
+                ptr,
+                std::ptr::null(),
+                0,
+                report.as_mut_ptr(),
+            );
+            assert!(rc2 >= 0);
+            assert!(lock_recover(&dsp.inner).speaker_enabled());
+        }
+    }
+
+    #[test]
+    fn xbox_rumble_push_nan_freq_does_not_nan_pitch() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::nx2::set_nx2_mode(0);
+        unsafe {
+            let r = renhdrum_xbox_rumble_create(false);
+            assert!(!r.is_null());
+            assert_eq!(
+                renhdrum_xbox_rumble_push_half_sample(r, 0, false, 0.5, f32::NAN, 0.25, f32::NAN),
+                RENHDRUM_OK
+            );
+            {
+                let guard = lock_recover(&(*r).inner);
+                assert!(!guard.band_pitch(0).is_nan());
+                assert!(!guard.band_pitch(1).is_nan());
+            }
+            let mut motors = [0u16; 4];
+            let rc = renhdrum_xbox_rumble_tick(r, 10_000, motors.as_mut_ptr());
+            assert!(rc >= 0);
+            renhdrum_xbox_rumble_destroy(r);
         }
         crate::nx2::set_nx2_mode(0);
     }

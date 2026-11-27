@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define RENHDRUM_VERSION 0x000600
+#define RENHDRUM_VERSION 0x000601
 
 #define RENHDRUM_OK 0
 #define RENHDRUM_ERR_NULL_PTR -1
@@ -19,7 +19,7 @@ extern "C" {
 typedef struct RenHdcSettings {
     bool enabled;
     int32_t usb_interval_ms;
-    int32_t bluetooth_level; /* 1-4, 4 = Compatible (default) */
+    int32_t bluetooth_level; /* 1-4 (1 = NULL config default; Standard preset / options sets 4) */
     bool usb_auto_slow;
     bool sync_to_input;
     bool click_pulse;
@@ -125,7 +125,8 @@ float renhdrum_store_shape_amplitude(const RenHdcStore *s, float amplitude);
 /* Xbox "Direct" mode (store key xbox_mode = 1). Returns a mask: bit 0 = send grips out_motors4[0..2]
    (SDL_RumbleJoystick, 2000 ms), bit 1 = send triggers out_motors4[2..4] (SDL_RumbleJoystickTriggers,
    2000 ms), 0 = nothing to send, <0 = error. Pass raw game amplitudes; gain / low_boost / xbox_* come
-   from the store. `triggers`: the pad has trigger motors the host drives. */
+   from the store. `triggers`: the pad has trigger motors the host drives.
+   One handle per pad; push and tick may run on different threads. */
 typedef struct RenHdcXboxDirect RenHdcXboxDirect;
 RenHdcXboxDirect *renhdrum_xbox_direct_create(void);
 void renhdrum_xbox_direct_destroy(RenHdcXboxDirect *d);
@@ -415,7 +416,7 @@ void renhdrum_tri_trigger_note_action(RenHdcTriTrigger *h, uint32_t now_ms);
 #define RENHDRUM_TRIG_WHEELSPIN    9  /* Wheelspin / drift vibration (stops after 5 s) */
 #define RENHDRUM_TRIG_THROTTLE     10 /* Throttle pedal: light continuous curve (capped at strength 4) */
 #define RENHDRUM_TRIG_HEAVY_LOAD   11 /* Heavy load: carrying weight / raised shield (caps after 12 s) */
-#define RENHDRUM_TRIG_IMPACT_PULSE 12 /* One-shot 100 ms impact pulse overlay (>= 80 ms gap) */
+#define RENHDRUM_TRIG_IMPACT_PULSE 12 /* One-shot 150 ms impact pulse overlay (>= 80 ms gap) */
 #define RENHDRUM_TRIG_ENGINE_ROUGH 13 /* Engine / rough surface vibration (caps after 10 s) */
 typedef struct RenHdcTriggerPreset RenHdcTriggerPreset;
 RenHdcTriggerPreset *renhdrum_trigger_preset_create(void);

@@ -32,6 +32,8 @@ pub const DUALSENSE_CHANNELS: usize = 4;
 pub const DUALSENSE_LEFT_CHANNEL: usize = 2; // channel 3: rear left actuator
 pub const DUALSENSE_RIGHT_CHANNEL: usize = 3; // channel 4: rear right actuator
 pub const DUALSENSE_BUFFER_FRAMES: usize = 256;
+/// Frames without a new target before the DSP goes silent: = `SILENCE_WATCHDOG_MS` (1 s) at 48 kHz (DECISIONS 27/11).
+pub const DS_SILENCE_WATCHDOG_FRAMES: u32 = 48_000;
 pub const DUALSENSE_SMOOTHING_MS: f64 = 4.0;
 pub const DUALSENSE_MIN_FREQUENCY: f32 = 20.0;
 pub const DUALSENSE_MAX_FREQUENCY: f32 = 1000.0;
@@ -144,6 +146,8 @@ pub struct DualSenseHapticsDsp {
     latest_raw_right: HdSideSample,
     slot_dirty_left: bool,
     slot_dirty_right: bool,
+    /// Frames since the game last set a target (counted per slot).
+    frames_since_set: u32,
 
     voice_left: DualSenseVoice,
     voice_right: DualSenseVoice,
@@ -184,6 +188,7 @@ impl DualSenseHapticsDsp {
             latest_raw_right: HdSideSample::default(),
             slot_dirty_left: false,
             slot_dirty_right: false,
+            frames_since_set: 0,
             voice_left: DualSenseVoice {
                 freq_low: DUALSENSE_DEFAULT_LOW_FREQUENCY,
                 freq_high: DUALSENSE_DEFAULT_HIGH_FREQUENCY,
@@ -276,6 +281,7 @@ impl DualSenseHapticsDsp {
             self.raw_left = raw;
         }
         self.slot_dirty_left = true;
+        self.frames_since_set = 0;
     }
 
     fn update_side_right(&mut self, al: f32, fl: f32, ah: f32, fh: f32) {
@@ -291,6 +297,7 @@ impl DualSenseHapticsDsp {
             self.raw_right = raw;
         }
         self.slot_dirty_right = true;
+        self.frames_since_set = 0;
     }
 
     pub fn set_target(
@@ -446,6 +453,20 @@ impl DualSenseHapticsDsp {
 
     /// Ryuhdr DualSenseHaptics.Fill, top part: one slot = one 256-frame callback there.
     fn start_slot(&mut self) {
+        self.frames_since_set = self
+            .frames_since_set
+            .saturating_add(DUALSENSE_BUFFER_FRAMES as u32);
+        if self.frames_since_set >= DS_SILENCE_WATCHDOG_FRAMES {
+            let silent = make_side(0.0, 0.0, 0.0, 0.0);
+            self.target_left = silent;
+            self.target_right = silent;
+            self.latest_left = silent;
+            self.latest_right = silent;
+            self.raw_left = HdSideSample::default();
+            self.raw_right = HdSideSample::default();
+            self.latest_raw_left = HdSideSample::default();
+            self.latest_raw_right = HdSideSample::default();
+        }
         if self.speaker_gain > 0.0 {
             self.spk_left.start_slot(&self.raw_left);
             self.spk_right.start_slot(&self.raw_right);
@@ -782,6 +803,48 @@ mod tests {
         for chunk in [1, 64, 224, 480, 1024, 2048] {
             assert_eq!(run(chunk), reference, "chunk {chunk}");
         }
+    }
+
+    #[test]
+    fn test_silence_watchdog_stops_after_1s() {
+        let _g = crate::nx2::NX2_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Peak |amplitude| of the actuator channels over the 256-frame block at `ms`.
+        let run = |set_every_frames: Option<usize>| {
+            let mut dsp = DualSenseHapticsDsp::new(100, false);
+            dsp.set_target(0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+            let mut buf = [0.0f32; DUALSENSE_BUFFER_FRAMES * DUALSENSE_CHANNELS];
+            let (mut at_900, mut at_1400) = (0.0f32, 0.0f32);
+            for block in 0..(1500 * 48 / DUALSENSE_BUFFER_FRAMES) {
+                if let Some(n) = set_every_frames {
+                    if block * DUALSENSE_BUFFER_FRAMES % n < DUALSENSE_BUFFER_FRAMES {
+                        dsp.set_target(0.5, 160.0, 0.0, 320.0, 0.5, 160.0, 0.0, 320.0);
+                    }
+                }
+                dsp.fill_interleaved_f32(&mut buf);
+                let peak = buf
+                    .chunks(DUALSENSE_CHANNELS)
+                    .map(|f| {
+                        f[DUALSENSE_LEFT_CHANNEL]
+                            .abs()
+                            .max(f[DUALSENSE_RIGHT_CHANNEL].abs())
+                    })
+                    .fold(0.0f32, f32::max);
+                if block == 900 * 48 / DUALSENSE_BUFFER_FRAMES {
+                    at_900 = peak;
+                }
+                if block == 1400 * 48 / DUALSENSE_BUFFER_FRAMES {
+                    at_1400 = peak;
+                }
+            }
+            (at_900, at_1400)
+        };
+        let (a900, a1400) = run(None);
+        assert!(a900 > 0.01, "still rumbling at 0.9 s: {a900}");
+        assert!(a1400 < 1e-3, "silent at 1.4 s: {a1400}");
+        let (b900, b1400) = run(Some(240)); // set every 5 ms
+        assert!(b900 > 0.01 && b1400 > 0.01, "{b900} {b1400}");
     }
 
     #[test]
