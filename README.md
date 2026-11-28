@@ -2,78 +2,35 @@
 
 # RenHDrum
 
-[![CI](https://github.com/trzz1214/RenHDrum/actions/workflows/ci.yml/badge.svg)](https://github.com/trzz1214/RenHDrum/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](NOTICE)
-[![Website](https://img.shields.io/badge/Website-Research_Notebook-success)](https://ryuhdr.threedola.workers.dev)
+**I built RenHDrum to rebuild Switch HD Rumble every 5 ms and play every note, click, and texture on the controller you already own.**
 
-**Feel every note, click and texture a game puts into its vibration, on the controller you already own.**
+[![CI](https://github.com/trzz1214/RenHDrum/actions/workflows/ci.yml/badge.svg)](https://github.com/trzz1214/RenHDrum/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](NOTICE) [![Website](https://img.shields.io/badge/Website-Research_Notebook-success)](https://ryuhdr.threedola.workers.dev)
 
-Switch games don't just "buzz". They send detailed vibration called [HD Rumble](https://ryuhdr.threedola.workers.dev/compare.html): tiny notes, footsteps, clicks, rain. Most emulators flatten that into a plain rumble. RenHDrum is a small open-source engine that rebuilds the detail, every 5 ms, and plays it on a Pro Controller, a DualSense, an Xbox controller or a Steam Controller.
+**[New here? Read the overview](https://ryuhdr.threedola.workers.dev/overview.html)** · **[Get the builds](https://ryuhdr.threedola.workers.dev/#download)** · **[For developers](#for-developers)**
 
-```mermaid
-flowchart LR
-    A["Game<br/>sends HD Rumble"] --> B["Emulator<br/>or PC port"] --> C["RenHDrum<br/>rebuilds the detail"] --> D["Your controller"]
-```
-
-> [!TIP]
-> **New to RenHDrum?** Read the **[Getting Started & FAQ guide](docs/GETTING-STARTED.md)** first.
->
-> **Just want to play?** Ready-made test builds with RenHDrum already inside, for Switch 1, Switch 2 and recompiled PC ports, are all on the website.
->
-> **[Get the builds &rarr;](https://ryuhdr.threedola.workers.dev/#download)**
->
-> They are my personal experiments, not official releases. This repository contains no emulator binaries, games or keys.
+<p align="center"><img src="docs/assets/motors.webp" alt="Three controller motor types: voice coils (VCM) in DualSense, linear resonant actuator (LRA) in Switch Pro, and spinning eccentric motors (ERM) in Xbox" width="100%"></p>
+<p align="center"><sub>DualSense = voice coils (VCM), Pro Controller = linear resonant actuator (LRA), Xbox = spinning eccentric motors (ERM); each feels different, and I tuned RenHDrum to speak each one's language.</sub></p>
 
 ## Supported controllers
 
 | Controller | USB | Bluetooth | What you feel |
 |---|:---:|:---:|---|
-| Sony DualSense | ✅ | ✅ | **HD Haptics**: rumble, speaker and L2/R2 triggers together, on by default ([details](docs/integration/dualsense.md#6-hd-haptics-motors-speaker-and-triggers)) |
-| Nintendo Switch Pro Controller | ✅ | ✅ | Full HD Rumble ([how Bluetooth is handled](docs/research/03-bluetooth-congestion-and-pacing.md)) |
-| Xbox One / Series | ✅ | ✅ | HD Rumble [translated to four motors](docs/research/10-xbox-one-rumble.md) (tested on Xbox One S) |
+| Sony DualSense | ✅ | ✅ | **HD Haptics**: motors, speaker, triggers ([details](docs/integration/dualsense.md#6-hd-haptics-motors-speaker-and-triggers)) |
+| Nintendo Switch Pro Controller | ✅ | ✅ | Full HD Rumble ([Bluetooth pacing](docs/research/03-bluetooth-congestion-and-pacing.md)) |
+| Xbox One / Series | ✅ | ✅ | HD Rumble [translated to four motors](docs/research/10-xbox-one-rumble.md) |
 | Steam Controller (2026) | ✅ | ✅ | Grips only, experimental |
-| 🧪 Switch 2 Pro Controller (USB + Bluetooth, experimental) | 🧪 | 🧪 | HD Rumble 2 (USB in Brontide-NS2 & Longshot, and other recomp ports when their SDL3 has patch `0003` + libusb; Bluetooth in Brontide-NS2 only; close Steam completely; Windows 11 recommended) |
+| 🧪 Switch 2 Pro Controller | 🧪 | 🧪 | Experimental, see [website](https://ryuhdr.threedola.workers.dev/pro2-controller.html); have one? [help test it](https://github.com/trzz1214/RenHDrum/issues/new?template=controller-test.yml) |
 
-### HD Haptics on the DualSense
+**HD Haptics on the DualSense** splits Switch HD Rumble across studio-tuned motors, speaker taps (via built-in Opus over Bluetooth), and L2/R2 trigger kicks — see [DualSense integration](docs/integration/dualsense.md#6-hd-haptics-motors-speaker-and-triggers).
 
-HD Haptics is HD Rumble upgraded for the DualSense. The game still only sends HD Rumble; RenHDrum splits it between the three parts of the controller, with one rule for every game:
-
-- **Motors**, studio style: heavy hits and explosions sink to 75 Hz for a deeper thump.
-- **Speaker**: taps by kind of sound (rain, gravel, metal) and stays quiet when the game plays music notes.
-- **L2/R2 triggers**: kick back only while you hold them.
-
-| | Wired | Bluetooth |
-|---|:---:|:---:|
-| Rumble | ✅ | ✅ |
-| Triggers | ✅ | ✅ |
-| Speaker | ✅ | ✅ |
-
-DualSense over Bluetooth still gets rumble, speaker and triggers, with nothing extra to install: the speaker sound is compressed with Opus inside the controller report, and the encoder is built into `renhdrum.dll`. HD Haptics is on by default; turn it off in the HD Rumble settings to get exactly the previous DualSense rumble.
-
-<p align="center">
-<img src="docs/assets/hd-rumble-panel-dark.png" alt="The HD Rumble settings panel, dark theme" width="48%">
-<img src="docs/assets/hd-rumble-panel-light.png" alt="The HD Rumble settings panel, light theme" width="48%">
-</p>
-
-Where it runs today: **Brontide-NS2**, **Brontide** (Switch 1), and **Longshot** are on the [website](https://ryuhdr.threedola.workers.dev/#download). **[dkb-pc-recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases)** and **[mkw-recomp](https://github.com/adriadam10/mkw-recomp/releases)** now include their own RenHDrum 0.5 bridge (`mkw-recomp` downloads `renhdrum.dll` **0.5.0** from its launcher; for `dkb-pc-recomp`, place [`renhdrum.dll` **0.5.0**](https://github.com/trzz1214/RenHDrum/releases/download/v0.5.0/renhdrum.dll) next to `dkb.exe` — `0.6.0` is rejected by the 0.5 bridge). **totk-pc-recomp** is currently being updated.
-
-> [!NOTE]
-> **🧪 Switch 2 Pro Controller (USB + Bluetooth, experimental)**: USB HD Rumble 2 is active in **Brontide-NS2** and **Longshot**, and in other recomp PC ports when their SDL3 includes patch `0003` + libusb; **Bluetooth** is currently only in **Brontide-NS2**. Close Steam completely before playing, and use **Windows 11** for Bluetooth if possible (Windows 10 Bluetooth writes take 50–60 ms, making rumble coarser). I do not own a Switch 2 Pro Controller, so I have not tested this on real hardware — if you have one, run **Test rumble** in Brontide-NS2, press **Copy report**, and paste it into the [controller test form](https://github.com/trzz1214/RenHDrum/issues/new?template=controller-test.yml).
-
-Joy-Con 2, Steam Controller (2015) and Steam Deck are still in research, so please hold issues for them for now.
-
-## Learn more
-
-- **The story and the measurements**: the [website](https://ryuhdr.threedola.workers.dev) explains how HD Rumble works, in plain words.
-- **The deep research**: [eleven write-ups](docs/research/README.md) on the packet format, the [5 ms envelope](docs/research/02-amfm-multisample-and-crisp-notes.md), [Switch 2 games](docs/research/11-switch2-hd-rumble.md) and more.
+**Where it runs:** **Brontide**, **Brontide-NS2**, **Longshot**, **dkb-pc-recomp**, and **mkw-recomp** — grab ready-made builds on the [website](https://ryuhdr.threedola.workers.dev/#download) or read the [Getting Started & FAQ guide](docs/GETTING-STARTED.md).
 
 ## For developers
 
-RenHDrum is written in Rust (the Opus encoder for the DualSense speaker is built into the DLL, nothing extra to install) and exposes a small C ABI (`renhdrum.dll` + [`include/renhdrum.h`](include/renhdrum.h)), so any C, C++ or C# host can load it.
+RenHDrum is written in Rust (with the Opus encoder built into the DLL) and exposes a small C ABI (`renhdrum.dll` + [`include/renhdrum.h`](include/renhdrum.h)) so any C, C++, or C# host can load it.
 
-- Start here: [C++ / SDL3 host guide](docs/integration/sdl3-host.md) (the hook in 6 steps) or [C# host guide](docs/integration/csharp-host.md)
-- Other hosts: [recompiled PC ports](docs/integration/recomp-games.md) · [Switch 2 games](docs/integration/switch2-games.md)
-- Every function: [C ABI reference](docs/integration/c-abi-reference.md)
+- Start here: [C++ / SDL3 host guide](docs/integration/sdl3-host.md) or [C# host guide](docs/integration/csharp-host.md)
+- Other hosts: [recompiled PC ports](docs/integration/recomp-games.md) · [Switch 2 games](docs/integration/switch2-games.md) · [C ABI reference](docs/integration/c-abi-reference.md) · [eleven research write-ups](docs/research/README.md)
 
 ```bash
 cargo test                 # all tests
@@ -88,9 +45,7 @@ RenHDrum/
 ├── include/        renhdrum.h, the C header hosts include
 ├── examples/       Minimal C and C# hosts
 ├── integrations/   Ready patches: SDL3, emulator hooks, recomp bridge
-├── docs/
-│   ├── integration/   How to add RenHDrum to a host
-│   └── research/      How and why it works
+├── docs/           Integration guides, research write-ups, and assets
 └── tests/          Regression, golden waveform and guardrail tests
 ```
 
@@ -107,11 +62,7 @@ What each person contributed, and what was copied or only referenced: [docs/CRED
 
 ## Using RenHDrum in your project
 
-You're welcome to. Keep the license notice, and a short credit is appreciated:
-
-> HD Rumble by RenHDrum (Three-Dola), https://github.com/trzz1214/RenHDrum
-
-Details for code, docs and citations: [how to credit](docs/CREDITS.md#reusing-renhdrum).
+You're welcome to. Keep the license notice, and a short credit is appreciated (`HD Rumble by RenHDrum (Three-Dola), https://github.com/trzz1214/RenHDrum`) — see [how to credit](docs/CREDITS.md#reusing-renhdrum).
 
 ## License
 
@@ -121,12 +72,8 @@ Core: MIT OR Apache-2.0. Docs and website text: CC BY 4.0. Patches keep their up
 
 ---
 
-<p align="center">
-Built by Three-Dola with help from Claude and Gemini · <a href="https://ko-fi.com/threedola">Support on Ko-fi</a>
-</p>
-
-<details>
-<summary>Other ways to support</summary>
+<p align="center">Built by Three-Dola with help from Claude and Gemini · <a href="https://ko-fi.com/threedola">Support on Ko-fi</a></p>
+<details><summary>Other ways to support</summary>
 
 - USDT (BEP20, BNB Smart Chain): `0x2fac84f94d05c550ed604f5867da62ac1bba7f7c`
 - USDT (TRC20, Tron): `TAAEy72WPFAJ5h3g8GYFnZ7bm7CDnTuwTS`

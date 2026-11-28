@@ -36,11 +36,11 @@ Rules that prevent most setup issues:
 | Steam Controller (2026) | yes | yes | Grips only, experimental |
 | 🧪 Switch 2 Pro Controller | 🧪 | 🧪 (Brontide-NS2 only) | HD Rumble 2, experimental |
 
-Switch 2 Pro: USB HD Rumble 2 works in Brontide-NS2 and Longshot (and other recomp ports when their SDL3 includes patch `0003` + libusb). Bluetooth works in Brontide-NS2 only (Windows 11 recommended, and close Steam completely). I do not own one, so please report how it feels.
+Switch 2 Pro: USB HD Rumble 2 works in Brontide-NS2 and Longshot (and other recomp ports when their SDL3 includes patch `0003` + libusb). Bluetooth works in Brontide-NS2 only (Windows 11 recommended — Windows 10 Bluetooth writes take 50–60 ms, making rumble coarser — and close Steam completely). I do not own one, so if you have one, run **Test rumble** in Brontide-NS2, press **Copy report**, and paste it into the [controller test form](https://github.com/trzz1214/RenHDrum/issues/new?template=controller-test.yml) (see Section 7).
 
 **Try a USB cable first.** It is the simplest and most tested path. Once USB works, try Bluetooth.
 
-Not supported yet: **Steam Controller (2015)** and **Steam Deck** (still in research).
+Not supported yet: **Joy-Con 2**, **Steam Controller (2015)** and **Steam Deck** (still in research).
 
 ## 4. Setup, step by step
 
